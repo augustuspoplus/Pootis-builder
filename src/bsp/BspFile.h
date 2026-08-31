@@ -51,6 +51,9 @@ public:
     // texdata string resolved to a material path, lowercase, forward slashes.
     std::string materialName(int texdataIndex) const;
 
+    // Material texture dimensions vbsp used when it baked texture UVs.
+    bool texdataDims(int texdataIndex, int& width, int& height) const;
+
     const std::vector<Entity>& entities() const { return entities_; }
     const Entity* worldspawn() const {
         return entities_.empty() ? nullptr : &entities_.front();

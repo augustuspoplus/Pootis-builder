@@ -284,10 +284,17 @@ WorldMesh buildWorldMesh(const BspFile& bsp, const MeshBuildOptions& opts) {
     // ---- pass 2: emit geometry, grouped by material -----------------
     std::unordered_map<std::string, std::vector<uint32_t>> opaqueIdx, transIdx;
     auto addPolyVertex = [&](const Face_t& face, const TexInfo_t& ti,
-                             const glm::vec3& p, const glm::vec3& n, const EmitFace& ef) {
+                             const glm::vec3& p, const glm::vec3& n, const EmitFace& ef,
+                             float texW, float texH) {
         WorldVertex v;
         v.pos = p;
         v.normal = n;
+        v.texUv = {
+            (p.x * ti.textureVecs[0][0] + p.y * ti.textureVecs[0][1] +
+             p.z * ti.textureVecs[0][2] + ti.textureVecs[0][3]) / texW,
+            (p.x * ti.textureVecs[1][0] + p.y * ti.textureVecs[1][1] +
+             p.z * ti.textureVecs[1][2] + ti.textureVecs[1][3]) / texH,
+        };
         if (ef.lit) {
             float lu = p.x * ti.lightmapVecs[0][0] + p.y * ti.lightmapVecs[0][1] +
                        p.z * ti.lightmapVecs[0][2] + ti.lightmapVecs[0][3];
@@ -360,10 +367,17 @@ WorldMesh buildWorldMesh(const BspFile& bsp, const MeshBuildOptions& opts) {
                                  mat.find("water") != std::string::npos;
         auto& bucket = translucent ? transIdx[mat] : opaqueIdx[mat];
 
+        int tw = 0, th = 0;
+        if (!bsp.texdataDims(ti.texdata, tw, th)) {
+            tw = 256;
+            th = 256;
+        }
+
         std::vector<uint32_t> ring;
         ring.reserve(poly.size());
         for (const glm::vec3& p : poly) {
-            ring.push_back(addPolyVertex(face, ti, p, n, ef));
+            ring.push_back(addPolyVertex(face, ti, p, n, ef, static_cast<float>(tw),
+                                         static_cast<float>(th)));
             bmin = glm::min(bmin, p);
             bmax = glm::max(bmax, p);
         }
@@ -415,6 +429,26 @@ WorldMesh buildWorldMesh(const BspFile& bsp, const MeshBuildOptions& opts) {
         mesh.pointEntities.push_back(std::move(pe));
     }
     parseStaticProps(bsp, mesh);
+
+    // Representative spawn point for the default 3D camera.
+    for (const char* cls : {"info_player_teamspawn", "info_player_start",
+                            "info_player_deathmatch", "info_observer_point"}) {
+        for (const auto& ent : bsp.entities()) {
+            auto cit = ent.find("classname");
+            if (cit == ent.end() || cit->second != cls) continue;
+            auto oit = ent.find("origin");
+            if (oit == ent.end()) continue;
+            mesh.spawnPos = parseVec3(oit->second) + glm::vec3(0, 0, 64);
+            auto ait = ent.find("angles");
+            if (ait != ent.end()) {
+                glm::vec3 a = parseVec3(ait->second);
+                mesh.spawnYaw = a.y;  // pitch yaw roll
+            }
+            mesh.hasSpawn = true;
+            break;
+        }
+        if (mesh.hasSpawn) break;
+    }
 
     // Trimmed playable bounds from point-entity positions (robust against the
     // 3D skybox, which sits far from the real map).

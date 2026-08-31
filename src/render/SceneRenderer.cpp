@@ -12,33 +12,41 @@ namespace {
 const char* kWorldVert = R"(#version 330 core
 layout(location=0) in vec3 aPos;
 layout(location=1) in vec3 aNormal;
-layout(location=2) in vec2 aUV;
-layout(location=3) in vec3 aTint;
+layout(location=2) in vec2 aLmUV;
+layout(location=3) in vec2 aTexUV;
+layout(location=4) in vec3 aTint;
 uniform mat4 uMVP;
-out vec2 vUV;
+out vec2 vLmUV;
+out vec2 vTexUV;
 out vec3 vTint;
 void main() {
-    vUV = aUV;
+    vLmUV = aLmUV;
+    vTexUV = aTexUV;
     vTint = aTint;
     gl_Position = uMVP * vec4(aPos, 1.0);
 }
 )";
 
 const char* kWorldFrag = R"(#version 330 core
-in vec2 vUV;
+in vec2 vLmUV;
+in vec2 vTexUV;
 in vec3 vTint;
-uniform sampler2D uLightmap;
+uniform sampler2D uLightmap;   // unit 0
+uniform sampler2D uAlbedo;     // unit 1
 uniform float uExposure;
-uniform int uLightingOnly;
+uniform int uShadeMode;        // 0 tex+lm, 1 lightmap grid, 2 flat, 3 tex fullbright
+uniform int uAlphaTest;
 out vec4 fragColor;
 void main() {
-    vec3 base;
-    if (uLightingOnly == 1) {
-        base = texture(uLightmap, vUV).rgb * vTint;
-    } else {
-        base = vTint;
-    }
-    fragColor = vec4(base * uExposure, 1.0);
+    vec4 alb = texture(uAlbedo, vTexUV);
+    if (uAlphaTest == 1 && alb.a < 0.5) discard;
+    vec3 lm = texture(uLightmap, vLmUV).rgb;
+    vec3 c;
+    if (uShadeMode == 0)      c = alb.rgb * lm * vTint;
+    else if (uShadeMode == 1) c = lm * vTint;
+    else if (uShadeMode == 2) c = vTint * 0.72 + 0.14;
+    else                      c = alb.rgb;
+    fragColor = vec4(c * uExposure, 1.0);
 }
 )";
 
@@ -98,11 +106,13 @@ void SceneRenderer::clearWorld() {
     worldVao_ = worldVbo_ = worldEbo_ = wireVao_ = wireVbo_ = lightmapTex_ = 0;
     indexCount_ = wireCount_ = 0;
     batches_.clear();
+    batchTex_.clear();
+    batchAlpha_.clear();
     props_.clear();
     pointEntities_.clear();
 }
 
-void SceneRenderer::upload(const WorldMesh& mesh) {
+void SceneRenderer::upload(const WorldMesh& mesh, MaterialLibrary* materials) {
     clearWorld();
     batches_ = mesh.batches;
     props_ = mesh.props;
@@ -132,10 +142,24 @@ void SceneRenderer::upload(const WorldMesh& mesh) {
         glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, stride,
                               (void*)offsetof(WorldVertex, uv));
         glEnableVertexAttribArray(3);
-        glVertexAttribPointer(3, 3, GL_FLOAT, GL_FALSE, stride,
+        glVertexAttribPointer(3, 2, GL_FLOAT, GL_FALSE, stride,
+                              (void*)offsetof(WorldVertex, texUv));
+        glEnableVertexAttribArray(4);
+        glVertexAttribPointer(4, 3, GL_FLOAT, GL_FALSE, stride,
                               (void*)offsetof(WorldVertex, tint));
         glBindVertexArray(0);
         indexCount_ = static_cast<GLsizei>(mesh.indices.size());
+    }
+
+    // Resolve a GL albedo texture per draw batch.
+    batchTex_.assign(batches_.size(), 0);
+    batchAlpha_.assign(batches_.size(), 0);
+    if (materials && materials->ready()) {
+        for (size_t i = 0; i < batches_.size(); ++i) {
+            const auto& info = materials->get(batches_[i].material);
+            batchTex_[i] = info.texture;
+            batchAlpha_[i] = info.alphaTest ? 1 : (batches_[i].translucent ? 2 : 0);
+        }
     }
 
     if (!mesh.wireLines.empty()) {
@@ -170,22 +194,28 @@ void SceneRenderer::drawSolid(const glm::mat4& vp, const RenderSettings& s) {
     worldShader_.use();
     worldShader_.set("uMVP", vp);
     worldShader_.set("uExposure", s.exposure);
-    worldShader_.set("uLightingOnly", s.lightingOnly ? 1 : 0);
+    worldShader_.set("uShadeMode", static_cast<int>(s.shadeMode));
     worldShader_.set("uLightmap", 0);
+    worldShader_.set("uAlbedo", 1);
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, lightmapTex_);
 
     glEnable(GL_DEPTH_TEST);
     glBindVertexArray(worldVao_);
-    for (const auto& b : batches_) {
-        if (b.translucent) {
+    for (size_t i = 0; i < batches_.size(); ++i) {
+        const auto& b = batches_[i];
+        const uint8_t alpha = i < batchAlpha_.size() ? batchAlpha_[i] : 0;
+        glActiveTexture(GL_TEXTURE1);
+        glBindTexture(GL_TEXTURE_2D, i < batchTex_.size() ? batchTex_[i] : 0);
+        worldShader_.set("uAlphaTest", alpha == 1 ? 1 : 0);
+        if (alpha == 2) {
             glEnable(GL_BLEND);
             glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
             glDepthMask(GL_FALSE);
         }
         glDrawElements(GL_TRIANGLES, b.indexCount, GL_UNSIGNED_INT,
                        (void*)(b.firstIndex * sizeof(uint32_t)));
-        if (b.translucent) {
+        if (alpha == 2) {
             glDepthMask(GL_TRUE);
             glDisable(GL_BLEND);
         }
@@ -203,42 +233,70 @@ void SceneRenderer::drawWire(const glm::mat4& vp, const glm::vec3& color, float 
     glBindVertexArray(0);
 }
 
-void SceneRenderer::drawGrid(const glm::mat4& vp, ViewKind kind) {
-    if (!gridVao_ || gridCount_ == 0) return;
-    glm::mat4 model(1.0f);
-    if (kind == ViewKind::Front)  // XY grid -> XZ plane
-        model = glm::rotate(glm::mat4(1.0f), glm::radians(90.0f), glm::vec3(1, 0, 0));
-    else if (kind == ViewKind::Side)  // XY grid -> YZ plane
-        model = glm::rotate(glm::mat4(1.0f), glm::radians(90.0f), glm::vec3(0, 1, 0));
+void SceneRenderer::drawGrid(const Camera& cam, const glm::mat4& vp, float aspect) {
+    // Hammer-style adaptive 2D grid drawn directly on the view plane.
+    const glm::vec3 rt = cam.orthoRightAxis();
+    const glm::vec3 up = cam.orthoUpAxis();
+    const float halfV = cam.orthoHalfHeight;
+    const float halfH = halfV * (aspect <= 0.0f ? 1.0f : aspect);
+    const float cU = glm::dot(cam.orthoCenter, rt);
+    const float cV = glm::dot(cam.orthoCenter, up);
+
+    // Minor spacing: smallest power-of-two Hammer grid that stays >= ~7px.
+    float step = 1.0f;
+    const float targetWorld = (halfV * 2.0f) / 90.0f;
+    while (step < targetWorld && step < 8192.0f) step *= 2.0f;
+
+    auto lineU = [&](float u, float v0, float v1, std::vector<glm::vec3>& out) {
+        out.push_back(cam.orthoCenter + rt * (u - cU) + up * (v0 - cV));
+        out.push_back(cam.orthoCenter + rt * (u - cU) + up * (v1 - cV));
+    };
+    auto lineV = [&](float v, float u0, float u1, std::vector<glm::vec3>& out) {
+        out.push_back(cam.orthoCenter + rt * (u0 - cU) + up * (v - cV));
+        out.push_back(cam.orthoCenter + rt * (u1 - cU) + up * (v - cV));
+    };
+
+    const float uMin = cU - halfH, uMax = cU + halfH;
+    const float vMin = cV - halfV, vMax = cV + halfV;
+
+    std::vector<glm::vec3> minor, major;
+    const float majorStep = step * 8.0f;
+    auto emit = [&](float s, std::vector<glm::vec3>& dst) {
+        for (float u = std::ceil(uMin / s) * s; u <= uMax; u += s) lineU(u, vMin, vMax, dst);
+        for (float v = std::ceil(vMin / s) * s; v <= vMax; v += s) lineV(v, uMin, uMax, dst);
+    };
+    emit(step, minor);
+    emit(majorStep, major);
 
     lineShader_.use();
-    lineShader_.set("uMVP", vp * model);
-    lineShader_.set("uColor", glm::vec4(0.32f, 0.34f, 0.37f, 0.5f));
-    glBindVertexArray(gridVao_);
-    glDrawArrays(GL_LINES, 0, gridCount_);
-
-    // Axis lines through the origin.
-    std::vector<glm::vec3> axes = {
-        {-8192, 0, 0}, {8192, 0, 0}, {0, -8192, 0}, {0, 8192, 0}, {0, 0, -8192}, {0, 0, 8192}};
     glBindVertexArray(markerVao_);
     glBindBuffer(GL_ARRAY_BUFFER, markerVbo_);
-    glBufferData(GL_ARRAY_BUFFER, axes.size() * sizeof(glm::vec3), axes.data(),
-                 GL_DYNAMIC_DRAW);
     glEnableVertexAttribArray(0);
     glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(glm::vec3), nullptr);
-    lineShader_.set("uMVP", vp);
-    lineShader_.set("uColor", glm::vec4(0.45f, 0.30f, 0.30f, 0.7f));
-    glDrawArrays(GL_LINES, 0, 2);
-    lineShader_.set("uColor", glm::vec4(0.30f, 0.45f, 0.30f, 0.7f));
-    glDrawArrays(GL_LINES, 2, 2);
-    lineShader_.set("uColor", glm::vec4(0.30f, 0.35f, 0.5f, 0.7f));
-    glDrawArrays(GL_LINES, 4, 2);
+
+    auto blast = [&](std::vector<glm::vec3>& v, const glm::vec4& col) {
+        if (v.empty()) return;
+        glBufferData(GL_ARRAY_BUFFER, v.size() * sizeof(glm::vec3), v.data(),
+                     GL_DYNAMIC_DRAW);
+        lineShader_.set("uMVP", vp);
+        lineShader_.set("uColor", col);
+        glDrawArrays(GL_LINES, 0, static_cast<GLsizei>(v.size()));
+    };
+    blast(minor, glm::vec4(0.16f, 0.16f, 0.18f, 1.0f));
+    blast(major, glm::vec4(0.28f, 0.28f, 0.32f, 1.0f));
+
+    // World axes through the origin, in Hammer orange.
+    std::vector<glm::vec3> axes;
+    lineU(0.0f, vMin, vMax, axes);
+    lineV(0.0f, uMin, uMax, axes);
+    blast(axes, glm::vec4(0.62f, 0.34f, 0.14f, 1.0f));
+
     glBindVertexArray(0);
 }
 
 void SceneRenderer::drawMarkers(const glm::mat4& vp, const RenderSettings& s, bool ortho) {
     std::vector<glm::vec3> lines;
-    const float r = ortho ? 24.0f : 16.0f;
+    const float r = ortho ? 14.0f : 12.0f;
     auto cross = [&](const glm::vec3& p) {
         lines.push_back(p - glm::vec3(r, 0, 0));
         lines.push_back(p + glm::vec3(r, 0, 0));
@@ -248,7 +306,7 @@ void SceneRenderer::drawMarkers(const glm::mat4& vp, const RenderSettings& s, bo
         lines.push_back(p + glm::vec3(0, 0, r));
     };
 
-    if (s.showPointEntities)
+    if (s.showPointEntities || ortho)
         for (const auto& e : pointEntities_) cross(e.pos);
 
     if (!lines.empty()) {
@@ -313,10 +371,10 @@ void SceneRenderer::renderView(const Camera& cam, int pxW, int pxH,
     const float aspect = pxH > 0 ? static_cast<float>(pxW) / pxH : 1.0f;
     const glm::mat4 vp = cam.proj(aspect) * cam.view();
 
-    if (s.showGrid && ortho) drawGrid(vp, cam.kind);
+    if (s.showGrid && ortho) drawGrid(cam, vp, aspect);
 
     if (ortho) {
-        drawWire(vp, glm::vec3(0.80f, 0.82f, 0.86f), 0.9f);
+        drawWire(vp, glm::vec3(0.82f, 0.85f, 0.90f), 0.95f);
         drawMarkers(vp, s, true);
     } else {
         drawSolid(vp, s);

@@ -12,8 +12,9 @@ namespace pb::bsp {
 struct WorldVertex {
     glm::vec3 pos;
     glm::vec3 normal;
-    glm::vec2 uv;     // lightmap atlas UV (or white-pixel UV)
-    glm::vec3 tint;   // multiplier applied to the lightmap sample
+    glm::vec2 uv;      // lightmap atlas UV (or white-pixel UV)
+    glm::vec2 texUv;   // albedo/material UV
+    glm::vec3 tint;    // multiplier applied to the lightmap sample
 };
 
 struct DrawBatch {
@@ -60,6 +61,11 @@ struct WorldMesh {
     // far geometry); use this for default camera framing.
     glm::vec3 playBoundsMin{0.0f};
     glm::vec3 playBoundsMax{0.0f};
+
+    // A representative player spawn, for the "open inside the map" 3D camera.
+    bool hasSpawn = false;
+    glm::vec3 spawnPos{0.0f};
+    float spawnYaw = 0.0f;  // degrees, around +Z
 
     size_t drawnFaces = 0;
     size_t skippedFaces = 0;

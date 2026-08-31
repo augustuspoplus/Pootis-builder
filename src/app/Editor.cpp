@@ -7,6 +7,7 @@
 #include <imgui.h>
 #include <imgui_internal.h>
 
+#include "core/File.h"
 #include "core/Log.h"
 #include "gpu/Gl.h"
 #include "platform/FileDialog.h"
@@ -42,6 +43,9 @@ bool Editor::init(GLFWwindow* window) {
     if (!renderer_.init()) return false;
     glfwSetWindowUserPointer(window, this);
     glfwSetDropCallback(window, dropCallback);
+
+    sourceFs_.mountDefaults(executableDir());
+    materials_.init(&sourceFs_);
 
     const char* titles[4] = {"3D View", "Top (x/y)", "Front (x/z)", "Side (y/z)"};
     const ViewKind kinds[4] = {ViewKind::Perspective, ViewKind::Top, ViewKind::Front,
@@ -84,11 +88,32 @@ bool Editor::openMap(const std::string& path) {
 
 void Editor::buildAndUpload(const MeshBuildOptions& opts) {
     mesh_ = buildWorldMesh(bsp_, opts);
-    renderer_.upload(mesh_);
+    renderer_.upload(mesh_, &materials_);
+
+    int textured = 0, missing = 0, shown = 0;
+    for (const auto& b : mesh_.batches) {
+        const auto& info = materials_.get(b.material);
+        if (info.width > 0) {
+            ++textured;
+        } else {
+            ++missing;
+            if (shown++ < 12) PB_WARN("no texture for material: %s", b.material.c_str());
+        }
+    }
+    PB_INFO("materials: %d textured, %d missing (of %zu)", textured, missing,
+            mesh_.batches.size());
 }
 
 void Editor::frameAllViews() {
     for (auto& v : views_) v.camera.frameBounds(mesh_.playBoundsMin, mesh_.playBoundsMax);
+
+    // Open the 3D view inside the map at a spawn, the way Hammer does.
+    if (mesh_.hasSpawn) {
+        Camera& c = views_[0].camera;
+        c.pos = mesh_.spawnPos;
+        c.yawDeg = mesh_.spawnYaw;
+        c.pitchDeg = -8.0f;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -109,7 +134,7 @@ void Editor::frame() {
     ImGui::Begin("##PootisHost", nullptr, host);
     ImGui::PopStyleVar(3);
 
-    const ImGuiID dockId = ImGui::GetID("PootisDock");
+    const ImGuiID dockId = ImGui::GetID("PootisDockV2");
 
     drawMenuBar();
 
@@ -127,6 +152,7 @@ void Editor::frame() {
         bl = ImGui::DockBuilderSplitNode(bottom, ImGuiDir_Left, 0.5f, nullptr, &br);
 
         ImGui::DockBuilderDockWindow("Map Contents", left);
+        ImGui::DockBuilderDockWindow("Textures", left);
         ImGui::DockBuilderDockWindow("Materials", left);
         ImGui::DockBuilderDockWindow("Entities", left);
         ImGui::DockBuilderDockWindow("3D View", tl);
@@ -141,6 +167,7 @@ void Editor::frame() {
     if (ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_O)) promptOpenMap();
 
     drawOutliner();
+    drawTextureBrowser();
     drawMaterialList();
     drawEntityCatalog();
     for (auto& v : views_) drawViewportPanel(v);
@@ -156,14 +183,24 @@ void Editor::drawMenuBar() {
         ImGui::EndMenu();
     }
     if (ImGui::BeginMenu("View")) {
+        if (ImGui::BeginMenu("3D shading")) {
+            auto item = [&](const char* label, ShadeMode m) {
+                if (ImGui::MenuItem(label, nullptr, settings_.shadeMode == m))
+                    settings_.shadeMode = m;
+            };
+            item("Textured + lightmap", ShadeMode::TexturedLit);
+            item("Lightmap grid", ShadeMode::LightmapGrid);
+            item("Flat", ShadeMode::Flat);
+            item("Textured (fullbright)", ShadeMode::TexturedFull);
+            ImGui::EndMenu();
+        }
         ImGui::MenuItem("Grid", nullptr, &settings_.showGrid);
         ImGui::MenuItem("Static props", nullptr, &settings_.showProps);
         ImGui::MenuItem("Point entities", nullptr, &settings_.showPointEntities);
-        ImGui::MenuItem("Lightmap shading", nullptr, &settings_.lightingOnly);
         ImGui::MenuItem("Wire overlay (3D)", nullptr, &settings_.wireOverlay);
         ImGui::Separator();
         if (ImGui::MenuItem("Reset layout")) {
-            ImGui::DockBuilderRemoveNode(ImGui::GetID("PootisDock"));
+            ImGui::DockBuilderRemoveNode(ImGui::GetID("PootisDockV2"));
         }
         if (ImGui::MenuItem("Frame map", "F") && hasMap()) frameAllViews();
         ImGui::EndMenu();
@@ -338,6 +375,58 @@ void Editor::drawOutliner() {
         }
         ImGui::EndChild();
     }
+    ImGui::End();
+}
+
+void Editor::drawTextureBrowser() {
+    ImGui::Begin("Textures");
+    if (!sourceFs_.ready()) {
+        ImGui::TextDisabled("No game content mounted.");
+        ImGui::End();
+        return;
+    }
+    ImGui::InputTextWithHint("##texfilter", "filter materials in map", textureFilter_,
+                             sizeof(textureFilter_));
+    std::string needle = textureFilter_;
+    std::transform(needle.begin(), needle.end(), needle.begin(), ::tolower);
+
+    if (!hasMap()) {
+        ImGui::TextDisabled("Load a map to see its textures.");
+        ImGui::End();
+        return;
+    }
+
+    const float cell = 96.0f;
+    const float avail = ImGui::GetContentRegionAvail().x;
+    const int cols = std::max(1, static_cast<int>(avail / (cell + 8.0f)));
+    ImGui::Text("%zu materials", mesh_.batches.size());
+    if (ImGui::BeginChild("texgrid")) {
+        int col = 0;
+        for (const auto& b : mesh_.batches) {
+            if (!needle.empty()) {
+                std::string t = b.material;
+                std::transform(t.begin(), t.end(), t.begin(), ::tolower);
+                if (t.find(needle) == std::string::npos) continue;
+            }
+            const auto& info = materials_.get(b.material);
+            ImGui::BeginGroup();
+            ImGui::Image(static_cast<ImTextureID>(static_cast<intptr_t>(info.texture)),
+                         ImVec2(cell, cell));
+            std::string shortName = b.material;
+            const size_t slash = shortName.find_last_of('/');
+            if (slash != std::string::npos) shortName = shortName.substr(slash + 1);
+            ImGui::PushTextWrapPos(ImGui::GetCursorPos().x + cell);
+            ImGui::TextWrapped("%s", shortName.c_str());
+            ImGui::PopTextWrapPos();
+            ImGui::EndGroup();
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("%s\n%dx%d%s%s", b.material.c_str(), info.width,
+                                  info.height, info.found ? "" : "  (vmt not found)",
+                                  info.tool ? "  [tool]" : "");
+            if (++col % cols != 0) ImGui::SameLine();
+        }
+    }
+    ImGui::EndChild();
     ImGui::End();
 }
 

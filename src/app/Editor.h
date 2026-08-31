@@ -7,7 +7,9 @@
 #include "bsp/BspMesh.h"
 #include "render/Camera.h"
 #include "render/Framebuffer.h"
+#include "render/MaterialLibrary.h"
 #include "render/SceneRenderer.h"
+#include "source/SourceFs.h"
 
 struct GLFWwindow;
 
@@ -57,6 +59,7 @@ private:
     void drawViewportPanel(ViewPanel& p);
     void drawOutliner();
     void drawMaterialList();
+    void drawTextureBrowser();
     void drawEntityCatalog();
     void drawStatusBar();
     void handleViewportInput(ViewPanel& p);
@@ -64,6 +67,8 @@ private:
     GLFWwindow* window_ = nullptr;
     BspFile bsp_;
     WorldMesh mesh_;
+    source::SourceFs sourceFs_;
+    MaterialLibrary materials_;
     SceneRenderer renderer_;
     RenderSettings settings_;
     MeshBuildOptions meshOpts_;
@@ -74,6 +79,7 @@ private:
 
     char outlinerFilter_[128] = {0};
     char materialFilter_[128] = {0};
+    char textureFilter_[128] = {0};
     float flySpeed_ = 900.0f;
 };
 
