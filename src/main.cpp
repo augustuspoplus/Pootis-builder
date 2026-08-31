@@ -12,6 +12,8 @@
 #include <vector>
 
 #include "app/Editor.h"
+#include "app/Ui.h"
+#include "core/File.h"
 #include "core/Log.h"
 
 namespace {
@@ -26,6 +28,7 @@ struct Options {
     pb::ViewKind view = pb::ViewKind::Perspective;
     bool quad = false;
     bool ui = false;  // capture the full docked UI, not just a viewport
+    bool pro = false;
     int width = 1600;
     int height = 950;
     int warmupFrames = 8;
@@ -47,6 +50,7 @@ Options parseArgs(int argc, char** argv) {
         };
         if (a == "--screenshot") o.screenshotPath = next("");
         else if (a == "--ui") o.ui = true;
+        else if (a == "--pro") o.pro = true;
         else if (a == "--view") {
             const std::string v = next("persp");
             o.quad = (v == "quad");
@@ -59,36 +63,10 @@ Options parseArgs(int argc, char** argv) {
     return o;
 }
 
-// A restrained dark theme in the spirit of Hammer's panels.
-void applyTheme() {
-    ImGui::StyleColorsDark();
-    ImGuiStyle& s = ImGui::GetStyle();
-    s.WindowRounding = 2.0f;
-    s.FrameRounding = 2.0f;
-    s.GrabRounding = 2.0f;
-    s.TabRounding = 2.0f;
-    s.ScrollbarRounding = 2.0f;
-    s.WindowBorderSize = 1.0f;
-    s.FrameBorderSize = 0.0f;
-    s.WindowMenuButtonPosition = ImGuiDir_None;
-    ImVec4* c = s.Colors;
-    c[ImGuiCol_WindowBg] = ImVec4(0.13f, 0.14f, 0.15f, 1.00f);
-    c[ImGuiCol_MenuBarBg] = ImVec4(0.17f, 0.18f, 0.19f, 1.00f);
-    c[ImGuiCol_Header] = ImVec4(0.24f, 0.26f, 0.28f, 1.00f);
-    c[ImGuiCol_HeaderHovered] = ImVec4(0.30f, 0.33f, 0.36f, 1.00f);
-    c[ImGuiCol_Tab] = ImVec4(0.18f, 0.19f, 0.20f, 1.00f);
-    c[ImGuiCol_TabActive] = ImVec4(0.26f, 0.34f, 0.42f, 1.00f);
-    c[ImGuiCol_TabHovered] = ImVec4(0.32f, 0.40f, 0.48f, 1.00f);
-    c[ImGuiCol_Button] = ImVec4(0.24f, 0.26f, 0.28f, 1.00f);
-    c[ImGuiCol_FrameBg] = ImVec4(0.10f, 0.11f, 0.12f, 1.00f);
-    c[ImGuiCol_TitleBgActive] = ImVec4(0.20f, 0.24f, 0.28f, 1.00f);
-    c[ImGuiCol_CheckMark] = ImVec4(0.98f, 0.68f, 0.30f, 1.00f);
-    c[ImGuiCol_SliderGrab] = ImVec4(0.98f, 0.68f, 0.30f, 1.00f);
-}
-
 int runHeadlessScreenshot(const Options& opt, GLFWwindow* window) {
     pb::Editor editor;
     if (!editor.init(window)) return 2;
+    if (opt.pro) editor.setProMode();
     if (!opt.mapPath.empty() && !editor.openMap(opt.mapPath))
         PB_WARN("map did not load; screenshot will show an empty scene");
 
@@ -190,7 +168,8 @@ int main(int argc, char** argv) {
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
     ImGui::GetIO().ConfigFlags |= ImGuiConfigFlags_DockingEnable;
-    applyTheme();
+    pb::ui::loadFonts(pb::executableDir().c_str());
+    pb::ui::applyStyle();
     ImGui_ImplGlfw_InitForOpenGL(window, true);
     ImGui_ImplOpenGL3_Init("#version 330 core");
 
@@ -209,6 +188,7 @@ int main(int argc, char** argv) {
         PB_ERROR("editor init failed");
         return 2;
     }
+    if (opt.pro) editor.setProMode();
     if (!opt.mapPath.empty()) editor.openMap(opt.mapPath);
 
     while (!glfwWindowShouldClose(window)) {

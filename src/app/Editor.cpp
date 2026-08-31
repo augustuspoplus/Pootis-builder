@@ -7,6 +7,8 @@
 #include <imgui.h>
 #include <imgui_internal.h>
 
+#include "IconsFontAwesome6.h"
+#include "app/Ui.h"
 #include "core/File.h"
 #include "core/Log.h"
 #include "gpu/Gl.h"
@@ -130,28 +132,59 @@ void Editor::frame() {
     ImGuiWindowFlags host = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoCollapse |
                             ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
                             ImGuiWindowFlags_NoBringToFrontOnFocus |
-                            ImGuiWindowFlags_NoNavFocus | ImGuiWindowFlags_MenuBar;
+                            ImGuiWindowFlags_NoNavFocus;
     ImGui::Begin("##PootisHost", nullptr, host);
     ImGui::PopStyleVar(3);
 
-    const ImGuiID dockId = ImGui::GetID("PootisDockV2");
+    drawTopBar();
 
-    drawMenuBar();
+    const ImGuiID dockId = ImGui::GetID("PootisDockV3");
+    if (layoutDirty_ || !ImGui::DockBuilderGetNode(dockId)) {
+        buildDockLayout(dockId, ImGui::GetContentRegionAvail());
+        layoutDirty_ = false;
+    }
+    ImGui::DockSpace(dockId, ImVec2(0, 0), ImGuiDockNodeFlags_PassthruCentralNode);
+    ImGui::End();
 
-    if (!ImGui::DockBuilderGetNode(dockId)) {
-        ImGui::DockBuilderRemoveNode(dockId);
-        ImGui::DockBuilderAddNode(dockId, ImGuiDockNodeFlags_DockSpace);
-        ImGui::DockBuilderSetNodeSize(dockId, vp->WorkSize);
+    if (ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_O)) promptOpenMap();
 
+    if (mode_ == Mode::Simple) {
+        drawBuildKit();
+        drawSelectionPanel();
+    } else {
+        drawOutliner();
+        drawTextureBrowser();
+        drawMaterialList();
+        drawEntityCatalog();
+    }
+    for (auto& v : views_) drawViewportPanel(v);
+    drawStatusBar();
+}
+
+void Editor::buildDockLayout(unsigned int dockId, const ImVec2& size) {
+    ImGui::DockBuilderRemoveNode(dockId);
+    ImGui::DockBuilderAddNode(dockId, ImGuiDockNodeFlags_DockSpace);
+    ImGui::DockBuilderSetNodeSize(dockId, size.x > 0 ? size : ImVec2(1600, 900));
+
+    if (mode_ == Mode::Simple) {
+        ImGuiID left, rest, right, center;
+        left = ImGui::DockBuilderSplitNode(dockId, ImGuiDir_Left, 0.21f, nullptr, &rest);
+        right = ImGui::DockBuilderSplitNode(rest, ImGuiDir_Right, 0.24f, nullptr, &center);
+        ImGui::DockBuilderDockWindow("Build Kit", left);
+        ImGui::DockBuilderDockWindow("Selection", right);
+        ImGui::DockBuilderDockWindow("Top (x/y)", center);
+        ImGui::DockBuilderDockWindow("Front (x/z)", center);
+        ImGui::DockBuilderDockWindow("Side (y/z)", center);
+        ImGui::DockBuilderDockWindow("3D View", center);
+    } else {
         ImGuiID left, center;
-        left = ImGui::DockBuilderSplitNode(dockId, ImGuiDir_Left, 0.19f, nullptr, &center);
+        left = ImGui::DockBuilderSplitNode(dockId, ImGuiDir_Left, 0.215f, nullptr, &center);
         ImGuiID top, bottom;
         top = ImGui::DockBuilderSplitNode(center, ImGuiDir_Up, 0.5f, nullptr, &bottom);
         ImGuiID tl, tr, bl, br;
         tl = ImGui::DockBuilderSplitNode(top, ImGuiDir_Left, 0.5f, nullptr, &tr);
         bl = ImGui::DockBuilderSplitNode(bottom, ImGuiDir_Left, 0.5f, nullptr, &br);
-
-        ImGui::DockBuilderDockWindow("Map Contents", left);
+        ImGui::DockBuilderDockWindow("Contents", left);
         ImGui::DockBuilderDockWindow("Textures", left);
         ImGui::DockBuilderDockWindow("Materials", left);
         ImGui::DockBuilderDockWindow("Entities", left);
@@ -159,62 +192,143 @@ void Editor::frame() {
         ImGui::DockBuilderDockWindow("Top (x/y)", tr);
         ImGui::DockBuilderDockWindow("Front (x/z)", bl);
         ImGui::DockBuilderDockWindow("Side (y/z)", br);
-        ImGui::DockBuilderFinish(dockId);
     }
-    ImGui::DockSpace(dockId, ImVec2(0, 0), ImGuiDockNodeFlags_PassthruCentralNode);
-    ImGui::End();
-
-    if (ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_O)) promptOpenMap();
-
-    drawOutliner();
-    drawTextureBrowser();
-    drawMaterialList();
-    drawEntityCatalog();
-    for (auto& v : views_) drawViewportPanel(v);
-    drawStatusBar();
+    ImGui::DockBuilderFinish(dockId);
 }
 
-void Editor::drawMenuBar() {
-    if (!ImGui::BeginMenuBar()) return;
-    if (ImGui::BeginMenu("File")) {
-        if (ImGui::MenuItem("Open BSP...", "Ctrl+O")) promptOpenMap();
-        ImGui::Separator();
-        if (ImGui::MenuItem("Exit")) glfwSetWindowShouldClose(window_, 1);
+// ---------------------------------------------------------------------------
+// Top bar
+// ---------------------------------------------------------------------------
+void Editor::drawTopBar() {
+    using namespace pb::ui;
+    const float barH = 50.0f;
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, col::bg1);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12, 0));
+    ImGui::BeginChild("##topbar", ImVec2(0, barH), ImGuiChildFlags_None,
+                      ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+    ImGui::PopStyleVar();
+
+    const float row = 30.0f;
+    ImGui::SetCursorPosY((barH - row) * 0.5f);
+
+    // Brand
+    ImGui::PushStyleColor(ImGuiCol_Text, col::acc);
+    if (fontBig) ImGui::PushFont(fontBig);
+    ImGui::TextUnformatted(ICON_FA_CUBES);
+    if (fontBig) ImGui::PopFont();
+    ImGui::PopStyleColor();
+    ImGui::SameLine(0, 8);
+    if (fontUiMed) ImGui::PushFont(fontUiMed);
+    ImGui::SetCursorPosY((barH - ImGui::GetTextLineHeight()) * 0.5f);
+    ImGui::TextUnformatted("Pootis Builder");
+    if (fontUiMed) ImGui::PopFont();
+
+    ImGui::SameLine(0, 16);
+    ImGui::SetCursorPosY((barH - row) * 0.5f);
+    if (toolButton(ICON_FA_FOLDER_OPEN "  Open", false, "Open a .bsp  (Ctrl+O)"))
+        promptOpenMap();
+    ImGui::SameLine(0, 2);
+    if (toolButton(ICON_FA_DOWNLOAD "  Import map")) promptOpenMap();
+    ImGui::SameLine(0, 2);
+    if (toolButton(ICON_FA_FLOPPY_DISK "  Save"))
+        status_ = "Saving to VMF is not wired up yet.";
+
+    // Simple / Pro
+    ImGui::SameLine(0, 16);
+    ImGui::SetCursorPosY((barH - row) * 0.5f);
+    {
+        const char* const modes[] = {ICON_FA_TABLE_CELLS_LARGE "  Simple",
+                                     ICON_FA_PEN_RULER "  Pro"};
+        int r = segmented("mode", modes, 2, static_cast<int>(mode_), row);
+        if (r >= 0 && r != static_cast<int>(mode_)) {
+            mode_ = static_cast<Mode>(r);
+            layoutDirty_ = true;
+        }
+    }
+
+    // Tool modes (Pro only)
+    if (mode_ == Mode::Pro) {
+        ImGui::SameLine(0, 12);
+        ImGui::SetCursorPosY((barH - row) * 0.5f);
+        const char* const tools[] = {
+            ICON_FA_ARROW_POINTER " Select", ICON_FA_CUBE " Block",
+            ICON_FA_BEZIER_CURVE " Vertex",  ICON_FA_SCISSORS " Clip",
+            ICON_FA_IMAGE " Texture",        ICON_FA_LIGHTBULB " Entity"};
+        int r = segmented("tool", tools, 6, static_cast<int>(tool_), row);
+        if (r >= 0) tool_ = static_cast<Tool>(r);
+    }
+
+    // Right cluster
+    const float rightW = 330.0f;
+    ImGui::SameLine();
+    ImGui::SetCursorPosX(ImGui::GetWindowWidth() - rightW);
+    ImGui::SetCursorPosY((barH - row) * 0.5f);
+
+    char gridLabel[48];
+    std::snprintf(gridLabel, sizeof(gridLabel), ICON_FA_TABLE_CELLS "  Grid %d", gridSize_);
+    if (toolButton(gridLabel)) ImGui::OpenPopup("##gridpop");
+    if (ImGui::BeginPopup("##gridpop")) {
+        for (int g : {1, 2, 4, 8, 16, 32, 64, 128, 256, 512}) {
+            char b[16];
+            std::snprintf(b, sizeof(b), "%d", g);
+            if (ImGui::Selectable(b, g == gridSize_)) gridSize_ = g;
+        }
+        ImGui::EndPopup();
+    }
+    ImGui::SameLine(0, 2);
+    if (toolButton(snap_ ? ICON_FA_CHECK "  Snap" : "Snap", snap_)) snap_ = !snap_;
+
+    ImGui::SameLine(0, 2);
+    if (toolButton(ICON_FA_BARS)) ImGui::OpenPopup("##viewmenu");
+    drawViewMenuPopup();
+
+    ImGui::SameLine(0, 8);
+    ImGui::PushStyleColor(ImGuiCol_Button, col::bg2);
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, col::bg3);
+    ImGui::PushStyleColor(ImGuiCol_Text, col::acc);
+    if (ImGui::Button(ICON_FA_PLAY "  Build & play", ImVec2(0, row)))
+        status_ = "Offline vbsp/vvis/vrad + in-game preview is on the roadmap.";
+    ImGui::PopStyleColor(3);
+
+    ImGui::EndChild();
+    ImGui::PopStyleColor();
+
+    ImGui::GetWindowDrawList()->AddLine(
+        ImGui::GetCursorScreenPos(),
+        ImVec2(ImGui::GetCursorScreenPos().x + ImGui::GetWindowWidth(),
+               ImGui::GetCursorScreenPos().y),
+        pb::ui::u32(pb::ui::col::bd));
+}
+
+void Editor::drawViewMenuPopup() {
+    if (!ImGui::BeginPopup("##viewmenu")) return;
+    if (ImGui::BeginMenu("3D shading")) {
+        auto item = [&](const char* label, ShadeMode m) {
+            if (ImGui::MenuItem(label, nullptr, settings_.shadeMode == m))
+                settings_.shadeMode = m;
+        };
+        item("Textured + lightmap", ShadeMode::TexturedLit);
+        item("Lightmap grid", ShadeMode::LightmapGrid);
+        item("Flat", ShadeMode::Flat);
+        item("Textured (fullbright)", ShadeMode::TexturedFull);
         ImGui::EndMenu();
     }
-    if (ImGui::BeginMenu("View")) {
-        if (ImGui::BeginMenu("3D shading")) {
-            auto item = [&](const char* label, ShadeMode m) {
-                if (ImGui::MenuItem(label, nullptr, settings_.shadeMode == m))
-                    settings_.shadeMode = m;
-            };
-            item("Textured + lightmap", ShadeMode::TexturedLit);
-            item("Lightmap grid", ShadeMode::LightmapGrid);
-            item("Flat", ShadeMode::Flat);
-            item("Textured (fullbright)", ShadeMode::TexturedFull);
-            ImGui::EndMenu();
-        }
-        ImGui::MenuItem("Grid", nullptr, &settings_.showGrid);
-        ImGui::MenuItem("Static props", nullptr, &settings_.showProps);
-        ImGui::MenuItem("Point entities", nullptr, &settings_.showPointEntities);
-        ImGui::MenuItem("Wire overlay (3D)", nullptr, &settings_.wireOverlay);
-        ImGui::Separator();
-        if (ImGui::MenuItem("Reset layout")) {
-            ImGui::DockBuilderRemoveNode(ImGui::GetID("PootisDockV2"));
-        }
-        if (ImGui::MenuItem("Frame map", "F") && hasMap()) frameAllViews();
-        ImGui::EndMenu();
-    }
-    if (ImGui::BeginMenu("Lighting")) {
-        ImGui::SliderFloat("Exposure", &settings_.exposure, 0.2f, 3.0f, "%.2f");
-        if (ImGui::SliderFloat("Lightmap gain", &meshOpts_.lightmapGain, 0.3f, 4.0f,
-                               "%.2f")) {
-            if (hasMap()) buildAndUpload(meshOpts_);
-        }
-        ImGui::EndMenu();
-    }
-    ImGui::TextDisabled("   |   %s", status_.c_str());
-    ImGui::EndMenuBar();
+    ImGui::MenuItem("Grid", nullptr, &settings_.showGrid);
+    ImGui::MenuItem("Static props", nullptr, &settings_.showProps);
+    ImGui::MenuItem("Point entities", nullptr, &settings_.showPointEntities);
+    ImGui::MenuItem("Wire overlay (3D)", nullptr, &settings_.wireOverlay);
+    ImGui::Separator();
+    ImGui::SetNextItemWidth(160);
+    ImGui::SliderFloat("Exposure", &settings_.exposure, 0.2f, 3.0f, "%.2f");
+    ImGui::SetNextItemWidth(160);
+    if (ImGui::SliderFloat("Lightmap gain", &meshOpts_.lightmapGain, 0.3f, 4.0f, "%.2f") &&
+        hasMap())
+        buildAndUpload(meshOpts_);
+    ImGui::Separator();
+    if (ImGui::MenuItem("Frame map", "F") && hasMap()) frameAllViews();
+    if (ImGui::MenuItem("Reset layout")) layoutDirty_ = true;
+    if (ImGui::MenuItem("Exit")) glfwSetWindowShouldClose(window_, 1);
+    ImGui::EndPopup();
 }
 
 // ---------------------------------------------------------------------------
@@ -222,8 +336,13 @@ void Editor::drawMenuBar() {
 // ---------------------------------------------------------------------------
 void Editor::drawViewportPanel(ViewPanel& p) {
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
-    ImGui::Begin(p.title);
+    const bool visible = ImGui::Begin(p.title);
     ImGui::PopStyleVar();
+    if (!visible) {
+        p.hovered = false;
+        ImGui::End();
+        return;
+    }
 
     const ImVec2 avail = ImGui::GetContentRegionAvail();
     const int w = std::max(16, static_cast<int>(avail.x));
@@ -304,10 +423,219 @@ void Editor::handleViewportInput(ViewPanel& p) {
 }
 
 // ---------------------------------------------------------------------------
+// Simple mode: Build Kit + Selection
+// ---------------------------------------------------------------------------
+namespace {
+
+struct KitPiece {
+    const char* icon;
+    const char* name;
+    const char* hint;
+};
+
+void kitCards(const KitPiece* pieces, int count, std::string* placing,
+              std::string* status) {
+    const float avail = ImGui::GetContentRegionAvail().x;
+    const float cellW = (avail - 10.0f) * 0.5f;
+    for (int i = 0; i < count; ++i) {
+        if (i % 2) ImGui::SameLine(0, 10);
+        ImGui::PushID(i);
+        const bool on = *placing == pieces[i].name;
+        ImGui::PushStyleColor(ImGuiCol_Button, on ? pb::ui::col::bg3 : pb::ui::col::bg2);
+        ImGui::PushStyleColor(ImGuiCol_Border,
+                              on ? pb::ui::col::acc : pb::ui::col::bd);
+        if (ImGui::BeginChild("card", ImVec2(cellW, 64),
+                              ImGuiChildFlags_Borders | ImGuiChildFlags_FrameStyle)) {
+            ImGui::PushStyleColor(ImGuiCol_Text, pb::ui::col::acc);
+            ImGui::TextUnformatted(pieces[i].icon);
+            ImGui::PopStyleColor();
+            ImGui::SameLine(0, 8);
+            ImGui::TextUnformatted(pieces[i].name);
+            ImGui::PushStyleColor(ImGuiCol_Text, pb::ui::col::faint);
+            ImGui::TextWrapped("%s", pieces[i].hint);
+            ImGui::PopStyleColor();
+        }
+        ImGui::EndChild();
+        if (ImGui::IsItemClicked()) {
+            *placing = pieces[i].name;
+            *status = std::string("Placing ") + pieces[i].name +
+                      " — click in a viewport to drop it.";
+        }
+        ImGui::PopStyleColor(2);
+        ImGui::PopID();
+    }
+}
+
+}  // namespace
+
+void Editor::drawBuildKit() {
+    ImGui::Begin("Build Kit");
+
+    if (pb::ui::fontUiMed) ImGui::PushFont(pb::ui::fontUiMed);
+    ImGui::TextUnformatted(hasMap() ? bsp_.name().c_str() : "New map");
+    if (pb::ui::fontUiMed) ImGui::PopFont();
+    ImGui::PushStyleColor(ImGuiCol_Text, pb::ui::col::faint);
+    ImGui::TextWrapped("Pick a piece, then click in a viewport. Everything snaps to the grid.");
+    ImGui::PopStyleColor();
+    ImGui::Dummy(ImVec2(0, 4));
+
+    if (ImGui::BeginTabBar("kit")) {
+        if (ImGui::BeginTabItem(ICON_FA_CUBE "  Shapes")) {
+            static const KitPiece shapes[] = {
+                {ICON_FA_BORDER_ALL, "Floor", "Walkable ground area"},
+                {ICON_FA_SQUARE, "Wall", "Solid cover"},
+                {ICON_FA_TABLE_CELLS_LARGE, "Room", "4 walls + floor + ceiling"},
+                {ICON_FA_DIAGRAM_PROJECT, "Ramp", "Change height smoothly"},
+                {ICON_FA_DRAW_POLYGON, "Route", "Draw a path, get sections"},
+                {ICON_FA_GRIP, "Pillar", "Vertical cover"},
+            };
+            ImGui::Dummy(ImVec2(0, 4));
+            kitCards(shapes, IM_ARRAYSIZE(shapes), &placing_, &status_);
+            ImGui::EndTabItem();
+        }
+        if (ImGui::BeginTabItem(ICON_FA_ARROW_POINTER "  Play")) {
+            static const KitPiece play[] = {
+                {ICON_FA_ARROW_POINTER, "RED spawn", "Team RED respawn room"},
+                {ICON_FA_ARROW_POINTER, "BLU spawn", "Team BLU respawn room"},
+                {ICON_FA_SQUARE, "Capture point", "Control point + trigger"},
+                {ICON_FA_DIAGRAM_PROJECT, "Payload track", "path_track for the cart"},
+                {ICON_FA_PLAY, "Resupply", "Regenerate locker"},
+                {ICON_FA_LIGHTBULB, "Health / ammo", "Pickup near a route"},
+            };
+            ImGui::Dummy(ImVec2(0, 4));
+            kitCards(play, IM_ARRAYSIZE(play), &placing_, &status_);
+            ImGui::EndTabItem();
+        }
+        if (ImGui::BeginTabItem(ICON_FA_IMAGE "  Props")) {
+            ImGui::Dummy(ImVec2(0, 4));
+            ImGui::PushStyleColor(ImGuiCol_Text, pb::ui::col::dim);
+            ImGui::TextWrapped(
+                "The model browser lands here — pick from the installed TF2 props "
+                "and drop them on the grid.");
+            ImGui::PopStyleColor();
+            ImGui::EndTabItem();
+        }
+        if (ImGui::BeginTabItem(ICON_FA_LIGHTBULB "  Light")) {
+            static const KitPiece lights[] = {
+                {ICON_FA_LIGHTBULB, "Point light", "Local glow"},
+                {ICON_FA_LIGHTBULB, "Spot light", "Directional cone"},
+                {ICON_FA_LIGHTBULB, "Sun / sky", "light_environment"},
+            };
+            ImGui::Dummy(ImVec2(0, 4));
+            kitCards(lights, IM_ARRAYSIZE(lights), &placing_, &status_);
+            ImGui::EndTabItem();
+        }
+        ImGui::EndTabBar();
+    }
+
+    ImGui::Dummy(ImVec2(0, 8));
+    ImGui::Separator();
+    pb::ui::sectionLabel("MAP CHECKLIST");
+
+    auto countClass = [&](const char* cls) {
+        int n = 0;
+        for (const auto& e : bsp_.entities()) {
+            auto it = e.find("classname");
+            if (it != e.end() && it->second == cls) ++n;
+        }
+        return n;
+    };
+    auto anyClassPrefix = [&](const char* pfx) {
+        const size_t n = std::strlen(pfx);
+        for (const auto& e : bsp_.entities()) {
+            auto it = e.find("classname");
+            if (it != e.end() && it->second.compare(0, n, pfx) == 0) return true;
+        }
+        return false;
+    };
+    std::string skyname;
+    if (const auto* ws = bsp_.worldspawn()) {
+        auto it = ws->find("skyname");
+        if (it != ws->end()) skyname = it->second;
+    }
+
+    struct Row {
+        bool ok;
+        const char* label;
+    };
+    const Row rows[] = {
+        {countClass("info_player_teamspawn") >= 2 || countClass("info_player_start") >= 1,
+         "Spawn points placed"},
+        {!skyname.empty(), "Skybox set (seals the map)"},
+        {countClass("team_control_point") > 0 || countClass("trigger_capture_area") > 0 ||
+             countClass("func_capturezone") > 0,
+         "An objective (capture / flag)"},
+        {anyClassPrefix("item_health") || anyClassPrefix("item_ammo") ||
+             countClass("func_regenerate") > 0,
+         "Health and ammo on the routes"},
+        {countClass("light") > 0 || countClass("light_environment") > 0 ||
+             countClass("light_spot") > 0,
+         "Lights in the level"},
+    };
+    int done = 0;
+    for (const Row& r : rows)
+        if (r.ok) ++done;
+    ImGui::Dummy(ImVec2(0, 2));
+    char frac[24];
+    std::snprintf(frac, sizeof(frac), "%d / %d", done, (int)IM_ARRAYSIZE(rows));
+    ImGui::PushStyleColor(ImGuiCol_PlotHistogram, pb::ui::col::acc);
+    ImGui::ProgressBar((float)done / IM_ARRAYSIZE(rows), ImVec2(-1, 6), "");
+    ImGui::PopStyleColor();
+    ImGui::SameLine();
+    ImGui::TextDisabled("%s", frac);
+    ImGui::Dummy(ImVec2(0, 4));
+    for (const Row& r : rows) {
+        ImGui::PushStyleColor(ImGuiCol_Text, r.ok ? pb::ui::col::good : pb::ui::col::faint);
+        ImGui::TextUnformatted(r.ok ? ICON_FA_CHECK : ICON_FA_SQUARE);
+        ImGui::PopStyleColor();
+        ImGui::SameLine(0, 9);
+        ImGui::PushStyleColor(ImGuiCol_Text,
+                              r.ok ? pb::ui::col::tx : pb::ui::col::dim);
+        ImGui::TextUnformatted(r.label);
+        ImGui::PopStyleColor();
+    }
+
+    ImGui::End();
+}
+
+void Editor::drawSelectionPanel() {
+    ImGui::Begin("Selection");
+    if (!placing_.empty()) {
+        if (pb::ui::fontUiMed) ImGui::PushFont(pb::ui::fontUiMed);
+        ImGui::Text(ICON_FA_ARROW_POINTER "  Placing %s", placing_.c_str());
+        if (pb::ui::fontUiMed) ImGui::PopFont();
+        ImGui::PushStyleColor(ImGuiCol_Text, pb::ui::col::dim);
+        ImGui::TextWrapped("Click in a viewport to drop it. Brush placement is coming "
+                           "with the editing tools.");
+        ImGui::PopStyleColor();
+        ImGui::Dummy(ImVec2(0, 6));
+        if (ImGui::Button("Cancel", ImVec2(-1, 0))) placing_.clear();
+    } else if (hasMap()) {
+        pb::ui::sectionLabel("THIS MAP");
+        ImGui::Dummy(ImVec2(0, 4));
+        const glm::vec3 span = mesh_.playBoundsMax - mesh_.playBoundsMin;
+        ImGui::BulletText("%zu entities, %zu props", bsp_.entities().size(),
+                          mesh_.props.size());
+        ImGui::BulletText("play area  %.0f x %.0f x %.0f", span.x, span.y, span.z);
+        ImGui::Dummy(ImVec2(0, 10));
+        ImGui::PushStyleColor(ImGuiCol_Text, pb::ui::col::faint);
+        ImGui::TextWrapped("Click something in the map to edit it. Selection and the "
+                           "transform gizmo are the next milestone.");
+        ImGui::PopStyleColor();
+    } else {
+        ImGui::PushStyleColor(ImGuiCol_Text, pb::ui::col::faint);
+        ImGui::TextWrapped("Open a .bsp (Ctrl+O) or drag one onto the window to get "
+                           "started.");
+        ImGui::PopStyleColor();
+    }
+    ImGui::End();
+}
+
+// ---------------------------------------------------------------------------
 // Panels
 // ---------------------------------------------------------------------------
 void Editor::drawOutliner() {
-    ImGui::Begin("Map Contents");
+    ImGui::Begin("Contents");
     if (!hasMap()) {
         ImGui::TextDisabled("No map loaded.");
         ImGui::End();
@@ -510,19 +838,26 @@ void Editor::drawStatusBar() {
                              ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoMove |
                              ImGuiWindowFlags_NoSavedSettings;
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, pb::ui::col::bg1);
     if (ImGui::Begin("##status", nullptr, flags)) {
         const Camera& c3d = views_[0].camera;
+        ImGui::PushStyleColor(ImGuiCol_Text, pb::ui::col::acc);
+        ImGui::TextUnformatted(mode_ == Mode::Simple ? "Simple" : "Pro");
+        ImGui::PopStyleColor();
+        ImGui::SameLine(0, 14);
         ImGui::Text("%s", status_.c_str());
-        ImGui::SameLine();
-        ImGui::TextDisabled("      cam  %.0f %.0f %.0f   yaw %.0f  pitch %.0f", c3d.pos.x,
+        ImGui::SameLine(0, 18);
+        if (pb::ui::fontMono) ImGui::PushFont(pb::ui::fontMono);
+        ImGui::TextDisabled("cam %.0f %.0f %.0f  yaw %.0f  pitch %.0f", c3d.pos.x,
                             c3d.pos.y, c3d.pos.z, c3d.yawDeg, c3d.pitchDeg);
         if (hasMap()) {
-            ImGui::SameLine();
-            ImGui::TextDisabled("      verts %zu  tris %zu", mesh_.vertices.size(),
-                                mesh_.indices.size() / 3);
+            ImGui::SameLine(0, 18);
+            ImGui::TextDisabled("%zu tris", mesh_.indices.size() / 3);
         }
+        if (pb::ui::fontMono) ImGui::PopFont();
     }
     ImGui::End();
+    ImGui::PopStyleColor();
     ImGui::PopStyleVar();
 }
 
