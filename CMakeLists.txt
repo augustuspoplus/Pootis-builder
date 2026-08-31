@@ -84,6 +84,13 @@ if(WIN32)
         NOMINMAX WIN32_LEAN_AND_MEAN _USE_MATH_DEFINES)
 endif()
 
+# Self-contained exe: fold in the MinGW runtime so it runs without the
+# compiler's bin/ on PATH.
+if(MINGW)
+    target_link_options(PootisBuilder PRIVATE
+        -static -static-libgcc -static-libstdc++)
+endif()
+
 set_target_properties(PootisBuilder PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
 
