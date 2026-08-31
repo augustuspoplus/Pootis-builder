@@ -1,5 +1,6 @@
 #include "app/Ui.h"
 
+#include <algorithm>
 #include <string>
 
 #include "core/File.h"
@@ -13,8 +14,9 @@ ImFont* fontUiMed = nullptr;
 ImFont* fontBig = nullptr;
 ImFont* fontMono = nullptr;
 
-void loadFonts(const char* exeDir) {
+void loadFonts(const char* exeDir, float scale) {
     ImGuiIO& io = ImGui::GetIO();
+    scale = std::clamp(scale, 0.6f, 3.0f);
     const std::string dir = std::string(exeDir) + "/assets/fonts/";
 
     auto exists = [&](const char* f) { return fileExists(dir + f); };
@@ -33,6 +35,7 @@ void loadFonts(const char* exeDir) {
     text.PixelSnapH = true;
 
     auto addWithIcons = [&](const char* file, float size, float iconScale = 0.84f) {
+        size *= scale;
         ImFont* f = io.Fonts->AddFontFromFileTTF((dir + file).c_str(), size, &text);
         ImFontConfig fa;
         fa.MergeMode = true;
@@ -48,12 +51,20 @@ void loadFonts(const char* exeDir) {
     fontUiMed = addWithIcons("IBMPlexSans-Medium.ttf", 16.0f);
     fontBig = addWithIcons("IBMPlexSans-SemiBold.ttf", 21.0f);
     fontMono = io.Fonts->AddFontFromFileTTF((dir + "IBMPlexMono-Regular.ttf").c_str(),
-                                            14.5f, &text);
+                                            14.5f * scale, &text);
     io.FontDefault = fontUi;
-    PB_INFO("UI fonts loaded from %s", dir.c_str());
+    PB_INFO("UI fonts loaded from %s (scale %.2f)", dir.c_str(), scale);
 }
 
-void applyStyle() {
+void rebuildFonts(const char* exeDir, float scale) {
+    ImGuiIO& io = ImGui::GetIO();
+    io.Fonts->Clear();  // the renderer backend re-uploads the atlas next frame
+    fontUi = fontUiMed = fontBig = fontMono = nullptr;
+    loadFonts(exeDir, scale);
+    applyStyle(scale);
+}
+
+void applyStyle(float scale) {
     ImGuiStyle& s = ImGui::GetStyle();
     ImGui::StyleColorsDark(&s);
 
@@ -139,6 +150,8 @@ void applyStyle() {
     c[ImGuiCol_NavHighlight] = col::acc;
     c[ImGuiCol_DragDropTarget] = col::acc;
     c[ImGuiCol_ModalWindowDimBg] = ImVec4(0, 0, 0, 0.45f);
+
+    if (scale != 1.0f) s.ScaleAllSizes(std::clamp(scale, 0.6f, 3.0f));
 }
 
 // ---------------------------------------------------------------------------

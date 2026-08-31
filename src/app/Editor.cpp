@@ -60,7 +60,32 @@ bool Editor::init(GLFWwindow* window) {
     return true;
 }
 
-void Editor::shutdown() { renderer_.clearWorld(); }
+void Editor::shutdown() {
+    prefs_.save();
+    renderer_.clearWorld();
+}
+
+void Editor::attachSettings(Settings s, float effectiveScale) {
+    prefs_ = std::move(s);
+    uiScale_ = effectiveScale;
+    showWelcome_ = prefs_.showWelcome;
+}
+
+void Editor::requestUiScale(float scale) {
+    scale = std::clamp(scale, 0.75f, 2.5f);
+    if (scale == uiScale_) return;
+    uiScale_ = scale;
+    scaleDirty_ = true;
+    prefs_.uiScale = scale;
+    prefs_.save();
+}
+
+bool Editor::takeFontRebuild(float& outScale) {
+    if (!scaleDirty_) return false;
+    outScale = uiScale_;
+    scaleDirty_ = false;
+    return true;
+}
 
 bool Editor::openMap(const std::string& path) {
     const std::string ext = [&] {
@@ -85,6 +110,9 @@ bool Editor::openMap(const std::string& path) {
     status_ = bsp_.name() + "  —  " + std::to_string(mesh_.drawnFaces) + " faces, " +
               std::to_string(mesh_.pointEntities.size()) + " point ents, " +
               std::to_string(mesh_.props.size()) + " props";
+    prefs_.pushRecent(path);
+    prefs_.save();
+    showWelcome_ = false;
     return true;
 }
 
@@ -159,6 +187,7 @@ void Editor::frame() {
     }
     for (auto& v : views_) drawViewportPanel(v);
     drawStatusBar();
+    drawWelcome();
 }
 
 void Editor::buildDockLayout(unsigned int dockId, const ImVec2& size) {
@@ -168,8 +197,8 @@ void Editor::buildDockLayout(unsigned int dockId, const ImVec2& size) {
 
     if (mode_ == Mode::Simple) {
         ImGuiID left, rest, right, center;
-        left = ImGui::DockBuilderSplitNode(dockId, ImGuiDir_Left, 0.21f, nullptr, &rest);
-        right = ImGui::DockBuilderSplitNode(rest, ImGuiDir_Right, 0.24f, nullptr, &center);
+        left = ImGui::DockBuilderSplitNode(dockId, ImGuiDir_Left, 0.235f, nullptr, &rest);
+        right = ImGui::DockBuilderSplitNode(rest, ImGuiDir_Right, 0.22f, nullptr, &center);
         ImGui::DockBuilderDockWindow("Build Kit", left);
         ImGui::DockBuilderDockWindow("Selection", right);
         ImGui::DockBuilderDockWindow("Top (x/y)", center);
@@ -259,7 +288,7 @@ void Editor::drawTopBar() {
     }
 
     // Right cluster
-    const float rightW = 330.0f;
+    const float rightW = 340.0f * uiScale_;
     ImGui::SameLine();
     ImGui::SetCursorPosX(ImGui::GetWindowWidth() - rightW);
     ImGui::SetCursorPosY((barH - row) * 0.5f);
@@ -325,10 +354,163 @@ void Editor::drawViewMenuPopup() {
         hasMap())
         buildAndUpload(meshOpts_);
     ImGui::Separator();
+    if (ImGui::BeginMenu(ICON_FA_MAGNIFYING_GLASS "  Interface scale")) {
+        uiScaleMenu();
+        ImGui::EndMenu();
+    }
+    ImGui::Separator();
     if (ImGui::MenuItem("Frame map", "F") && hasMap()) frameAllViews();
     if (ImGui::MenuItem("Reset layout")) layoutDirty_ = true;
+    if (ImGui::MenuItem("Welcome screen")) showWelcome_ = true;
     if (ImGui::MenuItem("Exit")) glfwSetWindowShouldClose(window_, 1);
     ImGui::EndPopup();
+}
+
+void Editor::uiScaleMenu() {
+    const float steps[] = {0.8f, 0.9f, 1.0f, 1.1f, 1.25f, 1.5f, 1.75f, 2.0f};
+    for (float s : steps) {
+        char label[24];
+        std::snprintf(label, sizeof(label), "%d%%", static_cast<int>(s * 100 + 0.5f));
+        if (ImGui::MenuItem(label, nullptr, std::abs(s - uiScale_) < 0.001f))
+            requestUiScale(s);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Welcome screen
+// ---------------------------------------------------------------------------
+void Editor::drawWelcome() {
+    if (!showWelcome_) return;
+    using namespace pb::ui;
+
+    ImGuiViewport* vp = ImGui::GetMainViewport();
+    ImGui::GetBackgroundDrawList()->AddRectFilled(
+        vp->Pos, ImVec2(vp->Pos.x + vp->Size.x, vp->Pos.y + vp->Size.y),
+        IM_COL32(8, 9, 11, 205));
+
+    const ImVec2 panel(std::min(760.0f * uiScale_, vp->Size.x - 40.0f),
+                       std::min(560.0f * uiScale_, vp->Size.y - 40.0f));
+    ImGui::SetNextWindowPos(ImVec2(vp->Pos.x + (vp->Size.x - panel.x) * 0.5f,
+                                   vp->Pos.y + (vp->Size.y - panel.y) * 0.5f));
+    ImGui::SetNextWindowSize(panel);
+    ImGui::SetNextWindowFocus();
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, col::bg1);
+    ImGui::PushStyleColor(ImGuiCol_Border, col::bd2);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(34, 30));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 1.0f);
+    ImGui::Begin("##welcome", nullptr,
+                 ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+                     ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse |
+                     ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoSavedSettings);
+
+    ImGui::PushStyleColor(ImGuiCol_Text, col::acc);
+    if (fontBig) ImGui::PushFont(fontBig);
+    ImGui::TextUnformatted(ICON_FA_CUBES "  Pootis Builder");
+    if (fontBig) ImGui::PopFont();
+    ImGui::PopStyleColor();
+    ImGui::PushStyleColor(ImGuiCol_Text, col::dim);
+    ImGui::TextUnformatted("A modern map editor for Team Fortress 2");
+    ImGui::PopStyleColor();
+    ImGui::Dummy(ImVec2(0, 16));
+
+    const float colW = (ImGui::GetContentRegionAvail().x - 20) / 3.0f;
+    auto bigButton = [&](const char* id, const char* icon, const char* title,
+                         const char* sub) {
+        ImGui::PushStyleColor(ImGuiCol_Button, col::bg2);
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, col::bg3);
+        const bool hit = ImGui::Button(id, ImVec2(colW, 96 * uiScale_));
+        ImGui::PopStyleColor(2);
+        const ImVec2 mn = ImGui::GetItemRectMin();
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        if (fontBig)
+            dl->AddText(fontBig, 22.0f * uiScale_, ImVec2(mn.x + 14, mn.y + 12),
+                        u32(col::acc), icon);
+        dl->AddText(ImVec2(mn.x + 14, mn.y + 42 * uiScale_), u32(col::tx), title);
+        dl->AddText(ImVec2(mn.x + 14, mn.y + 42 * uiScale_ + ImGui::GetTextLineHeight() + 2),
+                    u32(col::faint), sub);
+        return hit;
+    };
+
+    if (bigButton("##bNew", ICON_FA_FILE_CIRCLE_PLUS, "New map",
+                  "Start from an empty grid")) {
+        bsp_ = BspFile();
+        renderer_.clearWorld();
+        mesh_ = WorldMesh{};
+        status_ = "New map — place pieces from the Build Kit.";
+        showWelcome_ = false;
+    }
+    ImGui::SameLine(0, 10);
+    if (bigButton("##bOpen", ICON_FA_FOLDER_OPEN, "Open map", "A compiled .bsp"))
+        promptOpenMap();
+    ImGui::SameLine(0, 10);
+    if (bigButton("##bImport", ICON_FA_DOWNLOAD, "Import", ".vmf / .bsp (soon)"))
+        promptOpenMap();
+
+    ImGui::Dummy(ImVec2(0, 18));
+    sectionLabel("RECENT");
+    ImGui::Dummy(ImVec2(0, 4));
+    if (prefs_.recent.empty()) {
+        ImGui::PushStyleColor(ImGuiCol_Text, col::faint);
+        ImGui::TextUnformatted("Nothing yet — the maps you open show up here.");
+        ImGui::PopStyleColor();
+    } else if (ImGui::BeginChild("recent", ImVec2(0, -46 * uiScale_))) {
+        int removeIdx = -1;
+        const float rowH = ImGui::GetTextLineHeight() * 2.0f + 12.0f;
+        for (size_t i = 0; i < prefs_.recent.size(); ++i) {
+            const std::string& path = prefs_.recent[i];
+            const std::string name = fs::path(path).filename().string();
+            const std::string dir = fs::path(path).parent_path().string();
+            ImGui::PushID(static_cast<int>(i));
+            if (ImGui::Selectable("##r", false, 0, ImVec2(0, rowH))) {
+                if (fs::exists(path)) openMap(path);
+                else status_ = "That file has moved: " + path;
+            }
+            const ImVec2 mn = ImGui::GetItemRectMin();
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+            dl->AddText(ImVec2(mn.x + 8, mn.y + 4), u32(col::tx), name.c_str());
+            dl->AddText(ImVec2(mn.x + 8, mn.y + 6 + ImGui::GetTextLineHeight()),
+                        u32(col::faint), dir.c_str());
+            ImGui::SameLine();
+            ImGui::SetCursorPosX(ImGui::GetCursorPosX() +
+                                 ImGui::GetContentRegionAvail().x - 26 * uiScale_);
+            ImGui::SetCursorPosY(ImGui::GetCursorPosY() + (rowH - ImGui::GetFrameHeight()) * 0.5f);
+            if (ImGui::SmallButton(ICON_FA_XMARK)) removeIdx = static_cast<int>(i);
+            ImGui::PopID();
+        }
+        if (removeIdx >= 0) {
+            prefs_.recent.erase(prefs_.recent.begin() + removeIdx);
+            prefs_.save();
+        }
+    }
+    if (!prefs_.recent.empty()) ImGui::EndChild();
+
+    ImGui::Separator();
+    ImGui::AlignTextToFramePadding();
+    ImGui::PushStyleColor(ImGuiCol_Text, col::dim);
+    ImGui::TextUnformatted("Interface scale");
+    ImGui::PopStyleColor();
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(120 * uiScale_);
+    char cur[16];
+    std::snprintf(cur, sizeof(cur), "%d%%", static_cast<int>(uiScale_ * 100 + 0.5f));
+    if (ImGui::BeginCombo("##scale", cur)) {
+        uiScaleMenu();
+        ImGui::EndCombo();
+    }
+    ImGui::SameLine(0, 24);
+    if (ImGui::Checkbox("Show this on startup", &prefs_.showWelcome)) prefs_.save();
+
+    if (hasMap()) {
+        ImGui::SameLine();
+        float bw = 168 * uiScale_;
+        ImGui::SetCursorPosX(ImGui::GetWindowContentRegionMax().x - bw);
+        if (ImGui::Button(ICON_FA_ARROW_RIGHT "  Continue editing", ImVec2(bw, 0)))
+            showWelcome_ = false;
+    }
+
+    ImGui::End();
+    ImGui::PopStyleVar(2);
+    ImGui::PopStyleColor(2);
 }
 
 // ---------------------------------------------------------------------------
@@ -479,7 +661,7 @@ void Editor::drawBuildKit() {
     ImGui::PopStyleColor();
     ImGui::Dummy(ImVec2(0, 4));
 
-    if (ImGui::BeginTabBar("kit")) {
+    if (ImGui::BeginTabBar("kit", ImGuiTabBarFlags_FittingPolicyResizeDown)) {
         if (ImGui::BeginTabItem(ICON_FA_CUBE "  Shapes")) {
             static const KitPiece shapes[] = {
                 {ICON_FA_BORDER_ALL, "Floor", "Walkable ground area"},

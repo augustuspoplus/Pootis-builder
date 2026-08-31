@@ -9,9 +9,11 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "app/Editor.h"
+#include "app/Settings.h"
 #include "app/Ui.h"
 #include "core/File.h"
 #include "core/Log.h"
@@ -63,9 +65,10 @@ Options parseArgs(int argc, char** argv) {
     return o;
 }
 
-int runHeadlessScreenshot(const Options& opt, GLFWwindow* window) {
+int runHeadlessScreenshot(const Options& opt, GLFWwindow* window, float uiScale) {
     pb::Editor editor;
     if (!editor.init(window)) return 2;
+    editor.attachSettings(pb::Settings::load(), uiScale);
     if (opt.pro) editor.setProMode();
     if (!opt.mapPath.empty() && !editor.openMap(opt.mapPath))
         PB_WARN("map did not load; screenshot will show an empty scene");
@@ -165,16 +168,25 @@ int main(int argc, char** argv) {
     PB_INFO("OpenGL %d.%d — %s", GLAD_VERSION_MAJOR(glv), GLAD_VERSION_MINOR(glv),
             reinterpret_cast<const char*>(glGetString(GL_RENDERER)));
 
+    pb::Settings settings = pb::Settings::load();
+    float uiScale = settings.uiScale;
+    if (uiScale <= 0.0f) {
+        float sx = 1.0f, sy = 1.0f;
+        glfwGetWindowContentScale(window, &sx, &sy);
+        uiScale = sx > 0.0f ? sx : 1.0f;
+    }
+    uiScale = std::clamp(uiScale, 0.8f, 2.5f);
+
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
     ImGui::GetIO().ConfigFlags |= ImGuiConfigFlags_DockingEnable;
-    pb::ui::loadFonts(pb::executableDir().c_str());
-    pb::ui::applyStyle();
+    pb::ui::loadFonts(pb::executableDir().c_str(), uiScale);
+    pb::ui::applyStyle(uiScale);
     ImGui_ImplGlfw_InitForOpenGL(window, true);
     ImGui_ImplOpenGL3_Init("#version 330 core");
 
     if (headless) {
-        const int rc = runHeadlessScreenshot(opt, window);
+        const int rc = runHeadlessScreenshot(opt, window, uiScale);
         ImGui_ImplOpenGL3_Shutdown();
         ImGui_ImplGlfw_Shutdown();
         ImGui::DestroyContext();
@@ -188,6 +200,7 @@ int main(int argc, char** argv) {
         PB_ERROR("editor init failed");
         return 2;
     }
+    editor.attachSettings(std::move(settings), uiScale);
     if (opt.pro) editor.setProMode();
     if (!opt.mapPath.empty()) editor.openMap(opt.mapPath);
 
@@ -207,6 +220,10 @@ int main(int argc, char** argv) {
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
         glfwSwapBuffers(window);
+
+        float newScale = 1.0f;
+        if (editor.takeFontRebuild(newScale))
+            pb::ui::rebuildFonts(pb::executableDir().c_str(), newScale);
     }
 
     editor.shutdown();

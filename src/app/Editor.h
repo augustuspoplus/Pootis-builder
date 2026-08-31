@@ -5,6 +5,7 @@
 
 #include <imgui.h>
 
+#include "app/Settings.h"
 #include "bsp/BspFile.h"
 #include "bsp/BspMesh.h"
 #include "render/Camera.h"
@@ -31,6 +32,13 @@ public:
     bool openMap(const std::string& path);
     void promptOpenMap();  // native file dialog
     void setProMode() { mode_ = Mode::Pro; layoutDirty_ = true; }
+
+    // Persisted settings + UI scaling (the font atlas rebuild is done by the
+    // caller so it happens outside a frame).
+    void attachSettings(Settings s, float effectiveScale);
+    void requestUiScale(float scale);
+    bool takeFontRebuild(float& outScale);
+    void showWelcome() { showWelcome_ = true; }
 
     // Per-frame: process viewport input, render the four views to FBOs, then
     // emit the ImGui layout. Call between ImGui::NewFrame and ImGui::Render.
@@ -64,6 +72,8 @@ private:
     void buildDockLayout(unsigned int dockId, const ImVec2& size);
     void drawTopBar();
     void drawViewMenuPopup();
+    void drawWelcome();
+    void uiScaleMenu();
     void drawViewportPanel(ViewPanel& p);
     void drawBuildKit();
     void drawSelectionPanel();
@@ -99,6 +109,11 @@ private:
     bool snap_ = true;
     int kitTab_ = 0;
     std::string placing_;
+
+    Settings prefs_;
+    float uiScale_ = 1.0f;
+    bool scaleDirty_ = false;
+    bool showWelcome_ = true;
 };
 
 }  // namespace pb
