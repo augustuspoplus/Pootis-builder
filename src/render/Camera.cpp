@@ -68,6 +68,20 @@ glm::mat4 Camera::proj(float aspect) const {
     return glm::ortho(-w, w, -h, h, -100000.0f, 100000.0f);
 }
 
+void Camera::pixelRay(const glm::vec2& px, const glm::vec2& vp, glm::vec3& outOrigin,
+                      glm::vec3& outDir) const {
+    const float aspect = vp.y > 0.0f ? vp.x / vp.y : 1.0f;
+    const glm::vec2 ndc((px.x / std::max(vp.x, 1.0f)) * 2.0f - 1.0f,
+                        1.0f - (px.y / std::max(vp.y, 1.0f)) * 2.0f);
+    const glm::mat4 invVP = glm::inverse(proj(aspect) * view());
+    glm::vec4 n = invVP * glm::vec4(ndc.x, ndc.y, -1.0f, 1.0f);
+    glm::vec4 f = invVP * glm::vec4(ndc.x, ndc.y, 1.0f, 1.0f);
+    n /= n.w;
+    f /= f.w;
+    outOrigin = glm::vec3(n);
+    outDir = glm::normalize(glm::vec3(f - n));
+}
+
 void Camera::frameBounds(const glm::vec3& mn, const glm::vec3& mx) {
     const glm::vec3 c = 0.5f * (mn + mx);
     const glm::vec3 ext = 0.5f * (mx - mn);

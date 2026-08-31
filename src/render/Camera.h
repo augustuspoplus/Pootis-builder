@@ -31,6 +31,10 @@ public:
     glm::mat4 view() const;
     glm::mat4 proj(float aspect) const;
 
+    // World-space ray through a pixel of a viewport of the given size.
+    void pixelRay(const glm::vec2& px, const glm::vec2& viewportPx, glm::vec3& outOrigin,
+                  glm::vec3& outDir) const;
+
     // Frame an axis-aligned box so it fills the view.
     void frameBounds(const glm::vec3& mn, const glm::vec3& mx);
 

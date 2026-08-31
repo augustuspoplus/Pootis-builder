@@ -42,6 +42,9 @@ public:
     void renderView(const Camera& cam, int pxW, int pxH, const RenderSettings& s,
                     int pxX = 0, int pxY = 0);
 
+    // Bright overlay outline for the current selection (line-pairs, world space).
+    void setSelectionWire(const std::vector<glm::vec3>& lines);
+
     bool hasWorld() const { return indexCount_ > 0 || wireCount_ > 0; }
     glm::vec3 boundsMin() const { return boundsMin_; }
     glm::vec3 boundsMax() const { return boundsMax_; }
@@ -76,6 +79,11 @@ private:
 
     // Dynamic marker line buffer.
     GLuint markerVao_ = 0, markerVbo_ = 0;
+
+    // Selection outline.
+    GLuint selVao_ = 0, selVbo_ = 0;
+    GLsizei selCount_ = 0;
+    void drawSelectionWire(const glm::mat4& vp);
 
     std::vector<PropInstance> props_;
     std::vector<PointEntity> pointEntities_;

@@ -72,6 +72,8 @@ bool SceneRenderer::init() {
     buildGrid();
     glGenVertexArrays(1, &markerVao_);
     glGenBuffers(1, &markerVbo_);
+    glGenVertexArrays(1, &selVao_);
+    glGenBuffers(1, &selVbo_);
     return true;
 }
 
@@ -360,6 +362,38 @@ void SceneRenderer::drawMarkers(const glm::mat4& vp, const RenderSettings& s, bo
     }
 }
 
+void SceneRenderer::setSelectionWire(const std::vector<glm::vec3>& lines) {
+    selCount_ = static_cast<GLsizei>(lines.size());
+    if (selCount_ == 0) return;
+    glBindVertexArray(selVao_);
+    glBindBuffer(GL_ARRAY_BUFFER, selVbo_);
+    glBufferData(GL_ARRAY_BUFFER, lines.size() * sizeof(glm::vec3), lines.data(),
+                 GL_DYNAMIC_DRAW);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(glm::vec3), nullptr);
+    glBindVertexArray(0);
+}
+
+void SceneRenderer::drawSelectionWire(const glm::mat4& vp) {
+    if (selCount_ == 0) return;
+    lineShader_.use();
+    lineShader_.set("uMVP", vp);
+    glBindVertexArray(selVao_);
+    // Faint pass through occluders, then a bright depth-tested pass on top.
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glDisable(GL_DEPTH_TEST);
+    lineShader_.set("uColor", glm::vec4(0.98f, 0.66f, 0.30f, 0.28f));
+    glDrawArrays(GL_LINES, 0, selCount_);
+    glEnable(GL_DEPTH_TEST);
+    glDepthFunc(GL_LEQUAL);
+    lineShader_.set("uColor", glm::vec4(1.0f, 0.72f, 0.34f, 1.0f));
+    glDrawArrays(GL_LINES, 0, selCount_);
+    glDepthFunc(GL_LESS);
+    glDisable(GL_BLEND);
+    glBindVertexArray(0);
+}
+
 void SceneRenderer::renderView(const Camera& cam, int pxW, int pxH,
                                const RenderSettings& s, int pxX, int pxY) {
     const bool ortho = cam.kind != ViewKind::Perspective;
@@ -391,6 +425,7 @@ void SceneRenderer::renderView(const Camera& cam, int pxW, int pxH,
         }
         drawMarkers(vp, s, false);
     }
+    drawSelectionWire(vp);
 }
 
 }  // namespace pb

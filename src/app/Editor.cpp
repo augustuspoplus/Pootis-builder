@@ -13,6 +13,7 @@
 #include "core/Log.h"
 #include "gpu/Gl.h"
 #include "map/MapMesh.h"
+#include "map/Raycast.h"
 #include "platform/FileDialog.h"
 
 namespace fs = std::filesystem;
@@ -92,6 +93,7 @@ bool Editor::takeFontRebuild(float& outScale) {
 }
 
 bool Editor::openMap(const std::string& path) {
+    clearSelection();
     const std::string ext = [&] {
         std::string e = fs::path(path).extension().string();
         std::transform(e.begin(), e.end(), e.begin(), ::tolower);
@@ -627,6 +629,97 @@ void Editor::handleViewportInput(ViewPanel& p) {
     }
 
     if (ImGui::IsKeyPressed(ImGuiKey_F) && hasMap()) frameAllViews();
+
+    // Left-click select (no drag) with the Select tool on an editable document.
+    if (hasDoc() && tool_ == Tool::Select &&
+        ImGui::IsMouseReleased(ImGuiMouseButton_Left) &&
+        !ImGui::IsMouseDragPastThreshold(ImGuiMouseButton_Left, 4.0f)) {
+        const ImVec2 m = ImGui::GetMousePos();
+        pickAt(p, {m.x - p.contentMin.x, m.y - p.contentMin.y}, io.KeyShift);
+    }
+    if (ImGui::IsKeyPressed(ImGuiKey_Escape) && !selection_.empty()) clearSelection();
+    if (ImGui::IsKeyPressed(ImGuiKey_Delete) && !selection_.empty()) {
+        // Delete world solids (highest index first). Entity-brush delete later.
+        std::vector<int> ws;
+        for (const auto& r : selection_)
+            if (r.entity < 0) ws.push_back(r.solid);
+        std::sort(ws.rbegin(), ws.rend());
+        for (int i : ws)
+            if (i < static_cast<int>(doc_.worldSolids().size()))
+                doc_.worldSolids().erase(doc_.worldSolids().begin() + i);
+        doc_.markDirty();
+        clearSelection();
+        buildAndUpload(meshOpts_);
+        status_ = "Deleted " + std::to_string(ws.size()) + " brush(es)";
+    }
+}
+
+void Editor::pickAt(ViewPanel& p, const glm::vec2& px, bool additive) {
+    glm::vec3 ro, rd;
+    p.camera.pixelRay(px, p.contentSize, ro, rd);
+
+    map::SolidRef best;
+    float bestT = 1e30f;
+    auto test = [&](const map::Solid& s, int ent, int idx) {
+        float t;
+        if (s.valid && map::raySolid(ro, rd, s, t) && t < bestT) {
+            bestT = t;
+            best = {ent, idx};
+        }
+    };
+    const auto& ws = doc_.worldSolids();
+    for (int i = 0; i < static_cast<int>(ws.size()); ++i) test(ws[i], -1, i);
+    for (int e = 0; e < static_cast<int>(doc_.entities().size()); ++e) {
+        const auto& es = doc_.entities()[e].solids;
+        for (int i = 0; i < static_cast<int>(es.size()); ++i) test(es[i], e, i);
+    }
+
+    if (!best.valid()) {
+        if (!additive) clearSelection();
+        return;
+    }
+    if (additive) {
+        auto it = std::find(selection_.begin(), selection_.end(), best);
+        if (it != selection_.end())
+            selection_.erase(it);
+        else
+            selection_.push_back(best);
+    } else {
+        selection_ = {best};
+    }
+    rebuildSelectionWire();
+    status_ = std::to_string(selection_.size()) + " brush(es) selected";
+}
+
+void Editor::rebuildSelectionWire() {
+    std::vector<glm::vec3> lines;
+    for (const auto& r : selection_)
+        if (const map::Solid* s = doc_.resolve(r)) {
+            auto w = map::solidWire(*s);
+            lines.insert(lines.end(), w.begin(), w.end());
+        }
+    renderer_.setSelectionWire(lines);
+}
+
+void Editor::clearSelection() {
+    selection_.clear();
+    renderer_.setSelectionWire({});
+}
+
+void Editor::debugSelectWorldSolid(int i) {
+    if (i >= 0 && i < static_cast<int>(doc_.worldSolids().size())) {
+        selection_ = {{-1, i}};
+        rebuildSelectionWire();
+        const map::Solid* s = doc_.resolve(selection_[0]);
+        if (s)
+            for (auto& v : views_) {
+                if (v.kind == ViewKind::Perspective) {
+                    v.camera.pos = s->center() - v.camera.forward() * 320.0f;
+                } else {
+                    v.camera.orthoCenter = s->center();
+                }
+            }
+    }
 }
 
 // ---------------------------------------------------------------------------

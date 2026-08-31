@@ -33,6 +33,7 @@ public:
     bool openMap(const std::string& path);
     void promptOpenMap();  // native file dialog
     void setProMode() { mode_ = Mode::Pro; layoutDirty_ = true; }
+    void debugSelectWorldSolid(int i);  // test hook for headless screenshots
 
     // Persisted settings + UI scaling (the font atlas rebuild is done by the
     // caller so it happens outside a frame).
@@ -85,6 +86,9 @@ private:
     void drawEntityCatalog();
     void drawStatusBar();
     void handleViewportInput(ViewPanel& p);
+    void pickAt(ViewPanel& p, const glm::vec2& pxInViewport, bool additive);
+    void rebuildSelectionWire();
+    void clearSelection();
 
     GLFWwindow* window_ = nullptr;
     BspFile bsp_;
@@ -104,6 +108,8 @@ private:
     char materialFilter_[128] = {0};
     char textureFilter_[128] = {0};
     float flySpeed_ = 900.0f;
+
+    std::vector<map::SolidRef> selection_;
 
     Mode mode_ = Mode::Simple;
     Tool tool_ = Tool::Select;
