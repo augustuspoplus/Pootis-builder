@@ -31,6 +31,7 @@ struct Options {
     bool quad = false;
     bool ui = false;  // capture the full docked UI, not just a viewport
     bool pro = false;
+    int selectSolid = -1;
     int width = 1600;
     int height = 950;
     int warmupFrames = 8;
@@ -53,6 +54,7 @@ Options parseArgs(int argc, char** argv) {
         if (a == "--screenshot") o.screenshotPath = next("");
         else if (a == "--ui") o.ui = true;
         else if (a == "--pro") o.pro = true;
+        else if (a == "--select") o.selectSolid = std::atoi(next("0").c_str());
         else if (a == "--view") {
             const std::string v = next("persp");
             o.quad = (v == "quad");
@@ -72,6 +74,7 @@ int runHeadlessScreenshot(const Options& opt, GLFWwindow* window, float uiScale)
     if (opt.pro) editor.setProMode();
     if (!opt.mapPath.empty() && !editor.openMap(opt.mapPath))
         PB_WARN("map did not load; screenshot will show an empty scene");
+    if (opt.selectSolid >= 0) editor.debugSelectWorldSolid(opt.selectSolid);
 
     std::vector<uint8_t> rgba;
 
