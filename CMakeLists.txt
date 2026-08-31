@@ -81,6 +81,7 @@ file(GLOB_RECURSE POOTIS_SOURCES CONFIGURE_DEPENDS src/*.cpp)
 add_executable(PootisBuilder ${POOTIS_SOURCES})
 target_include_directories(PootisBuilder PRIVATE
     src
+    third_party
     ${stb_SOURCE_DIR})
 target_link_libraries(PootisBuilder PRIVATE
     glad glfw imgui glm::glm lzma

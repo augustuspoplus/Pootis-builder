@@ -3,6 +3,8 @@
 #include <memory>
 #include <string>
 
+#include <imgui.h>
+
 #include "bsp/BspFile.h"
 #include "bsp/BspMesh.h"
 #include "render/Camera.h"
@@ -28,6 +30,7 @@ public:
 
     bool openMap(const std::string& path);
     void promptOpenMap();  // native file dialog
+    void setProMode() { mode_ = Mode::Pro; layoutDirty_ = true; }
 
     // Per-frame: process viewport input, render the four views to FBOs, then
     // emit the ImGui layout. Call between ImGui::NewFrame and ImGui::Render.
@@ -53,10 +56,17 @@ private:
         glm::vec2 contentSize{0.0f};
     };
 
+    enum class Mode { Simple, Pro };
+    enum class Tool { Select, Block, Vertex, Clip, Texture, Entity };
+
     void buildAndUpload(const MeshBuildOptions& opts);
     void frameAllViews();
-    void drawMenuBar();
+    void buildDockLayout(unsigned int dockId, const ImVec2& size);
+    void drawTopBar();
+    void drawViewMenuPopup();
     void drawViewportPanel(ViewPanel& p);
+    void drawBuildKit();
+    void drawSelectionPanel();
     void drawOutliner();
     void drawMaterialList();
     void drawTextureBrowser();
@@ -81,6 +91,14 @@ private:
     char materialFilter_[128] = {0};
     char textureFilter_[128] = {0};
     float flySpeed_ = 900.0f;
+
+    Mode mode_ = Mode::Simple;
+    Tool tool_ = Tool::Select;
+    bool layoutDirty_ = true;
+    int gridSize_ = 64;
+    bool snap_ = true;
+    int kitTab_ = 0;
+    std::string placing_;
 };
 
 }  // namespace pb
