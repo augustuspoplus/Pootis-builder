@@ -51,6 +51,19 @@ about closing that gap.
 - FGD parser (`bin/tf.fgd` + bundled `tf-abs.fgd`) → entity catalogue.
 - Place point/brush entities; FGD-driven properties panel; entity I/O editor.
 - Entity sprites/helpers in the viewports.
+- **Properties panel UX** (applies to brushes + entities): plain-language field
+  labels and inline help from the FGD, grouped into collapsible sections, common
+  fields promoted to the top, "advanced" fields tucked below — but nothing
+  removed. Every field typed (enum → dropdown, flags → checkboxes, color →
+  swatch+picker, angles → dial, material/model → picker with thumbnail,
+  target → entity dropdown). Live preview of the change in the viewport.
+
+### Everything gets a preview
+Design rule for the whole UI: every pickable thing shows what it is before you
+commit. Textures + models already have thumbnails; extend to entities (sprite/
+model preview), prefabs (rendered thumbnail), kit pieces (mini 3D preview),
+sky/fog/lighting presets (preview swatch), colors (swatch), and a hover preview
+in every list.
 
 ### E — Save, compile, play
 - VMF writer.
@@ -90,6 +103,15 @@ about closing that gap.
 - **Simple-mode tutorial** — 3-step interactive first-map walkthrough.
 - **In-editor changelog / tips** on the welcome screen.
 
+### H — External 3D model import (do LAST, after A–G)
+Import meshes in common formats (OBJ, glTF/GLB, FBX, STL, DAE, PLY) directly
+into the editor. Options: (a) reference as a prop, converting to Source
+MDL on compile via studiomdl, or (b) drop as `func_brush`/`func_detail` display
+geometry. Uses a vendored importer (assimp, or cgltf + fast_obj + a small FBX
+reader). Preview in the asset browser; place like any prop; pack the source
+mesh + generated MDL into the bsp on build.
+
 ## "Good state" bar
 Milestones **A + B + E** = open a map, move/add/delete brushwork, save, and test
 it in-game. C, D, F + G turn it into a genuine Hammer replacement and then some.
+H is the stretch goal once the rest is solid.

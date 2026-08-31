@@ -8,6 +8,7 @@
 #include "app/Settings.h"
 #include "bsp/BspFile.h"
 #include "bsp/BspMesh.h"
+#include "map/MapDocument.h"
 #include "render/Camera.h"
 #include "render/Framebuffer.h"
 #include "render/MaterialLibrary.h"
@@ -50,7 +51,8 @@ public:
     // Offscreen 2x2 render matching the default editor layout.
     bool renderQuadToImage(int w, int h, std::vector<uint8_t>& rgba);
 
-    bool hasMap() const { return bsp_.loaded(); }
+    bool hasMap() const { return bsp_.loaded() || !doc_.empty(); }
+    bool hasDoc() const { return !doc_.empty(); }
     const std::string& status() const { return status_; }
 
 private:
@@ -86,6 +88,7 @@ private:
 
     GLFWwindow* window_ = nullptr;
     BspFile bsp_;
+    map::MapDocument doc_;
     WorldMesh mesh_;
     source::SourceFs sourceFs_;
     MaterialLibrary materials_;

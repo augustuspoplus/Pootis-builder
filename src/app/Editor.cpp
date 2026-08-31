@@ -12,6 +12,7 @@
 #include "core/File.h"
 #include "core/Log.h"
 #include "gpu/Gl.h"
+#include "map/MapMesh.h"
 #include "platform/FileDialog.h"
 
 namespace fs = std::filesystem;
@@ -36,7 +37,10 @@ void dropCallback(GLFWwindow* w, int count, const char** paths) {
 void Editor::promptOpenMap() {
     const char* dir = fs::exists(kTf2Maps) ? kTf2Maps : nullptr;
     const std::string picked = openFileDialog(
-        "Open Source BSP map", "Source BSP maps\0*.bsp\0All files\0*.*\0\0", dir);
+        "Open a map",
+        "Source maps (*.bsp *.vmf)\0*.bsp;*.vmf\0Compiled BSP\0*.bsp\0Hammer VMF\0*.vmf\0"
+        "All files\0*.*\0\0",
+        dir);
     if (!picked.empty()) openMap(picked);
 }
 
@@ -94,8 +98,25 @@ bool Editor::openMap(const std::string& path) {
         return e;
     }();
 
+    if (ext == ".vmf") {
+        std::string err;
+        if (!doc_.loadVmf(path, &err)) {
+            status_ = "Failed to load VMF: " + err;
+            return false;
+        }
+        bsp_ = BspFile{};
+        buildAndUpload(meshOpts_);
+        frameAllViews();
+        status_ = doc_.name() + "  —  " + std::to_string(doc_.worldSolids().size()) +
+                  " brushes, " + std::to_string(doc_.entities().size()) + " entities";
+        prefs_.pushRecent(path);
+        prefs_.save();
+        showWelcome_ = false;
+        return true;
+    }
+
     if (ext != ".bsp") {
-        status_ = "Only .bsp loading is implemented in this build: " + path;
+        status_ = "Open a .bsp or .vmf: " + path;
         PB_WARN("%s", status_.c_str());
         return false;
     }
@@ -105,6 +126,7 @@ bool Editor::openMap(const std::string& path) {
         status_ = "Failed to load: " + err;
         return false;
     }
+    doc_.clear();
     buildAndUpload(meshOpts_);
     frameAllViews();
     status_ = bsp_.name() + "  —  " + std::to_string(mesh_.drawnFaces) + " faces, " +
@@ -117,7 +139,10 @@ bool Editor::openMap(const std::string& path) {
 }
 
 void Editor::buildAndUpload(const MeshBuildOptions& opts) {
-    mesh_ = buildWorldMesh(bsp_, opts);
+    if (!doc_.empty())
+        mesh_ = map::buildDocMesh(doc_, materials_);
+    else
+        mesh_ = buildWorldMesh(bsp_, opts);
     renderer_.upload(mesh_, &materials_);
 
     int textured = 0, missing = 0, shown = 0;
