@@ -1,0 +1,76 @@
+#include "app/Settings.h"
+
+#include <algorithm>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <sstream>
+
+#include "core/File.h"
+#include "core/Log.h"
+
+namespace fs = std::filesystem;
+
+namespace pb {
+
+namespace {
+constexpr size_t kMaxRecent = 10;
+}
+
+std::string Settings::filePath() {
+#ifdef _WIN32
+    if (const char* la = std::getenv("LOCALAPPDATA")) {
+        const fs::path dir = fs::path(la) / "PootisBuilder";
+        std::error_code ec;
+        fs::create_directories(dir, ec);
+        return (dir / "pootis.ini").string();
+    }
+#endif
+    return executableDir() + "/pootis.ini";
+}
+
+Settings Settings::load() {
+    Settings s;
+    std::ifstream f(filePath());
+    if (!f) return s;
+    std::string line;
+    while (std::getline(f, line)) {
+        const auto eq = line.find('=');
+        if (eq == std::string::npos) continue;
+        const std::string key = line.substr(0, eq);
+        const std::string val = line.substr(eq + 1);
+        if (key == "ui_scale") s.uiScale = std::strtof(val.c_str(), nullptr);
+        else if (key == "show_welcome") s.showWelcome = (val == "1");
+        else if (key.rfind("recent", 0) == 0 && !val.empty()) s.recent.push_back(val);
+    }
+    if (s.recent.size() > kMaxRecent) s.recent.resize(kMaxRecent);
+    return s;
+}
+
+void Settings::save() const {
+    std::ofstream f(filePath(), std::ios::trunc);
+    if (!f) {
+        PB_WARN("could not write settings to %s", filePath().c_str());
+        return;
+    }
+    f << "ui_scale=" << uiScale << "\n";
+    f << "show_welcome=" << (showWelcome ? 1 : 0) << "\n";
+    for (size_t i = 0; i < recent.size() && i < kMaxRecent; ++i)
+        f << "recent" << i << "=" << recent[i] << "\n";
+}
+
+void Settings::pushRecent(const std::string& path) {
+    std::string norm = path;
+    std::replace(norm.begin(), norm.end(), '\\', '/');
+    recent.erase(std::remove_if(recent.begin(), recent.end(),
+                                [&](const std::string& p) {
+                                    std::string q = p;
+                                    std::replace(q.begin(), q.end(), '\\', '/');
+                                    return q == norm;
+                                }),
+                 recent.end());
+    recent.insert(recent.begin(), norm);
+    if (recent.size() > kMaxRecent) recent.resize(kMaxRecent);
+}
+
+}  // namespace pb

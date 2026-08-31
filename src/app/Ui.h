@@ -32,12 +32,16 @@ extern ImFont* fontUiMed;   // 16px medium   — labels, headers
 extern ImFont* fontBig;     // 21px semibold — titles
 extern ImFont* fontMono;    // 14.5px mono   — coordinates, keycaps
 
-// Loads IBM Plex + Font Awesome from <exeDir>/assets/fonts. Falls back to the
-// built-in font if the files are missing.
-void loadFonts(const char* exeDir);
+// Loads IBM Plex + Font Awesome from <exeDir>/assets/fonts at the given scale
+// (1.0 = default). Falls back to the built-in font if the files are missing.
+void loadFonts(const char* exeDir, float scale = 1.0f);
 
-// Applies the Pootis Builder style to the current ImGui context.
-void applyStyle();
+// Applies the Pootis Builder style, with all metrics multiplied by `scale`.
+void applyStyle(float scale = 1.0f);
+
+// Clears + reloads the font atlas and re-applies the style at a new scale.
+// Call once (e.g. after ImGui::Render) when the user changes the UI scale.
+void rebuildFonts(const char* exeDir, float scale);
 
 // --- small widgets --------------------------------------------------------
 
