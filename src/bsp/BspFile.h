@@ -69,6 +69,9 @@ private:
     std::vector<uint8_t> data_;
     Header_t header_{};
 
+    // Lazily-decompressed storage for LZMA-compressed lumps, keyed by lump id.
+    mutable std::unordered_map<int, std::vector<uint8_t>> lumpScratch_;
+
     std::vector<int32_t> texStringTable_;
     std::vector<char> texStringData_;
     std::vector<TexData_t> texData_;

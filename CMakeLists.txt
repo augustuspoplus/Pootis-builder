@@ -51,6 +51,13 @@ add_library(glad STATIC src/gpu/glad_impl.c)
 target_include_directories(glad PUBLIC ${glfw_SOURCE_DIR}/deps)
 
 # ---------------------------------------------------------------------------
+# LZMA decoder (7-Zip SDK, public domain) for Source's compressed BSP lumps.
+# ---------------------------------------------------------------------------
+add_library(lzma STATIC third_party/lzma/LzmaDec.c)
+target_include_directories(lzma PUBLIC third_party/lzma)
+target_compile_definitions(lzma PRIVATE _7ZIP_ST)
+
+# ---------------------------------------------------------------------------
 # Dear ImGui (core + GLFW/OpenGL3 backends)
 # ---------------------------------------------------------------------------
 add_library(imgui STATIC
@@ -76,7 +83,7 @@ target_include_directories(PootisBuilder PRIVATE
     src
     ${stb_SOURCE_DIR})
 target_link_libraries(PootisBuilder PRIVATE
-    glad glfw imgui glm::glm
+    glad glfw imgui glm::glm lzma
     opengl32 gdi32 comdlg32)
 
 if(WIN32)
