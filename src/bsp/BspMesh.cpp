@@ -166,7 +166,8 @@ WorldMesh buildWorldMesh(const BspFile& bsp, const MeshBuildOptions& opts) {
     const auto verts = bsp.lumpArray<Vector_t>(LUMP_VERTEXES);
     const auto edges = bsp.lumpArray<Edge_t>(LUMP_EDGES);
     const auto surfedges = bsp.lumpArray<int32_t>(LUMP_SURFEDGES);
-    const auto faces = bsp.lumpArray<Face_t>(LUMP_FACES);
+    auto faces = bsp.lumpArray<Face_t>(LUMP_FACES);
+    if (faces.empty()) faces = bsp.lumpArray<Face_t>(LUMP_FACES_HDR);
     const auto texinfos = bsp.lumpArray<TexInfo_t>(LUMP_TEXINFO);
     const auto planes = bsp.lumpArray<Plane_t>(LUMP_PLANES);
     const auto models = bsp.lumpArray<Model_t>(LUMP_MODELS);
@@ -212,7 +213,10 @@ WorldMesh buildWorldMesh(const BspFile& bsp, const MeshBuildOptions& opts) {
 
     LightmapPacker packer;
     packer.reserveWhite();
-    const bool wantLightmaps = lighting != nullptr && !lightingHdr;  // LDR path first
+    // Both LDR (LUMP_LIGHTING) and HDR (LUMP_LIGHTING_HDR) store ColorRGBExp32
+    // samples, so the same RGBE->sRGB path works; HDR just needs a lower gain.
+    const bool wantLightmaps = lighting != nullptr;
+    const float lmGain = opts.lightmapGain * (lightingHdr ? 0.55f : 1.0f);
 
     for (const auto& range : ranges) {
         for (int f = range.first; f < range.first + range.count; ++f) {
@@ -271,7 +275,7 @@ WorldMesh buildWorldMesh(const BspFile& bsp, const MeshBuildOptions& opts) {
             lighting + face.lightofs);
         for (int y = 0; y < ef.lmH; ++y) {
             for (int x = 0; x < ef.lmW; ++x) {
-                const glm::vec3 c = rgbeToSrgb(samples[y * ef.lmW + x], opts.lightmapGain);
+                const glm::vec3 c = rgbeToSrgb(samples[y * ef.lmW + x], lmGain);
                 const size_t di =
                     (static_cast<size_t>(ef.lmY + y) * atlasW + (ef.lmX + x)) * 3;
                 mesh.lightmapAtlas[di + 0] = static_cast<uint8_t>(c.r * 255.0f + 0.5f);

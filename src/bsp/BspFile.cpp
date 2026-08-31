@@ -3,6 +3,7 @@
 #include <cstring>
 #include <filesystem>
 
+#include "bsp/Lzma.h"
 #include "core/File.h"
 #include "core/Log.h"
 
@@ -20,6 +21,7 @@ bool BspFile::load(const std::string& path, std::string* error) {
     loaded_ = false;
     entities_.clear();
     materialCache_.clear();
+    lumpScratch_.clear();
     path_ = path;
     name_ = fs::path(path).stem().string();
 
@@ -57,12 +59,31 @@ bool BspFile::lumpBytes(int lump, const uint8_t*& ptr, size_t& size) const {
     if (lump < 0 || lump >= kNumLumps) return false;
     const Lump_t& l = header_.lumps[lump];
     if (l.filelen <= 0) return false;
-    if (l.fourCC[0] || l.fourCC[1] || l.fourCC[2] || l.fourCC[3]) {
-        PB_WARN("lump %d is LZMA-compressed; skipping (not yet supported)", lump);
-        return false;
+
+    const uint8_t* raw = data_.data() + l.fileofs;
+    const size_t rawLen = static_cast<size_t>(l.filelen);
+
+    // A lump is LZMA-compressed when its fourCC is non-zero *or* the payload
+    // itself carries the Valve "LZMA" header (compressed lumps in practice).
+    const bool markedCompressed =
+        l.fourCC[0] || l.fourCC[1] || l.fourCC[2] || l.fourCC[3];
+    if (markedCompressed || isLzmaLump(raw, rawLen)) {
+        auto it = lumpScratch_.find(lump);
+        if (it == lumpScratch_.end()) {
+            std::vector<uint8_t> decoded = decompressLzmaLump(raw, rawLen);
+            if (decoded.empty()) {
+                PB_WARN("lump %d: LZMA decompression failed", lump);
+                return false;
+            }
+            it = lumpScratch_.emplace(lump, std::move(decoded)).first;
+        }
+        ptr = it->second.data();
+        size = it->second.size();
+        return true;
     }
-    ptr = data_.data() + l.fileofs;
-    size = static_cast<size_t>(l.filelen);
+
+    ptr = raw;
+    size = rawLen;
     return true;
 }
 
