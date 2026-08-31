@@ -117,6 +117,14 @@ std::string BspFile::materialName(int texdataIndex) const {
     return name;
 }
 
+bool BspFile::texdataDims(int texdataIndex, int& width, int& height) const {
+    if (texdataIndex < 0 || texdataIndex >= static_cast<int>(texData_.size()))
+        return false;
+    width = texData_[texdataIndex].width;
+    height = texData_[texdataIndex].height;
+    return width > 0 && height > 0;
+}
+
 void BspFile::parseEntities(const char* text, size_t len) {
     size_t i = 0;
     auto skipWs = [&] {
