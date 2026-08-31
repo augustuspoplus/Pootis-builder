@@ -77,7 +77,7 @@ target_include_directories(PootisBuilder PRIVATE
     ${stb_SOURCE_DIR})
 target_link_libraries(PootisBuilder PRIVATE
     glad glfw imgui glm::glm
-    opengl32 gdi32)
+    opengl32 gdi32 comdlg32)
 
 if(WIN32)
     target_compile_definitions(PootisBuilder PRIVATE

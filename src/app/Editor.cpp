@@ -9,17 +9,39 @@
 
 #include "core/Log.h"
 #include "gpu/Gl.h"
+#include "platform/FileDialog.h"
 
 namespace fs = std::filesystem;
 
 namespace pb {
 namespace {
 constexpr float kDeg2Rad = 3.14159265358979323846f / 180.0f;
+
+const char* kTf2Maps =
+    "C:/Program Files (x86)/Steam/steamapps/common/Team Fortress 2/tf/maps";
+
+void dropCallback(GLFWwindow* w, int count, const char** paths);
+}  // namespace
+
+namespace {
+void dropCallback(GLFWwindow* w, int count, const char** paths) {
+    auto* self = static_cast<Editor*>(glfwGetWindowUserPointer(w));
+    if (self && count > 0 && paths && paths[0]) self->openMap(paths[0]);
+}
+}  // namespace
+
+void Editor::promptOpenMap() {
+    const char* dir = fs::exists(kTf2Maps) ? kTf2Maps : nullptr;
+    const std::string picked = openFileDialog(
+        "Open Source BSP map", "Source BSP maps\0*.bsp\0All files\0*.*\0\0", dir);
+    if (!picked.empty()) openMap(picked);
 }
 
 bool Editor::init(GLFWwindow* window) {
     window_ = window;
     if (!renderer_.init()) return false;
+    glfwSetWindowUserPointer(window, this);
+    glfwSetDropCallback(window, dropCallback);
 
     const char* titles[4] = {"3D View", "Top (x/y)", "Front (x/z)", "Side (y/z)"};
     const ViewKind kinds[4] = {ViewKind::Perspective, ViewKind::Top, ViewKind::Front,
@@ -116,6 +138,8 @@ void Editor::frame() {
     ImGui::DockSpace(dockId, ImVec2(0, 0), ImGuiDockNodeFlags_PassthruCentralNode);
     ImGui::End();
 
+    if (ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_O)) promptOpenMap();
+
     drawOutliner();
     drawMaterialList();
     drawEntityCatalog();
@@ -126,10 +150,7 @@ void Editor::frame() {
 void Editor::drawMenuBar() {
     if (!ImGui::BeginMenuBar()) return;
     if (ImGui::BeginMenu("File")) {
-        if (ImGui::MenuItem("Open BSP...", "Ctrl+O")) {
-            // Minimal: rely on the map passed on the command line for now.
-            status_ = "Pass a .bsp path on the command line (file dialog lands next).";
-        }
+        if (ImGui::MenuItem("Open BSP...", "Ctrl+O")) promptOpenMap();
         ImGui::Separator();
         if (ImGui::MenuItem("Exit")) glfwSetWindowShouldClose(window_, 1);
         ImGui::EndMenu();
@@ -187,8 +208,16 @@ void Editor::drawViewportPanel(ViewPanel& p) {
 
     // Corner label like Hammer.
     ImVec2 tl(p.contentMin.x, p.contentMin.y);
-    ImGui::GetWindowDrawList()->AddText(ImVec2(tl.x + 8, tl.y + 6),
-                                        IM_COL32(210, 210, 210, 200), p.title);
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    dl->AddText(ImVec2(tl.x + 8, tl.y + 6), IM_COL32(210, 210, 210, 200), p.title);
+
+    if (!hasMap() && p.kind == ViewKind::Perspective) {
+        const char* msg = "Open a .bsp  —  File > Open BSP  (Ctrl+O)  or drag one in";
+        const ImVec2 ts = ImGui::CalcTextSize(msg);
+        dl->AddText(ImVec2(tl.x + (p.contentSize.x - ts.x) * 0.5f,
+                           tl.y + (p.contentSize.y - ts.y) * 0.5f),
+                    IM_COL32(180, 180, 185, 220), msg);
+    }
     ImGui::End();
 }
 

@@ -25,6 +25,7 @@ public:
     void shutdown();
 
     bool openMap(const std::string& path);
+    void promptOpenMap();  // native file dialog
 
     // Per-frame: process viewport input, render the four views to FBOs, then
     // emit the ImGui layout. Call between ImGui::NewFrame and ImGui::Render.
