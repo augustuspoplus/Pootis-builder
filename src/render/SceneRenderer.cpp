@@ -36,6 +36,7 @@ uniform sampler2D uAlbedo;     // unit 1
 uniform float uExposure;
 uniform int uShadeMode;        // 0 tex+lm, 1 lightmap grid, 2 flat, 3 tex fullbright
 uniform int uAlphaTest;
+uniform float uConstAlpha;     // >=0 overrides output alpha (tool/trigger brushes)
 out vec4 fragColor;
 void main() {
     vec4 alb = texture(uAlbedo, vTexUV);
@@ -46,7 +47,8 @@ void main() {
     else if (uShadeMode == 1) c = lm * vTint;
     else if (uShadeMode == 2) c = vTint * 0.72 + 0.14;
     else                      c = alb.rgb;
-    fragColor = vec4(c * uExposure, 1.0);
+    float a = uConstAlpha >= 0.0 ? uConstAlpha : 1.0;
+    fragColor = vec4(c * uExposure, a);
 }
 )";
 
@@ -208,6 +210,9 @@ void SceneRenderer::drawSolid(const glm::mat4& vp, const RenderSettings& s) {
         glActiveTexture(GL_TEXTURE1);
         glBindTexture(GL_TEXTURE_2D, i < batchTex_.size() ? batchTex_[i] : 0);
         worldShader_.set("uAlphaTest", alpha == 1 ? 1 : 0);
+        const bool tool = b.material.rfind("tools/", 0) == 0 ||
+                          b.material.find("trigger") != std::string::npos;
+        worldShader_.set("uConstAlpha", alpha == 2 ? (tool ? 0.30f : 0.55f) : -1.0f);
         if (alpha == 2) {
             glEnable(GL_BLEND);
             glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
