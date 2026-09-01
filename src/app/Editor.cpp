@@ -208,12 +208,33 @@ void Editor::pollDecompile() {
 
 void Editor::buildAndUpload(const MeshBuildOptions& opts) {
     if (doc_.active()) {
-        mesh_ = map::buildDocMesh(doc_, materials_);
+        auto modelForClass = [this](const std::string& cls) -> std::string {
+            const fgd::EntityClass* ec = fgd_.flattened(cls);
+            return ec ? ec->studioModel : std::string();
+        };
+        mesh_ = map::buildDocMesh(doc_, materials_, modelForClass);
         if (meshOpts_.bakeProps) model::bakePropModels(mesh_, sourceFs_);
     } else {
         mesh_ = buildWorldMesh(bsp_, opts);
         if (meshOpts_.bakeProps) model::bakePropModels(mesh_, sourceFs_);
     }
+
+    // Baked prop geometry is appended after the mesh computes its bounds; grow
+    // the framing bounds to include it so a lone dropped prop isn't a speck.
+    if (doc_.active() && !mesh_.vertices.empty()) {
+        glm::vec3 mn(1e30f), mx(-1e30f);
+        for (const auto& v : mesh_.vertices) {
+            mn = glm::min(mn, v.pos);
+            mx = glm::max(mx, v.pos);
+        }
+        if (mn.x <= mx.x) {
+            mesh_.boundsMin = glm::min(mesh_.boundsMin, mn);
+            mesh_.boundsMax = glm::max(mesh_.boundsMax, mx);
+            mesh_.playBoundsMin = glm::min(mesh_.playBoundsMin, mn - glm::vec3(64));
+            mesh_.playBoundsMax = glm::max(mesh_.playBoundsMax, mx + glm::vec3(64));
+        }
+    }
+
     renderer_.upload(mesh_, &materials_);
 
     int textured = 0, missing = 0, shown = 0;
