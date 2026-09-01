@@ -17,6 +17,9 @@ struct CompileOptions {
     // .qc files to bake into models/ with studiomdl before vbsp runs (from
     // "import 3D model -> as prop"). Safe to leave empty.
     std::vector<std::string> modelQc;
+    // Extra files to pack into the .bsp with bspzip after vrad. Each entry is
+    // "<internal/bsp/path>|<absolute source path>". Empty = no packing.
+    std::vector<std::string> packFiles;
 };
 
 // Where TF2 and its compile tools live.

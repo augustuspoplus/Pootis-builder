@@ -548,6 +548,29 @@ void Editor::drawViewMenuPopup() {
         ImGui::TextDisabled("writes <map>.autosave.vmf + rolling .bak1-3 on save");
         ImGui::EndMenu();
     }
+    if (ImGui::BeginMenu(ICON_FA_VECTOR_SQUARE "  Cordon")) {
+        ImGui::MenuItem("Cordon on (compile only the box)", nullptr, &cordonOn_);
+        ImGui::SetNextItemWidth(200);
+        ImGui::DragFloat3("min##cordon", &cordonMin_.x, 4.0f, 0, 0, "%.0f");
+        ImGui::SetNextItemWidth(200);
+        ImGui::DragFloat3("max##cordon", &cordonMax_.x, 4.0f, 0, 0, "%.0f");
+        if (ImGui::MenuItem("Set to selection", nullptr, false, !selection_.empty())) {
+            glm::vec3 a(1e30f), b(-1e30f);
+            for (const auto& r : selection_)
+                if (const map::Solid* s = doc_.resolve(r)) {
+                    a = glm::min(a, s->boundsMin);
+                    b = glm::max(b, s->boundsMax);
+                }
+            if (a.x <= b.x) {
+                cordonMin_ = a - glm::vec3(16);
+                cordonMax_ = b + glm::vec3(16);
+            }
+        }
+        if (ImGui::MenuItem("Set to whole map", nullptr, false, hasDoc())) {
+            doc_.bounds(cordonMin_, cordonMax_);
+        }
+        ImGui::EndMenu();
+    }
     if (ImGui::BeginMenu(ICON_FA_CAMERA "  Camera")) {
         Camera& c3d = views_[0].camera;
         ImGui::TextDisabled("bookmarks");
@@ -791,6 +814,7 @@ void Editor::drawViewportPanel(ViewPanel& p) {
     drawFaceOverlay(p, aspect, dl);
     drawClipOverlay(p, aspect, dl);
     drawSelectionDims(p, aspect, dl);
+    drawCordonOverlay(p, aspect, dl);
 
     if (!hasMap() && p.kind == ViewKind::Perspective) {
         const char* msg = "Open a .bsp  —  File > Open BSP  (Ctrl+O)  or drag one in";
@@ -2247,6 +2271,50 @@ bool Editor::saveMap(bool forceDialog) {
     return false;
 }
 
+map::MapDocument Editor::buildCompileDoc() {
+    map::MapDocument out = doc_;
+    if (!cordonOn_) return out;
+    const glm::vec3 mn = glm::min(cordonMin_, cordonMax_);
+    const glm::vec3 mx = glm::max(cordonMin_, cordonMax_);
+    auto hits = [&](const glm::vec3& bmn, const glm::vec3& bmx) {
+        return bmn.x <= mx.x && bmx.x >= mn.x && bmn.y <= mx.y && bmx.y >= mn.y &&
+               bmn.z <= mx.z && bmx.z >= mn.z;
+    };
+
+    auto& ws = out.worldSolids();
+    ws.erase(std::remove_if(ws.begin(), ws.end(),
+                            [&](const map::Solid& s) {
+                                return !hits(s.boundsMin, s.boundsMax);
+                            }),
+             ws.end());
+
+    auto& es = out.entities();
+    es.erase(std::remove_if(es.begin(), es.end(),
+                            [&](const map::MapEntity& e) {
+                                if (e.solids.empty()) {
+                                    return !(e.origin.x >= mn.x && e.origin.x <= mx.x &&
+                                             e.origin.y >= mn.y && e.origin.y <= mx.y &&
+                                             e.origin.z >= mn.z && e.origin.z <= mx.z);
+                                }
+                                for (const auto& s : e.solids)
+                                    if (hits(s.boundsMin, s.boundsMax)) return false;
+                                return true;
+                            }),
+             es.end());
+
+    // Seal the region with a nodraw box shell so vbsp doesn't leak.
+    const float t = 32.0f;
+    map::Solid shellSrc = map::Solid::makeBox(mn - glm::vec3(t), mx + glm::vec3(t),
+                                              "tools/toolsnodraw");
+    for (auto& w : map::hollow(shellSrc, t)) {
+        w.id = out.nextId();
+        ws.push_back(std::move(w));
+    }
+    PB_INFO("cordon: %zu solids, %zu entities kept + 6 seal brushes",
+            ws.size() - 6, es.size());
+    return out;
+}
+
 void Editor::startCompile() {
     if (compiler_.running() || !hasDoc()) return;
     // A compile needs a real .vmf on disk. Save first (prompt if unsaved).
@@ -2258,6 +2326,21 @@ void Editor::startCompile() {
     } else {
         doc_.saveVmf(doc_.path());
     }
+
+    // With the cordon on, compile a filtered + sealed copy instead.
+    std::string compilePath = doc_.path();
+    if (cordonOn_) {
+        map::MapDocument cd = buildCompileDoc();
+        compilePath = (fs::path(doc_.path()).parent_path() /
+                       (doc_.name() + ".cordon.vmf")).string();
+        std::string err;
+        if (!cd.saveVmf(compilePath, &err, /*updateState=*/false)) {
+            status_ = "Cordon export failed: " + err;
+            return;
+        }
+        status_ = "Cordon active — compiling a boxed region.";
+    }
+
     if (!gamePaths_.valid()) gamePaths_ = compile::GamePaths::detect();
 
     compile::CompileOptions opts;
@@ -2267,8 +2350,9 @@ void Editor::startCompile() {
     opts.runVrad = compileVrad_;
     opts.launchGame = compileLaunch_;
     opts.modelQc = pendingModelQc_;
+    if (compilePack_) opts.packFiles = packFiles_;
     compileLogSeen_ = 0;
-    compiler_.start(doc_.path(), opts, gamePaths_);
+    compiler_.start(compilePath, opts, gamePaths_);
     status_ = "Compiling " + doc_.name() + " …";
 }
 
@@ -2295,6 +2379,43 @@ void Editor::drawCompileWindow() {
     ImGui::Checkbox("Lighting (vrad)", &compileVrad_);
     ImGui::SameLine(0, 16);
     ImGui::Checkbox("Launch TF2 when done", &compileLaunch_);
+
+    if (cordonOn_) {
+        ImGui::PushStyleColor(ImGuiCol_Text, col::warn);
+        ImGui::TextUnformatted(ICON_FA_VECTOR_SQUARE
+                               "  Cordon is ON — only the boxed region compiles.");
+        ImGui::PopStyleColor();
+    }
+
+    ImGui::Checkbox("Pack custom content into the .bsp (bspzip)", &compilePack_);
+    if (compilePack_) {
+        ImGui::Indent();
+        ImGui::SetNextItemWidth(-90);
+        ImGui::InputTextWithHint("##packadd", "absolute path to a material/model/sound",
+                                 packAddPath_, sizeof(packAddPath_));
+        ImGui::SameLine();
+        if (ImGui::Button("Add##pack") && packAddPath_[0]) {
+            std::string abs = packAddPath_;
+            std::string internal = abs;
+            for (const char* root : {"/materials/", "/models/", "/sound/"}) {
+                const size_t k = internal.find(root);
+                if (k != std::string::npos) { internal = internal.substr(k + 1); break; }
+            }
+            std::replace(internal.begin(), internal.end(), '\\', '/');
+            packFiles_.push_back(internal + "|" + abs);
+            packAddPath_[0] = 0;
+        }
+        int rm = -1;
+        for (int i = 0; i < (int)packFiles_.size(); ++i) {
+            ImGui::PushID(i);
+            ImGui::BulletText("%s", packFiles_[i].substr(0, packFiles_[i].find('|')).c_str());
+            ImGui::SameLine();
+            if (ImGui::SmallButton("x")) rm = i;
+            ImGui::PopID();
+        }
+        if (rm >= 0) packFiles_.erase(packFiles_.begin() + rm);
+        ImGui::Unindent();
+    }
     ImGui::EndDisabled();
 
     if (!gamePaths_.valid()) gamePaths_ = compile::GamePaths::detect();
@@ -4374,6 +4495,32 @@ void Editor::saveSelectionAsPrefab() {
     else
         status_ = "Prefab save failed: " + err;
 }
+
+void Editor::drawCordonOverlay(ViewPanel& p, float aspect, ImDrawList* dl) {
+    if (!cordonOn_ && !(cordonShow_ && p.kind != ViewKind::Perspective)) return;
+    if (!cordonOn_) return;
+    const glm::vec3 mn = glm::min(cordonMin_, cordonMax_);
+    const glm::vec3 mx = glm::max(cordonMin_, cordonMax_);
+    const glm::mat4 vp = p.camera.proj(aspect) * p.camera.view();
+    const glm::vec3 c[8] = {
+        {mn.x, mn.y, mn.z}, {mx.x, mn.y, mn.z}, {mx.x, mx.y, mn.z}, {mn.x, mx.y, mn.z},
+        {mn.x, mn.y, mx.z}, {mx.x, mn.y, mx.z}, {mx.x, mx.y, mx.z}, {mn.x, mx.y, mx.z}};
+    ImVec2 s[8];
+    bool ok = true;
+    for (int i = 0; i < 8; ++i) {
+        bool o;
+        s[i] = projectPt(p.kind, vp, p.contentMin, p.contentSize, c[i], o);
+        ok = ok && o;
+    }
+    if (!ok) return;
+    static const int E[12][2] = {{0, 1}, {1, 2}, {2, 3}, {3, 0}, {4, 5}, {5, 6},
+                                 {6, 7}, {7, 4}, {0, 4}, {1, 5}, {2, 6}, {3, 7}};
+    const ImU32 col = IM_COL32(255, 90, 70, 230);
+    for (auto& e : E) dl->AddLine(s[e[0]], s[e[1]], col, 1.5f);
+    dl->AddText(ImVec2(p.contentMin.x + 8, p.contentMin.y + 40), col, "CORDON");
+}
+
+void Editor::handleCordonDrag(ViewPanel&) {}  // numeric editing only, for now
 
 void Editor::drawSelectionDims(ViewPanel& p, float aspect, ImDrawList* dl) {
     if (p.kind == ViewKind::Perspective || selection_.empty()) return;
