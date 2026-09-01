@@ -39,6 +39,7 @@ struct Options {
     bool dumpFgd = false;
     std::string dumpFgdClass;
     std::string importObjPath;
+    std::string placeEnt;
     std::string saveVmfPath;
     int width = 1600;
     int height = 950;
@@ -69,6 +70,7 @@ Options parseArgs(int argc, char** argv) {
         else if (a == "--workshop") o.workshop = true;
         else if (a == "--dump-fgd") { o.dumpFgd = true; o.dumpFgdClass = next(""); }
         else if (a == "--import-obj") o.importObjPath = next("");
+        else if (a == "--place-ent") o.placeEnt = next("");
         else if (a == "--save-vmf") o.saveVmfPath = next("");
         else if (a == "--view") {
             const std::string v = next("persp");
@@ -91,6 +93,7 @@ int runHeadlessScreenshot(const Options& opt, GLFWwindow* window, float uiScale)
         PB_WARN("map did not load; screenshot will show an empty scene");
     if (opt.sampleMap) editor.debugBuildSampleMap();
     if (!opt.importObjPath.empty()) editor.debugImportObj(opt.importObjPath);
+    if (!opt.placeEnt.empty()) editor.debugPlaceEntity(opt.placeEnt);
     if (opt.selectSolid >= 0) editor.debugSelectWorldSolid(opt.selectSolid);
     if (opt.selectEnt >= 0) editor.debugSelectEntity(opt.selectEnt);
     if (!opt.saveVmfPath.empty()) editor.saveVmf(opt.saveVmfPath);
