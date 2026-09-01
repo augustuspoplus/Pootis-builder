@@ -61,6 +61,7 @@ struct Var {
     std::string help;
     bool readOnly = false;
     bool reportable = false;
+    bool inherited = false;   // set by flattened(): came from a base class
     std::vector<Choice> choices;   // Choices
     std::vector<FlagBit> flags;    // Flags
 };
