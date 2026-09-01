@@ -96,7 +96,8 @@ bool MapDocument::loadVmf(const std::string& path, std::string* err) {
     return true;
 }
 
-bool MapDocument::saveVmf(const std::string& path, std::string* err) {
+bool MapDocument::saveVmf(const std::string& path, std::string* err,
+                          bool updateState) {
     KvNode root;
 
     KvNode ver;
@@ -151,10 +152,13 @@ bool MapDocument::saveVmf(const std::string& path, std::string* err) {
         std::fwrite(out.data(), 1, out.size(), f);
         std::fclose(f);
     }
-    path_ = path;
-    name_ = fs::path(path).stem().string();
-    dirty_ = false;
-    PB_INFO("VMF saved: %s (%zu bytes)", path.c_str(), out.size());
+    if (updateState) {
+        path_ = path;
+        name_ = fs::path(path).stem().string();
+        dirty_ = false;
+    }
+    PB_INFO("VMF %s: %s (%zu bytes)", updateState ? "saved" : "written",
+            path.c_str(), out.size());
     return true;
 }
 

@@ -269,6 +269,9 @@ void Editor::frame() {
         redo();
     if (ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_S) && hasDoc())
         saveMap(ImGui::GetIO().KeyShift);  // Ctrl+Shift+S = Save As
+    if (ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_K)) showPalette_ = true;
+
+    autosaveTick();
 
     if (mode_ == Mode::Simple) {
         drawBuildKit();
@@ -279,12 +282,15 @@ void Editor::frame() {
         drawTextureBrowser();
         drawMaterialList();
         drawEntityCatalog();
+        drawHistoryPanel();
+        drawMapCheckPanel();
     }
     for (auto& v : views_) drawViewportPanel(v);
     drawStatusBar();
     drawCompileWindow();
     drawModelImportDialog();
     drawWorkshopWindow();
+    drawCommandPalette();
     drawWelcome();
 
     if (focusPanelFrames_ > 0) {
@@ -327,6 +333,8 @@ void Editor::buildDockLayout(unsigned int dockId, const ImVec2& size) {
         ImGui::DockBuilderDockWindow("Textures", left);
         ImGui::DockBuilderDockWindow("Materials", left);
         ImGui::DockBuilderDockWindow("Entities", left);
+        ImGui::DockBuilderDockWindow("History", left);
+        ImGui::DockBuilderDockWindow("Map Check", left);
         ImGui::DockBuilderDockWindow("3D View", tl);
         ImGui::DockBuilderDockWindow("Top (x/y)", tr);
         ImGui::DockBuilderDockWindow("Front (x/z)", bl);
@@ -515,6 +523,20 @@ void Editor::drawViewMenuPopup() {
     ImGui::Separator();
     if (ImGui::BeginMenu(ICON_FA_MAGNIFYING_GLASS "  Interface scale")) {
         uiScaleMenu();
+        ImGui::EndMenu();
+    }
+    ImGui::Separator();
+    if (ImGui::BeginMenu(ICON_FA_WINDOW_RESTORE "  Panels")) {
+        if (ImGui::MenuItem("History")) { ImGui::SetWindowFocus("History"); }
+        if (ImGui::MenuItem("Map Check")) { ImGui::SetWindowFocus("Map Check"); runMapCheck(); }
+        if (ImGui::MenuItem("Command palette", "Ctrl+K")) showPalette_ = true;
+        ImGui::EndMenu();
+    }
+    if (ImGui::BeginMenu(ICON_FA_FLOPPY_DISK "  Autosave")) {
+        ImGui::MenuItem("Enabled", nullptr, &autosaveOn_);
+        ImGui::SetNextItemWidth(140);
+        ImGui::SliderFloat("every (min)", &autosaveMins_, 1.0f, 30.0f, "%.0f");
+        ImGui::TextDisabled("writes <map>.autosave.vmf + rolling .bak1-3 on save");
         ImGui::EndMenu();
     }
     ImGui::Separator();
@@ -2112,6 +2134,7 @@ bool Editor::saveMap(bool forceDialog) {
                              out.empty() ? nullptr : out.c_str());
         if (out.empty()) return false;  // cancelled
     }
+    writeBackup(out);  // roll <out>.bak1..3 before overwriting
     std::string err;
     if (doc_.saveVmf(out, &err)) {
         status_ = "Saved  " + out;
@@ -3797,6 +3820,295 @@ void Editor::drawStatusBar() {
     ImGui::End();
     ImGui::PopStyleColor();
     ImGui::PopStyleVar();
+}
+
+// ---------------------------------------------------------------------------
+// Quality-of-life: history panel, map check, command palette, autosave
+// ---------------------------------------------------------------------------
+void Editor::drawHistoryPanel() {
+    ImGui::Begin("History");
+    if (!hasDoc()) {
+        ImGui::TextDisabled("No editable map open.");
+        ImGui::End();
+        return;
+    }
+    ImGui::TextDisabled("%zu steps  (Ctrl+Z / Ctrl+Y)", history_.count());
+    ImGui::SameLine();
+    if (ImGui::SmallButton(ICON_FA_ROTATE_LEFT) && history_.canUndo()) undo();
+    ImGui::SameLine();
+    if (ImGui::SmallButton(ICON_FA_ROTATE_RIGHT) && history_.canRedo()) redo();
+    ImGui::Separator();
+
+    if (ImGui::BeginChild("hist")) {
+        for (size_t i = 0; i < history_.count(); ++i) {
+            const bool cur = i == history_.current();
+            ImGui::PushID((int)i);
+            char row[160];
+            std::snprintf(row, sizeof(row), "%2zu  %s", i,
+                          history_.labelAt(i).c_str());
+            if (ImGui::Selectable(row, cur) && !cur) {
+                history_.jumpTo(doc_, i);
+                clearSelection();
+                buildAndUpload(meshOpts_);
+                status_ = "Jumped to: " + history_.labelAt(i);
+            }
+            if (cur) {
+                ImGui::SameLine();
+                ImGui::TextColored(pb::ui::col::acc, ICON_FA_ARROW_LEFT " now");
+            }
+            ImGui::PopID();
+        }
+    }
+    ImGui::EndChild();
+    ImGui::End();
+}
+
+void Editor::runMapCheck() {
+    mapCheck_.clear();
+    mapCheckRan_ = true;
+    if (!hasDoc()) return;
+    auto add = [&](int sev, std::string m, int ent = -2, int sol = -1,
+                   glm::vec3 p = glm::vec3(0)) {
+        mapCheck_.push_back({std::move(m), sev, ent, sol, p});
+    };
+
+    int spawns = 0, lights = 0, objectives = 0, invalid = 0;
+    glm::vec3 dmn(1e9f), dmx(-1e9f);
+    for (int i = 0; i < (int)doc_.worldSolids().size(); ++i) {
+        const auto& s = doc_.worldSolids()[i];
+        if (!s.valid) { ++invalid; add(2, "Invalid world brush (not convex / <4 planes)", -1, i, s.center()); }
+        dmn = glm::min(dmn, s.boundsMin);
+        dmx = glm::max(dmx, s.boundsMax);
+        const glm::vec3 sz = s.boundsMax - s.boundsMin;
+        if (std::max({sz.x, sz.y, sz.z}) > 16384.0f)
+            add(1, "Very large brush (>16384u) — check it's intentional", -1, i, s.center());
+    }
+    // Collect targetnames for dangling-I/O detection.
+    std::vector<std::string> names;
+    for (const auto& e : doc_.entities()) {
+        const std::string tn = e.kv.get("targetname");
+        if (!tn.empty()) names.push_back(tn);
+    }
+    for (int i = 0; i < (int)doc_.entities().size(); ++i) {
+        const auto& e = doc_.entities()[i];
+        const std::string& c = e.classname;
+        if (c == "info_player_teamspawn" || c == "info_player_start") ++spawns;
+        if (c.rfind("light", 0) == 0) ++lights;
+        if (c == "team_control_point" || c == "trigger_capture_area" ||
+            c == "func_capturezone" || c.rfind("func_tracktrain", 0) == 0)
+            ++objectives;
+        for (const auto& conn : e.connections) {
+            std::string tgt = conn.second.substr(0, conn.second.find_first_of(",\x1b"));
+            if (tgt.empty() || tgt == "!activator" || tgt == "!self" ||
+                tgt == "!player")
+                continue;
+            if (std::find(names.begin(), names.end(), tgt) == names.end())
+                add(2,
+                    c + " fires \"" + conn.first + "\" at missing target \"" + tgt +
+                        "\"",
+                    i, -1, e.origin);
+        }
+        // Missing model/material references are resolved lazily; flag obvious ones.
+        const std::string mdl = e.kv.get("model");
+        if (!mdl.empty() && mdl[0] != '*' && mdl.find(".mdl") == std::string::npos &&
+            mdl.find(".vmf") == std::string::npos)
+            add(1, c + " model \"" + mdl + "\" has no .mdl extension", i, -1, e.origin);
+    }
+
+    if (spawns < 1) add(2, "No player spawns (info_player_teamspawn)");
+    else if (spawns < 2) add(1, "Only one spawn point — add a few per team");
+    if (lights < 1) add(1, "No lights — the map will be fullbright");
+    if (objectives < 1) add(1, "No objective entity (control point / cap zone / cart)");
+    if (doc_.worldExtra().get("skyname").empty())
+        add(2, "worldspawn has no skyname — the map won't seal");
+    if (doc_.worldSolids().empty())
+        add(2, "No world brushwork at all");
+
+    if (mapCheck_.empty()) add(0, "No problems found. Nice.");
+    // errors first, then warnings, then info
+    std::stable_sort(mapCheck_.begin(), mapCheck_.end(),
+                     [](const CheckHit& a, const CheckHit& b) {
+                         return a.severity > b.severity;
+                     });
+}
+
+void Editor::drawMapCheckPanel() {
+    ImGui::Begin("Map Check");
+    if (ImGui::Button(ICON_FA_STETHOSCOPE "  Run check", ImVec2(-1, 0))) runMapCheck();
+    if (!mapCheckRan_) {
+        ImGui::TextDisabled("Checks spawns, lights, skybox, invalid brushes, "
+                            "dangling I/O targets, oversized geometry.");
+        ImGui::End();
+        return;
+    }
+    int err = 0, warn = 0;
+    for (const auto& h : mapCheck_) {
+        if (h.severity == 2) ++err;
+        else if (h.severity == 1) ++warn;
+    }
+    ImGui::Text("%d error%s, %d warning%s", err, err == 1 ? "" : "s", warn,
+                warn == 1 ? "" : "s");
+    ImGui::Separator();
+    if (ImGui::BeginChild("mc")) {
+        for (size_t i = 0; i < mapCheck_.size(); ++i) {
+            const auto& h = mapCheck_[i];
+            const ImVec4 c = h.severity == 2   ? pb::ui::col::warn
+                             : h.severity == 1 ? pb::ui::col::acc
+                                               : pb::ui::col::good;
+            const char* ic = h.severity == 2   ? ICON_FA_CIRCLE_EXCLAMATION
+                             : h.severity == 1 ? ICON_FA_TRIANGLE_EXCLAMATION
+                                               : ICON_FA_CIRCLE_CHECK;
+            ImGui::PushID((int)i);
+            ImGui::PushStyleColor(ImGuiCol_Text, c);
+            ImGui::TextUnformatted(ic);
+            ImGui::PopStyleColor();
+            ImGui::SameLine();
+            const bool clickable = h.entity != -2;
+            if (ImGui::Selectable(h.msg.c_str(), false,
+                                  clickable ? 0 : ImGuiSelectableFlags_Disabled) &&
+                clickable) {
+                if (h.entity >= 0) {
+                    selectedEntity_ = h.entity;
+                    selection_.clear();
+                } else if (h.solid >= 0) {
+                    selection_ = {{-1, h.solid}};
+                    selectedEntity_ = -1;
+                }
+                rebuildSelectionWire();
+                for (auto& v : views_) {
+                    if (v.kind == ViewKind::Perspective)
+                        v.camera.pos = h.pos - v.camera.forward() * 400.0f;
+                    else
+                        v.camera.orthoCenter = h.pos;
+                }
+            }
+            ImGui::PopID();
+        }
+    }
+    ImGui::EndChild();
+    ImGui::End();
+}
+
+void Editor::drawCommandPalette() {
+    if (!showPalette_) return;
+    ImGuiViewport* vp = ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos(ImVec2(vp->GetCenter().x, vp->WorkPos.y + vp->WorkSize.y * 0.18f),
+                            ImGuiCond_Always, ImVec2(0.5f, 0.0f));
+    ImGui::SetNextWindowSize(ImVec2(std::min(560.0f * pb::ui::g_scale, vp->WorkSize.x * 0.8f), 0));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12, 12));
+    if (ImGui::Begin("##palette", &showPalette_,
+                     ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+                         ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoSavedSettings)) {
+        struct Cmd { const char* name; std::function<void()> run; };
+        std::vector<Cmd> cmds = {
+            {"Save map", [&] { saveMap(false); }},
+            {"Save map as…", [&] { saveMap(true); }},
+            {"Build & play", [&] { showCompile_ = true; if (hasDoc()) startCompile(); }},
+            {"Run map check", [&] { runMapCheck(); }},
+            {"Frame map (F)", [&] { if (hasMap()) frameAllViews(); }},
+            {"Undo", [&] { undo(); }},
+            {"Redo", [&] { redo(); }},
+            {"Tool: Select", [&] { tool_ = Tool::Select; }},
+            {"Tool: Block", [&] { tool_ = Tool::Block; }},
+            {"Tool: Vertex/Edge/Face", [&] { tool_ = Tool::Vertex; }},
+            {"Tool: Clip", [&] { tool_ = Tool::Clip; }},
+            {"Tool: Texture", [&] { tool_ = Tool::Texture; }},
+            {"Switch to Simple mode", [&] { mode_ = Mode::Simple; layoutDirty_ = true; }},
+            {"Switch to Pro mode", [&] { mode_ = Mode::Pro; layoutDirty_ = true; }},
+            {"Reset window layout", [&] { layoutDirty_ = true; }},
+            {"Open map…", [&] { promptOpenMap(); }},
+            {"Import 3D model…", [&] { openModelImport(); }},
+            {"Publish to Steam Workshop", [&] { showWorkshop_ = true; }},
+        };
+        // Entity classes are matched straight from fgd_ below (not copied into
+        // `cmds`) so the palette stays cheap.
+
+        ImGui::PushItemWidth(-1);
+        if (ImGui::IsWindowAppearing()) ImGui::SetKeyboardFocusHere();
+        ImGui::InputTextWithHint("##q", ICON_FA_MAGNIFYING_GLASS "  Type a command or entity…",
+                                 paletteQuery_, sizeof(paletteQuery_));
+        ImGui::PopItemWidth();
+        const std::string q = paletteQuery_;
+        auto icontains = [](const std::string& h, const std::string& n) {
+            if (n.empty()) return true;
+            auto it = std::search(h.begin(), h.end(), n.begin(), n.end(),
+                                  [](char a, char b) {
+                                      return std::tolower(a) == std::tolower(b);
+                                  });
+            return it != h.end();
+        };
+
+        struct Row { std::string label; int kind; int idx; };  // kind 0 cmd, 1 entity
+        std::vector<Row> rows;
+        for (int i = 0; i < (int)cmds.size(); ++i)
+            if (cmds[i].name && icontains(cmds[i].name, q))
+                rows.push_back({cmds[i].name, 0, i});
+        if (q.size() >= 2)
+            for (int i = 0; i < (int)fgd_.pointClasses().size(); ++i)
+                if (icontains(fgd_.pointClasses()[i], q)) {
+                    rows.push_back({"Place entity:  " + fgd_.pointClasses()[i], 1, i});
+                    if (rows.size() > 60) break;
+                }
+
+        if (paletteSel_ >= (int)rows.size()) paletteSel_ = (int)rows.size() - 1;
+        if (paletteSel_ < 0) paletteSel_ = 0;
+        if (ImGui::IsKeyPressed(ImGuiKey_DownArrow)) ++paletteSel_;
+        if (ImGui::IsKeyPressed(ImGuiKey_UpArrow)) --paletteSel_;
+        paletteSel_ = std::clamp(paletteSel_, 0, std::max(0, (int)rows.size() - 1));
+
+        const bool go = ImGui::IsKeyPressed(ImGuiKey_Enter) ||
+                        ImGui::IsKeyPressed(ImGuiKey_KeypadEnter);
+        ImGui::BeginChild("rows", ImVec2(0, 260));
+        for (int i = 0; i < (int)rows.size(); ++i) {
+            const bool sel = i == paletteSel_;
+            if (ImGui::Selectable(rows[i].label.c_str(), sel) || (go && sel)) {
+                if (rows[i].kind == 0) {
+                    cmds[rows[i].idx].run();
+                } else {
+                    placing_ = "@ent:" + fgd_.pointClasses()[rows[i].idx];
+                    status_ = "Click in a viewport to place " +
+                              fgd_.pointClasses()[rows[i].idx];
+                }
+                showPalette_ = false;
+                paletteQuery_[0] = 0;
+                paletteSel_ = 0;
+            }
+        }
+        ImGui::EndChild();
+        if (ImGui::IsKeyPressed(ImGuiKey_Escape)) showPalette_ = false;
+    }
+    ImGui::End();
+    ImGui::PopStyleVar();
+}
+
+void Editor::writeBackup(const std::string& vmfPath) {
+    std::error_code ec;
+    if (!fs::exists(vmfPath, ec)) return;
+    const fs::path p(vmfPath);
+    auto bak = [&](int n) { return p.string() + ".bak" + std::to_string(n); };
+    fs::remove(bak(3), ec);
+    for (int n = 2; n >= 1; --n)
+        if (fs::exists(bak(n), ec))
+            fs::rename(bak(n), bak(n + 1), ec);
+    fs::copy_file(vmfPath, bak(1), fs::copy_options::overwrite_existing, ec);
+}
+
+void Editor::autosaveTick() {
+    if (!autosaveOn_ || !hasDoc() || !doc_.dirty()) return;
+    const double now = ImGui::GetTime();
+    if (lastAutosave_ == 0.0) { lastAutosave_ = now; return; }
+    if (now - lastAutosave_ < autosaveMins_ * 60.0) return;
+    lastAutosave_ = now;
+
+    std::string base = doc_.path();
+    if (base.empty())
+        base = (fs::path(executableDir()) / "autosave" /
+                ((doc_.name().empty() ? "untitled" : doc_.name()) + ".vmf"))
+                   .string();
+    const std::string as = base + ".autosave.vmf";
+    std::string err;
+    if (doc_.saveVmf(as, &err, /*updateState=*/false))
+        status_ = "Autosaved  " + fs::path(as).filename().string();
 }
 
 // ---------------------------------------------------------------------------

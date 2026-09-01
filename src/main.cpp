@@ -40,6 +40,8 @@ struct Options {
     bool texDemo = false;
     int shapeOp = -1;
     float scaleOverride = -1.0f;
+    bool mapCheck = false;
+    bool palette = false;
     int subDemoMode = 0;
     bool workshop = false;
     bool dumpFgd = false;
@@ -78,6 +80,8 @@ Options parseArgs(int argc, char** argv) {
         else if (a == "--tex-demo") o.texDemo = true;
         else if (a == "--shape-op") o.shapeOp = std::atoi(next("0").c_str());
         else if (a == "--scale") o.scaleOverride = static_cast<float>(std::atof(next("1").c_str()));
+        else if (a == "--map-check") o.mapCheck = true;
+        else if (a == "--palette") o.palette = true;
         else if (a == "--workshop") o.workshop = true;
         else if (a == "--dump-fgd") { o.dumpFgd = true; o.dumpFgdClass = next(""); }
         else if (a == "--import-obj") o.importObjPath = next("");
@@ -112,6 +116,8 @@ int runHeadlessScreenshot(const Options& opt, GLFWwindow* window, float uiScale)
     if (opt.subDemo) editor.debugSubObjectDemo(0, opt.subDemoMode);
     if (opt.texDemo) editor.debugTextureDemo(0);
     if (opt.shapeOp >= 0) editor.debugShapeOp(opt.shapeOp);
+    if (opt.mapCheck) editor.debugMapCheck();
+    if (opt.palette) editor.debugShowPalette();
     if (!opt.panel.empty()) editor.debugFocusPanel(opt.panel);
     if (opt.workshop) editor.debugShowWorkshop();
 
