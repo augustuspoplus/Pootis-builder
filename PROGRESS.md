@@ -4,12 +4,17 @@ Newest first. See ROADMAP.md for the plan. Q1 = auto-decompile .bsp on open.
 Q2 = Simple-mode kit builds new maps (prioritised). Also doing section G (QoL).
 
 ## Now / next
-- **Milestone E**: run vbsp/vvis/vrad on the saved VMF with a live log panel
-  (fast/final profiles), then launch TF2 `-insecure +sv_lan 1 +map <name>`.
-  This closes the "good state" bar (A + B + E = open, edit, save, playtest).
-- Then **Milestone D** (FGD parser + entity catalogue + FGD-driven properties
-  panel), **Milestone C** (sub-object editing), interleaving **G** QoL items.
+- **Milestone D**: FGD parser (`bin/tf.fgd` + bundled `tf-abs.fgd`) → entity
+  catalogue; place point/brush entities; FGD-driven properties panel (plain
+  labels, collapsible groups, typed widgets, nothing removed, live preview);
+  entity I/O connections editor; entity sprites/helpers in the viewports.
+- Then **Milestone C** (sub-object editing), interleaving **G** QoL items.
 - Doc-driven Outliner rewrite still pending (reads the BSP path).
+
+## "Good state" bar — REACHED
+A + B + E all done: open a map (or start one), move/add/delete brushwork with
+the gizmo + block tool + kit, save to VMF, compile with vbsp/vvis/vrad and
+playtest in TF2.
 
 ## Done
 - (baseline) BSP loader, renderer, VPK pipeline, Simple/Pro UI, welcome, scaling.
@@ -33,6 +38,18 @@ Q2 = Simple-mode kit builds new maps (prioritised). Also doing section G (QoL).
   - B.2 ImGuizmo move/rotate/scale in every viewport (per-view ID, snap).
   - B.3/B.4 Block tool (drag a box in any view → new brush) + brush inspector
     (centre X/Y/Z, size W/D/H drag-scrub + type, material swatch, dup/delete).
+- **Milestone E** — save, compile, play:
+  - `compile/MapCompiler` background worker: vbsp → vvis → vrad with a
+    line-buffered live log, Fast/Final profiles, per-tool cancel; copies the
+    `.bsp` into `<game>/maps/` and launches TF2 `-insecure +sv_lan 1 +map`.
+  - Compiles run from `<game>/mapsrc/` — the Nov-2025 tools refuse to write
+    their `.log`/`.prt` outside a game-owned content path.
+  - `platform/Process::runProcessStreaming` (per-line callback + cancel) and
+    `launchDetached`; `platform/FileDialog::saveFileDialog` (native Save As).
+  - "Build & play" window: profile picker, vvis/vrad/launch toggles, mono
+    log with follow-scroll, Stop. Save / Ctrl+S / Ctrl+Shift+S wired for real.
+  - Verified headless: sample map → 270 KB bsp built + copied to tf/maps,
+    vrad lump table streamed into the log panel.
 - **Milestone F** — Simple-mode kit is real:
   - `MapDocument::newBlank()` + `active()`; "New map" opens a blank editable doc.
   - `Editor::placePiece()` — every Build Kit card emits real brushwork/entities
