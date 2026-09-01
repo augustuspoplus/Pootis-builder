@@ -1893,6 +1893,7 @@ void Editor::handleViewportInput(ViewPanel& p) {
     if (subActive) handleSubObjectInput(p);
     handleTextureTool(p);
     handleClipTool(p);
+    handleSelectionResize(p);
 
     if (!io.KeyCtrl && !ImGui::IsMouseDown(ImGuiMouseButton_Right)) {
         if (ImGui::IsKeyPressed(ImGuiKey_W)) gizmoMode_ = 0;
@@ -1946,6 +1947,7 @@ void Editor::handleViewportInput(ViewPanel& p) {
         tool_ == Tool::Vertex && !subDragging_ && subHot_ < 0 &&
         !(subActive && subSel_ >= 0);
     if (hasDoc() && (tool_ == Tool::Select || vtxPassthrough) &&
+        resizeHandle_ < 0 && resizeHot_ < 0 &&
         ImGui::IsMouseReleased(ImGuiMouseButton_Left) &&
         !ImGui::IsMouseDragPastThreshold(ImGuiMouseButton_Left, 4.0f)) {
         const ImVec2 m = ImGui::GetMousePos();
@@ -4761,6 +4763,135 @@ void Editor::drawCordonOverlay(ViewPanel& p, float aspect, ImDrawList* dl) {
 
 void Editor::handleCordonDrag(ViewPanel&) {}  // numeric editing only, for now
 
+namespace {
+// World axis indices spanned by an ortho view: {right, up}.
+inline void orthoAxes(ViewKind k, int& u, int& v) {
+    switch (k) {
+        case ViewKind::Top:   u = 0; v = 1; break;  // X, Y
+        case ViewKind::Front: u = 0; v = 2; break;  // X, Z
+        default:              u = 1; v = 2; break;  // Side: Y, Z
+    }
+}
+}  // namespace
+
+void Editor::handleSelectionResize(ViewPanel& p) {
+    if (p.kind == ViewKind::Perspective || tool_ != Tool::Select ||
+        selection_.empty() || gizmoUsing_)
+        { resizeHot_ = -1; return; }
+
+    glm::vec3 mn(1e30f), mx(-1e30f);
+    for (const auto& r : selection_)
+        if (const map::Solid* s = doc_.resolve(r)) {
+            mn = glm::min(mn, s->boundsMin);
+            mx = glm::max(mx, s->boundsMax);
+        }
+    if (mn.x > mx.x) { resizeHot_ = -1; return; }
+
+    int au, av;
+    orthoAxes(p.kind, au, av);
+    const glm::mat4 vp = p.camera.proj(p.contentSize.x /
+                                       std::max(1.0f, p.contentSize.y)) *
+                         p.camera.view();
+    // 8 handle world positions: 4 corners then 4 edge midpoints (u-,u+,v-,v+).
+    auto handleWorld = [&](int h) {
+        glm::vec3 w = 0.5f * (mn + mx);
+        const float lo[2] = {mn[au], mn[av]}, hi[2] = {mx[au], mx[av]};
+        const float mid[2] = {0.5f * (lo[0] + hi[0]), 0.5f * (lo[1] + hi[1])};
+        float cu = mid[0], cv = mid[1];
+        switch (h) {
+            case 0: cu = lo[0]; cv = lo[1]; break;
+            case 1: cu = hi[0]; cv = lo[1]; break;
+            case 2: cu = hi[0]; cv = hi[1]; break;
+            case 3: cu = lo[0]; cv = hi[1]; break;
+            case 4: cu = lo[0]; cv = mid[1]; break;
+            case 5: cu = hi[0]; cv = mid[1]; break;
+            case 6: cu = mid[0]; cv = lo[1]; break;
+            case 7: cu = mid[0]; cv = hi[1]; break;
+        }
+        w[au] = cu;
+        w[av] = cv;
+        return w;
+    };
+    auto project = [&](const glm::vec3& w) {
+        const glm::vec4 c = vp * glm::vec4(w, 1.0f);
+        return ImVec2(p.contentMin.x + (c.x / c.w * 0.5f + 0.5f) * p.contentSize.x,
+                      p.contentMin.y + (1.0f - (c.y / c.w * 0.5f + 0.5f)) * p.contentSize.y);
+    };
+
+    const ImVec2 m = ImGui::GetMousePos();
+    resizeHot_ = -1;
+    if (resizeHandle_ < 0) {
+        float best = 9.0f;
+        for (int h = 0; h < 8; ++h) {
+            const ImVec2 s = project(handleWorld(h));
+            const float d = std::hypot(s.x - m.x, s.y - m.y);
+            if (d < best) { best = d; resizeHot_ = h; }
+        }
+    }
+
+    if (resizeHot_ >= 0 && p.hovered &&
+        ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+        resizeHandle_ = resizeHot_;
+        resizeStartMin_ = mn;
+        resizeStartMax_ = mx;
+        resizeAnchor_ = 0.5f * (mn + mx);
+        const int h = resizeHandle_;
+        if (h == 0 || h == 3 || h == 4) resizeAnchor_[au] = mx[au];
+        if (h == 1 || h == 2 || h == 5) resizeAnchor_[au] = mn[au];
+        if (h == 0 || h == 1 || h == 6) resizeAnchor_[av] = mx[av];
+        if (h == 2 || h == 3 || h == 7) resizeAnchor_[av] = mn[av];
+        // Snapshot the geometry so each drag frame maps from a stable origin.
+        resizeSnap_.clear();
+        resizeRefs_.clear();
+        for (const auto& r : selection_)
+            if (const map::Solid* s = doc_.resolve(r)) {
+                resizeSnap_.push_back(*s);
+                resizeRefs_.push_back(r);
+            }
+    }
+
+    if (resizeHandle_ >= 0 && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+        const glm::vec3 hit = snapVec(viewPlanePoint(p, m));
+        glm::vec3 nmn = resizeStartMin_, nmx = resizeStartMax_;
+        const int h = resizeHandle_;
+        const bool moveU = (h != 6 && h != 7);
+        const bool moveV = (h != 4 && h != 5);
+        if (moveU) {
+            if (resizeAnchor_[au] == resizeStartMin_[au])
+                nmx[au] = std::max(hit[au], resizeAnchor_[au] + 1.0f);
+            else
+                nmn[au] = std::min(hit[au], resizeAnchor_[au] - 1.0f);
+        }
+        if (moveV) {
+            if (resizeAnchor_[av] == resizeStartMin_[av])
+                nmx[av] = std::max(hit[av], resizeAnchor_[av] + 1.0f);
+            else
+                nmn[av] = std::min(hit[av], resizeAnchor_[av] - 1.0f);
+        }
+
+        const glm::vec3 os = glm::max(resizeStartMax_ - resizeStartMin_,
+                                      glm::vec3(1e-3f));
+        const glm::vec3 sc = glm::max(nmx - nmn, glm::vec3(1.0f)) / os;
+        glm::mat4 mtx(1.0f);
+        mtx = glm::translate(mtx, nmn);
+        mtx = glm::scale(mtx, sc);
+        mtx = glm::translate(mtx, -resizeStartMin_);
+        for (size_t i = 0; i < resizeRefs_.size(); ++i)
+            if (map::Solid* s = doc_.resolve(resizeRefs_[i])) {
+                *s = resizeSnap_[i];   // restore grab-time shape
+                s->transform(mtx);     // then map into the new box
+            }
+        docMeshDirty_ = true;
+    }
+
+    if (resizeHandle_ >= 0 && ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
+        resizeHandle_ = -1;
+        resizeSnap_.clear();
+        resizeRefs_.clear();
+        afterEdit("Resize");
+    }
+}
+
 void Editor::drawSelectionDims(ViewPanel& p, float aspect, ImDrawList* dl) {
     if (p.kind == ViewKind::Perspective || selection_.empty()) return;
     glm::vec3 mn(1e30f), mx(-1e30f);
@@ -4790,6 +4921,23 @@ void Editor::drawSelectionDims(ViewPanel& p, float aspect, ImDrawList* dl) {
     dl->AddText(ImVec2((x0 + x1) * 0.5f - ImGui::CalcTextSize(b1).x * 0.5f, y0 - 16), c, b1);
     dl->AddText(ImVec2(x1 + 4, (y0 + y1) * 0.5f - 7), c, b2);
     dl->AddRect(ImVec2(x0, y0), ImVec2(x1, y1), IM_COL32(255, 210, 140, 90));
+
+    // Hammer-style resize handles (Select tool only).
+    if (tool_ != Tool::Select) return;
+    const ImVec2 pts[8] = {
+        {x0, y0}, {x1, y0}, {x1, y1}, {x0, y1},
+        {x0, (y0 + y1) * 0.5f}, {x1, (y0 + y1) * 0.5f},
+        {(x0 + x1) * 0.5f, y0}, {(x0 + x1) * 0.5f, y1}};
+    for (int i = 0; i < 8; ++i) {
+        const bool hot = (i == resizeHot_ || i == resizeHandle_);
+        const float r = hot ? 5.0f : 3.5f;
+        const ImU32 hc = hot ? IM_COL32(255, 180, 90, 255)
+                             : IM_COL32(255, 210, 140, 200);
+        dl->AddRectFilled(ImVec2(pts[i].x - r, pts[i].y - r),
+                          ImVec2(pts[i].x + r, pts[i].y + r), hc);
+        dl->AddRect(ImVec2(pts[i].x - r, pts[i].y - r),
+                    ImVec2(pts[i].x + r, pts[i].y + r), IM_COL32(20, 20, 25, 220));
+    }
 }
 
 void Editor::autosaveTick() {

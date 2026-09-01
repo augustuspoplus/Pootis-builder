@@ -169,6 +169,7 @@ private:
     void drawGizmo(ViewPanel& p, float aspect);
     void drawEntityTags(ViewPanel& p, float aspect, ImDrawList* dl);
     void handleBlockTool(ViewPanel& p);
+    void handleSelectionResize(ViewPanel& p);    // Hammer-style bbox drag handles
     void rebuildHandles();                       // sub-object handles for selection_[0]
     void handleSubObjectInput(ViewPanel& p);
     void drawSubObjectOverlay(ViewPanel& p, float aspect, ImDrawList* dl);
@@ -247,6 +248,14 @@ private:
     int gizmoMode_ = 0;          // 0 move, 1 rotate, 2 scale
     bool gizmoUsing_ = false;
     bool docMeshDirty_ = false;
+
+    // Bounding-box resize (Select tool, 2D views)
+    int resizeHandle_ = -1;      // 0..8: corners 0-3, edges 4-7, -1 none, 8 hover-only
+    int resizeHot_ = -1;         // handle under the cursor this frame
+    glm::vec3 resizeAnchor_{0};  // world point that stays fixed during the drag
+    glm::vec3 resizeStartMin_{0}, resizeStartMax_{0};
+    std::vector<map::Solid> resizeSnap_;
+    std::vector<map::SolidRef> resizeRefs_;
 
     // Block tool
     bool blockDragging_ = false;
