@@ -15,6 +15,7 @@
 #include "import/ModelImport.h"
 #include "import/ObjModel.h"
 #include "map/History.h"
+#include "publish/Workshop.h"
 #include "map/MapDocument.h"
 #include "render/Camera.h"
 #include "render/Framebuffer.h"
@@ -43,6 +44,7 @@ public:
     void debugSelectWorldSolid(int i);  // test hook for headless screenshots
     void debugBuildSampleMap();
     void debugStartCompile(bool fast);
+    void debugShowWorkshop();
     void debugDumpFgd(const std::string& cls);
     void debugImportObj(const std::string& path);  // detail-brush import, headless
     bool saveVmf(const std::string& path);
@@ -97,6 +99,8 @@ private:
     void reloadModelPreview();
     void drawModelImportDialog();
     void doModelImport();
+    void drawWorkshopWindow();
+    void captureWorkshopPreview();
     void drawSelectionPanel();
     void drawCompileWindow();
     bool saveMap(bool forceDialog);   // true if written
@@ -182,6 +186,15 @@ private:
     import::ObjLoadOptions modelLoadOpts_;
     import::ModelImportOptions modelPlaceOpts_;
     std::vector<std::string> pendingModelQc_;  // .qc files the next compile bakes
+
+    // Steam Workshop publish page
+    bool showWorkshop_ = false;
+    bool wsStagedOk_ = false;
+    publish::WorkshopItem wsItem_;
+    publish::StageResult wsStaged_;
+    std::string wsErr_;
+    char wsIdBuf_[32] = {0};
+    char wsUserBuf_[64] = {0};
 
     Settings prefs_;
     float uiScale_ = 1.0f;
