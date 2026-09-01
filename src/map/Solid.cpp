@@ -5,6 +5,7 @@
 #include <cstdio>
 
 #include <glm/gtc/matrix_inverse.hpp>
+#include <glm/gtc/matrix_transform.hpp>
 
 #include "core/Log.h"
 
@@ -145,6 +146,17 @@ void Solid::transform(const glm::mat4& m) {
         f.vAxis = glm::vec4(glm::normalize(glm::mat3(m) * glm::vec3(f.vAxis)), f.vAxis.w);
     }
     recomputeBounds();
+}
+
+void Solid::resizeTo(const glm::vec3& newMin, const glm::vec3& newMax) {
+    const glm::vec3 oldSize = glm::max(boundsMax - boundsMin, glm::vec3(1e-4f));
+    const glm::vec3 newSize = glm::max(newMax - newMin, glm::vec3(1e-4f));
+    const glm::vec3 s = newSize / oldSize;
+    glm::mat4 m(1.0f);
+    m = glm::translate(m, newMin);
+    m = glm::scale(m, s);
+    m = glm::translate(m, -boundsMin);
+    transform(m);
 }
 
 Solid Solid::makeBox(const glm::vec3& mn, const glm::vec3& mx,
