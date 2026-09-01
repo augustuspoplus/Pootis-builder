@@ -92,6 +92,24 @@ void Editor::attachSettings(Settings s, float effectiveScale) {
     prefs_ = std::move(s);
     uiScale_ = effectiveScale;
     showWelcome_ = prefs_.showWelcome;
+    applyPrefs();
+}
+
+void Editor::applyPrefs() {
+    gridSize_ = std::clamp(prefs_.gridSize, 1, 4096);
+    snap_ = prefs_.snap;
+    flySpeed_ = prefs_.flySpeed;
+    autosaveOn_ = prefs_.autosave;
+    autosaveMins_ = prefs_.autosaveMins;
+    settings_.shadeMode = static_cast<ShadeMode>(std::clamp(prefs_.shadeMode, 0, 3));
+    settings_.showGrid = prefs_.showGrid;
+    settings_.showProps = prefs_.showProps;
+    settings_.showPointEntities = prefs_.showPointEntities;
+    settings_.wireOverlay = prefs_.wireOverlay;
+    settings_.exposure = prefs_.exposure;
+    meshOpts_.lightmapGain = prefs_.lightmapGain;
+    meshOpts_.bakeProps = prefs_.bakeProps;
+    suppressAutoDecompile_ = !prefs_.autoDecompile;
 }
 
 void Editor::requestUiScale(float scale) {
@@ -348,6 +366,7 @@ void Editor::frame() {
 
     autosaveTick();
     drawKeysOverlay();
+    drawSettingsWindow();
 
     if (mode_ == Mode::Simple) {
         drawBuildKit();
@@ -575,6 +594,9 @@ void Editor::drawTopBar() {
     if (toolButton(snapLabel, snap_)) snap_ = !snap_;
 
     ImGui::SameLine(0, gap);
+    if (toolButton(ICON_FA_GEAR, showSettings_, "Options")) showSettings_ = !showSettings_;
+
+    ImGui::SameLine(0, gap);
     if (toolButton(ICON_FA_BARS)) ImGui::OpenPopup("##viewmenu");
     drawViewMenuPopup();
 
@@ -608,6 +630,10 @@ void Editor::drawTopBar() {
 
 void Editor::drawViewMenuPopup() {
     if (!ImGui::BeginPopup("##viewmenu")) return;
+    if (ImGui::MenuItem(ICON_FA_GEAR "  Options…")) showSettings_ = true;
+    if (ImGui::MenuItem(ICON_FA_KEYBOARD "  Keyboard shortcuts", "F1"))
+        showKeys_ = true;
+    ImGui::Separator();
     if (ImGui::BeginMenu("3D shading")) {
         auto item = [&](const char* label, ShadeMode m) {
             if (ImGui::MenuItem(label, nullptr, settings_.shadeMode == m))
@@ -2585,6 +2611,135 @@ void Editor::duplicateSelection() {
     selection_ = newSel;
     afterEdit("Duplicate");
     status_ = "Duplicated " + std::to_string(newSel.size()) + " brush(es)";
+}
+
+void Editor::drawSettingsWindow() {
+    if (!showSettings_) return;
+    using namespace pb::ui;
+    ImGui::SetNextWindowSize(ImVec2(dp(460), dp(560)), ImGuiCond_FirstUseEver);
+    if (!ImGui::Begin(ICON_FA_GEAR "  Options", &showSettings_,
+                      ImGuiWindowFlags_NoDocking)) {
+        ImGui::End();
+        return;
+    }
+    bool dirty = false;
+    auto save = [&] { if (dirty) prefs_.save(); };
+
+    if (ImGui::CollapsingHeader("Interface", ImGuiTreeNodeFlags_DefaultOpen)) {
+        const float steps[] = {0.8f, 0.9f, 1.0f, 1.1f, 1.25f, 1.5f, 1.75f, 2.0f};
+        ImGui::TextUnformatted("Scale");
+        for (float s : steps) {
+            char b[16];
+            std::snprintf(b, sizeof(b), "%d%%", (int)(s * 100 + 0.5f));
+            ImGui::SameLine();
+            if (ImGui::RadioButton(b, std::fabs(s - uiScale_) < 0.01f))
+                requestUiScale(s);
+        }
+        if (ImGui::Checkbox("Show the welcome screen on startup", &prefs_.showWelcome))
+            dirty = true;
+    }
+
+    if (ImGui::CollapsingHeader("Editing", ImGuiTreeNodeFlags_DefaultOpen)) {
+        ImGui::SetNextItemWidth(dp(160));
+        if (ImGui::SliderInt("Grid size", &prefs_.gridSize, 1, 512)) {
+            gridSize_ = prefs_.gridSize;
+            dirty = true;
+        }
+        if (ImGui::Checkbox("Snap to grid", &prefs_.snap)) {
+            snap_ = prefs_.snap;
+            dirty = true;
+        }
+        ImGui::SetNextItemWidth(dp(160));
+        if (ImGui::SliderFloat("Fly speed", &prefs_.flySpeed, 100.0f, 4000.0f, "%.0f")) {
+            flySpeed_ = prefs_.flySpeed;
+            dirty = true;
+        }
+        if (ImGui::Checkbox("Autosave", &prefs_.autosave)) {
+            autosaveOn_ = prefs_.autosave;
+            dirty = true;
+        }
+        if (prefs_.autosave) {
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(dp(90));
+            if (ImGui::SliderFloat("every (min)", &prefs_.autosaveMins, 1.0f, 30.0f,
+                                   "%.0f")) {
+                autosaveMins_ = prefs_.autosaveMins;
+                dirty = true;
+            }
+        }
+    }
+
+    if (ImGui::CollapsingHeader("Viewport", ImGuiTreeNodeFlags_DefaultOpen)) {
+        const char* shades[] = {"Textured + lightmap", "Lightmap grid", "Flat",
+                                "Textured (fullbright)"};
+        ImGui::SetNextItemWidth(dp(220));
+        if (ImGui::Combo("3D shading", &prefs_.shadeMode, shades, 4)) {
+            settings_.shadeMode = (ShadeMode)prefs_.shadeMode;
+            dirty = true;
+        }
+        auto vb = [&](const char* label, bool* pv, bool* live) {
+            if (ImGui::Checkbox(label, pv)) { *live = *pv; dirty = true; }
+        };
+        vb("Grid", &prefs_.showGrid, &settings_.showGrid);
+        ImGui::SameLine();
+        vb("Props", &prefs_.showProps, &settings_.showProps);
+        ImGui::SameLine();
+        vb("Point entities in 3D", &prefs_.showPointEntities,
+           &settings_.showPointEntities);
+        vb("Wire overlay (3D)", &prefs_.wireOverlay, &settings_.wireOverlay);
+        ImGui::SetNextItemWidth(dp(160));
+        if (ImGui::SliderFloat("Exposure", &prefs_.exposure, 0.2f, 3.0f, "%.2f")) {
+            settings_.exposure = prefs_.exposure;
+            dirty = true;
+        }
+        ImGui::SetNextItemWidth(dp(160));
+        if (ImGui::SliderFloat("Lightmap gain", &prefs_.lightmapGain, 0.3f, 4.0f,
+                               "%.2f")) {
+            meshOpts_.lightmapGain = prefs_.lightmapGain;
+            if (hasMap()) buildAndUpload(meshOpts_);
+            dirty = true;
+        }
+    }
+
+    if (ImGui::CollapsingHeader("Advanced")) {
+        if (ImGui::Checkbox("Auto-decompile a .bsp to editable brushes on open",
+                            &prefs_.autoDecompile)) {
+            suppressAutoDecompile_ = !prefs_.autoDecompile;
+            dirty = true;
+        }
+        if (ImGui::Checkbox("Render prop_static / entity models", &prefs_.bakeProps)) {
+            meshOpts_.bakeProps = prefs_.bakeProps;
+            if (hasMap()) buildAndUpload(meshOpts_);
+            dirty = true;
+        }
+        ImGui::PushStyleColor(ImGuiCol_Text, col::faint);
+        ImGui::TextWrapped("Team Fortress 2 folder (leave blank to auto-detect)");
+        ImGui::PopStyleColor();
+        char tf[512];
+        std::snprintf(tf, sizeof(tf), "%s", prefs_.tf2Dir.c_str());
+        ImGui::SetNextItemWidth(-90);
+        if (ImGui::InputText("##tf2dir", tf, sizeof(tf))) {
+            prefs_.tf2Dir = tf;
+            dirty = true;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Browse…##tf2")) {
+            const std::string p = openFileDialog("Pick hl2.exe / tf_win64.exe in "
+                                                 "the TF2 folder",
+                                                 "All\0*.*\0\0", nullptr);
+            if (!p.empty()) {
+                prefs_.tf2Dir = fs::path(p).parent_path().string();
+                dirty = true;
+            }
+        }
+        ImGui::Dummy(ImVec2(0, 6));
+        if (ImGui::Button("Reset window layout")) layoutDirty_ = true;
+        ImGui::SameLine();
+        if (ImGui::Button("Show shortcut list (F1)")) showKeys_ = true;
+    }
+
+    save();
+    ImGui::End();
 }
 
 void Editor::drawKeysOverlay() {

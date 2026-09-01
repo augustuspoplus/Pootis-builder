@@ -78,6 +78,7 @@ struct Options {
     float scaleOverride = -1.0f;
     bool mapCheck = false;
     bool palette = false;
+    bool settings = false;
     std::string placePrefabPath;
     int subDemoMode = 0;
     bool workshop = false;
@@ -126,6 +127,7 @@ Options parseArgs(int argc, char** argv) {
         else if (a == "--scale") o.scaleOverride = static_cast<float>(std::atof(next("1").c_str()));
         else if (a == "--map-check") o.mapCheck = true;
         else if (a == "--palette") o.palette = true;
+        else if (a == "--settings") o.settings = true;
         else if (a == "--place-prefab") o.placePrefabPath = next("");
         else if (a == "--dump-props") o.dumpProps = true;
         else if (a == "--no-decompile") o.noDecompile = true;
@@ -181,6 +183,7 @@ int runHeadlessScreenshot(const Options& opt, GLFWwindow* window, float uiScale)
     if (opt.shapeOp >= 0) editor.debugShapeOp(opt.shapeOp);
     if (opt.mapCheck) editor.debugMapCheck();
     if (opt.palette) editor.debugShowPalette();
+    if (opt.settings) editor.debugShowSettings();
     if (!opt.saveVmfPath.empty()) editor.saveVmf(opt.saveVmfPath);
     if (!opt.panel.empty()) editor.debugFocusPanel(opt.panel);
     if (opt.dumpProps) editor.debugDumpProps();

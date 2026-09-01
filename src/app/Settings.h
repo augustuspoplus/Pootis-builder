@@ -10,6 +10,28 @@ namespace pb {
 struct Settings {
     float uiScale = 0.0f;       // 0 = "auto" (use the monitor content scale)
     bool showWelcome = true;
+
+    // Editing
+    int gridSize = 64;
+    bool snap = true;
+    float flySpeed = 900.0f;
+    bool autosave = true;
+    float autosaveMins = 5.0f;
+
+    // Viewport
+    int shadeMode = 0;         // ShadeMode
+    bool showGrid = true;
+    bool showProps = true;
+    bool showPointEntities = false;
+    bool wireOverlay = false;
+    float exposure = 1.15f;
+    float lightmapGain = 1.0f;
+
+    // Advanced
+    bool autoDecompile = true; // decompile .bsp on open
+    bool bakeProps = true;     // render prop_static models
+    std::string tf2Dir;        // override for the TF2 install
+
     std::vector<std::string> recent;  // most-recent first, capped
 
     static Settings load();
