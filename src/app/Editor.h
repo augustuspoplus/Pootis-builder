@@ -11,6 +11,7 @@
 #include "bsp/BspFile.h"
 #include "bsp/BspMesh.h"
 #include "compile/MapCompiler.h"
+#include "fgd/Fgd.h"
 #include "map/History.h"
 #include "map/MapDocument.h"
 #include "render/Camera.h"
@@ -40,6 +41,7 @@ public:
     void debugSelectWorldSolid(int i);  // test hook for headless screenshots
     void debugBuildSampleMap();
     void debugStartCompile(bool fast);
+    void debugDumpFgd(const std::string& cls);
     bool saveVmf(const std::string& path);
 
     // Persisted settings + UI scaling (the font atlas rebuild is done by the
@@ -79,6 +81,7 @@ private:
     enum class Tool { Select, Block, Vertex, Clip, Texture, Entity };
 
     void buildAndUpload(const MeshBuildOptions& opts);
+    void loadFgd();
     void frameAllViews();
     void buildDockLayout(unsigned int dockId, const ImVec2& size);
     void drawTopBar();
@@ -117,6 +120,7 @@ private:
 
     GLFWwindow* window_ = nullptr;
     BspFile bsp_;
+    fgd::Fgd fgd_;
     map::MapDocument doc_;
     WorldMesh mesh_;
     source::SourceFs sourceFs_;

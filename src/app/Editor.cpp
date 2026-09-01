@@ -59,6 +59,7 @@ bool Editor::init(GLFWwindow* window) {
 
     sourceFs_.mountDefaults(executableDir());
     materials_.init(&sourceFs_);
+    loadFgd();
 
     const char* titles[4] = {"3D View", "Top (x/y)", "Front (x/z)", "Side (y/z)"};
     const ViewKind kinds[4] = {ViewKind::Perspective, ViewKind::Top, ViewKind::Front,
@@ -1184,6 +1185,39 @@ bool Editor::saveVmf(const std::string& path) {
     const bool ok = doc_.saveVmf(path, &err);
     status_ = ok ? ("Saved " + path) : ("Save failed: " + err);
     return ok;
+}
+
+void Editor::loadFgd() {
+    // Prefer the game's own tf.fgd (it @includes base.fgd + halflife2.fgd);
+    // fall back to a copy bundled under assets/.
+    std::string fromGame;
+    if (const compile::GamePaths gp = compile::GamePaths::detect(); !gp.gameDir.empty())
+        fromGame = fs::path(gp.gameDir).parent_path().string() + "/bin/tf.fgd";
+    const std::string guesses[] = {
+        fromGame,
+        "C:/Program Files (x86)/Steam/steamapps/common/Team Fortress 2/bin/tf.fgd",
+        executableDir() + "/assets/fgd/tf.fgd",
+        executableDir() + "/../assets/fgd/tf.fgd",
+    };
+    for (const auto& g : guesses) {
+        if (!g.empty() && fileExists(g) && fgd_.load(g)) return;
+    }
+    PB_WARN("fgd: no tf.fgd found — entity catalogue will be limited");
+}
+
+void Editor::debugDumpFgd(const std::string& cls) {
+    PB_INFO("fgd: %zu classes, %zu point, %zu solid", fgd_.size(),
+            fgd_.pointClasses().size(), fgd_.solidClasses().size());
+    const std::string name = cls.empty() ? "info_player_teamspawn" : cls;
+    const fgd::EntityClass* ec = fgd_.flattened(name);
+    if (!ec) { PB_WARN("fgd: no class '%s'", name.c_str()); return; }
+    PB_INFO("== %s : \"%s\"  (%zu keys, %zu inputs, %zu outputs)", ec->name.c_str(),
+            ec->description.c_str(), ec->vars.size(), ec->inputs.size(),
+            ec->outputs.size());
+    for (const auto& v : ec->vars)
+        PB_INFO("   %-22s %-10s \"%s\" = \"%s\"  (%zu choices/%zu flags)",
+                v.key.c_str(), fgd::varTypeName(v.type), v.displayName.c_str(),
+                v.defaultValue.c_str(), v.choices.size(), v.flags.size());
 }
 
 void Editor::debugStartCompile(bool fast) {
