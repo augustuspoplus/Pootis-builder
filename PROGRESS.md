@@ -4,12 +4,26 @@ Newest first. See ROADMAP.md for the plan. Q1 = auto-decompile .bsp on open.
 Q2 = Simple-mode kit builds new maps (prioritised). Also doing section G (QoL).
 
 ## Now / next
-- **Milestone D**: FGD parser (`bin/tf.fgd` + bundled `tf-abs.fgd`) → entity
-  catalogue; place point/brush entities; FGD-driven properties panel (plain
-  labels, collapsible groups, typed widgets, nothing removed, live preview);
-  entity I/O connections editor; entity sprites/helpers in the viewports.
+- **Milestone D** (in progress): D.1 FGD parser DONE. Next: entity catalogue
+  panel, place point/brush entities, FGD-driven properties panel (plain labels,
+  collapsible groups, typed widgets, nothing removed, live preview), entity I/O
+  connections editor, entity sprites/helpers in the viewports.
 - Then **Milestone C** (sub-object editing), interleaving **G** QoL items.
 - Doc-driven Outliner rewrite still pending (reads the BSP path).
+
+## Side quests (user-requested, done out of roadmap order)
+- **3D model import** — `import/ObjModel` (OBJ loader) + `import/ModelImport`:
+  - "Detail brushwork": one convex tri-prism per triangle → func_detail in the
+    VMF (tri-count cap). Verified: pyramid.obj → 6 brushes, all 4 views.
+  - "Prop model": SMD + QC staged, baked to a real .mdl by studiomdl on the
+    next Build (`MapCompiler` modelQc pass). Verified studiomdl output.
+  - Top-bar "Import ▾" menu (Map / 3D model) + import dialog with live preview.
+- **Publish to Steam Workshop** — `publish/Workshop`: stages a Workshop item
+  folder (content/.bsp + preview jpg + steamcmd `publish.vdf`, appid 440).
+  Top-bar "Publish" window: bsp check, capture-preview, title/desc/notes,
+  visibility, gamemode tags, update-existing id. Hand-off via generated
+  steamcmd command; in-process ISteamUGC upload is behind `PB_HAVE_STEAMWORKS`
+  (SDK not bundled — can't be fetched here).
 
 ## "Good state" bar — REACHED
 A + B + E all done: open a map (or start one), move/add/delete brushwork with
