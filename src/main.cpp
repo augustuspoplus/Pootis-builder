@@ -42,6 +42,7 @@ struct Options {
     float scaleOverride = -1.0f;
     bool mapCheck = false;
     bool palette = false;
+    std::string placePrefabPath;
     int subDemoMode = 0;
     bool workshop = false;
     bool dumpFgd = false;
@@ -82,6 +83,7 @@ Options parseArgs(int argc, char** argv) {
         else if (a == "--scale") o.scaleOverride = static_cast<float>(std::atof(next("1").c_str()));
         else if (a == "--map-check") o.mapCheck = true;
         else if (a == "--palette") o.palette = true;
+        else if (a == "--place-prefab") o.placePrefabPath = next("");
         else if (a == "--workshop") o.workshop = true;
         else if (a == "--dump-fgd") { o.dumpFgd = true; o.dumpFgdClass = next(""); }
         else if (a == "--import-obj") o.importObjPath = next("");
@@ -109,15 +111,16 @@ int runHeadlessScreenshot(const Options& opt, GLFWwindow* window, float uiScale)
     if (opt.sampleMap) editor.debugBuildSampleMap();
     if (!opt.importObjPath.empty()) editor.debugImportObj(opt.importObjPath);
     if (!opt.placeEnt.empty()) editor.debugPlaceEntity(opt.placeEnt);
+    if (!opt.placePrefabPath.empty()) editor.debugPlacePrefab(opt.placePrefabPath);
     if (opt.selectSolid >= 0) editor.debugSelectWorldSolid(opt.selectSolid);
     if (opt.selectEnt >= 0) editor.debugSelectEntity(opt.selectEnt);
-    if (!opt.saveVmfPath.empty()) editor.saveVmf(opt.saveVmfPath);
     if (opt.compile) editor.debugStartCompile(true);
     if (opt.subDemo) editor.debugSubObjectDemo(0, opt.subDemoMode);
     if (opt.texDemo) editor.debugTextureDemo(0);
     if (opt.shapeOp >= 0) editor.debugShapeOp(opt.shapeOp);
     if (opt.mapCheck) editor.debugMapCheck();
     if (opt.palette) editor.debugShowPalette();
+    if (!opt.saveVmfPath.empty()) editor.saveVmf(opt.saveVmfPath);
     if (!opt.panel.empty()) editor.debugFocusPanel(opt.panel);
     if (opt.workshop) editor.debugShowWorkshop();
 
