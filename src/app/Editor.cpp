@@ -273,16 +273,61 @@ void Editor::frame() {
     ImGui::DockSpace(dockId, ImVec2(0, 0), ImGuiDockNodeFlags_PassthruCentralNode);
     ImGui::End();
 
-    if (ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_O)) promptOpenMap();
-    if (ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_Z)) undo();
-    if (ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_Y) ||
-        ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_Z))
-        redo();
-    if (ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_S) && hasDoc())
-        saveMap(ImGui::GetIO().KeyShift);  // Ctrl+Shift+S = Save As
-    if (ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_K)) showPalette_ = true;
+    // ---- global keyboard shortcuts (not while typing in a field) ----------
+    if (!ImGui::GetIO().WantTextInput) {
+        const bool ctrl = ImGui::GetIO().KeyCtrl;
+        const bool shift = ImGui::GetIO().KeyShift;
+        if (ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_O)) promptOpenMap();
+        if (ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_Z)) undo();
+        if (ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_Y) ||
+            ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_Z))
+            redo();
+        if (ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_S) && hasDoc())
+            saveMap(shift);  // Ctrl+Shift+S = Save As
+        if (ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_K)) showPalette_ = true;
+        if (ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_C)) copySelection();
+        if (ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_V)) pasteClipboard();
+        if (ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_X)) {
+            copySelection();
+            deleteSelection();
+        }
+        if (ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_D)) duplicateSelection();
+        if (ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_A) && hasDoc()) {
+            selection_.clear();
+            for (int i = 0; i < (int)doc_.worldSolids().size(); ++i)
+                selection_.push_back({-1, i});
+            rebuildSelectionWire();
+            status_ = "Selected all brushes";
+        }
+        if (ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_B) && hasDoc()) {
+            showCompile_ = true;
+            if (!compiler_.running()) startCompile();
+        }
+        if (!ctrl && ImGui::IsKeyPressed(ImGuiKey_Delete)) deleteSelection();
+        if (!ctrl && ImGui::IsKeyPressed(ImGuiKey_Backspace)) deleteSelection();
+        if (!ctrl && ImGui::IsKeyPressed(ImGuiKey_F) && hasMap()) frameAllViews();
+        if (!ctrl && ImGui::IsKeyPressed(ImGuiKey_F1)) showKeys_ = !showKeys_;
+        if (ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+            if (!placing_.empty()) { placing_.clear(); roadPts_.clear(); roadActive_ = false; }
+            else clearSelection();
+        }
+        // Rotate the selection 15 deg about Z (Shift = -15).
+        if (!ctrl && ImGui::IsKeyPressed(ImGuiKey_LeftBracket))
+            rotateSelection(2, shift ? 15.0f : -15.0f);
+        if (!ctrl && ImGui::IsKeyPressed(ImGuiKey_RightBracket))
+            rotateSelection(2, shift ? -15.0f : 15.0f);
+        // Pro gizmo mode: W move / E rotate / R scale — only with a selection
+        // and not while RMB-flying (so WASD nav isn't hijacked).
+        if (mode_ == Mode::Pro && !ctrl && !selection_.empty() &&
+            !ImGui::IsMouseDown(ImGuiMouseButton_Right)) {
+            if (ImGui::IsKeyPressed(ImGuiKey_W)) gizmoMode_ = 0;
+            if (ImGui::IsKeyPressed(ImGuiKey_E)) gizmoMode_ = 1;
+            if (ImGui::IsKeyPressed(ImGuiKey_R)) gizmoMode_ = 2;
+        }
+    }
 
     autosaveTick();
+    drawKeysOverlay();
 
     if (mode_ == Mode::Simple) {
         drawBuildKit();
@@ -2334,18 +2379,110 @@ void Editor::nudgeSelection(const glm::vec3& d) {
 }
 
 void Editor::deleteSelection() {
+    // A selected point entity (e.g. a dropped prop) deletes on its own.
+    if (selection_.empty() && selectedEntity_ >= 0 &&
+        selectedEntity_ < static_cast<int>(doc_.entities().size())) {
+        doc_.entities().erase(doc_.entities().begin() + selectedEntity_);
+        clearSelection();
+        afterEdit("Delete entity");
+        status_ = "Deleted entity";
+        return;
+    }
     if (selection_.empty()) return;
-    std::vector<int> ws;
-    for (const auto& r : selection_)
+
+    std::vector<int> ws, ents;
+    for (const auto& r : selection_) {
         if (r.entity < 0) ws.push_back(r.solid);
+        else ents.push_back(r.entity);
+    }
     std::sort(ws.rbegin(), ws.rend());
     for (int i : ws)
         if (i < static_cast<int>(doc_.worldSolids().size()))
             doc_.worldSolids().erase(doc_.worldSolids().begin() + i);
-    const size_t n = ws.size();
+    std::sort(ents.rbegin(), ents.rend());
+    ents.erase(std::unique(ents.begin(), ents.end()), ents.end());
+    for (int i : ents)
+        if (i < static_cast<int>(doc_.entities().size()))
+            doc_.entities().erase(doc_.entities().begin() + i);
+    const size_t n = ws.size() + ents.size();
     clearSelection();
     afterEdit("Delete");
-    status_ = "Deleted " + std::to_string(n) + " brush(es)";
+    status_ = "Deleted " + std::to_string(n) + " object(s)";
+}
+
+void Editor::copySelection() {
+    clipboard_.clear();
+    for (const auto& r : selection_)
+        if (const map::Solid* s = doc_.resolve(r)) clipboard_.push_back(*s);
+    if (clipboard_.empty() && selectedEntity_ >= 0 &&
+        selectedEntity_ < static_cast<int>(doc_.entities().size()))
+        clipboardEnt_ = doc_.entities()[selectedEntity_];
+    else
+        clipboardEnt_.classname.clear();
+    if (!clipboard_.empty() || !clipboardEnt_.classname.empty())
+        status_ = "Copied " +
+                  std::to_string(clipboard_.size() +
+                                 (clipboardEnt_.classname.empty() ? 0 : 1)) +
+                  " object(s)";
+}
+
+void Editor::pasteClipboard() {
+    if (clipboard_.empty() && clipboardEnt_.classname.empty()) return;
+    if (!doc_.active()) { doc_.newBlank("untitled"); history_.reset(doc_); }
+    const glm::vec3 off(float(gridSize_), float(gridSize_), 0.0f);
+    std::vector<map::SolidRef> sel;
+    for (map::Solid s : clipboard_) {
+        s.id = doc_.nextId();
+        s.translate(off);
+        doc_.worldSolids().push_back(std::move(s));
+        sel.push_back({-1, static_cast<int>(doc_.worldSolids().size()) - 1});
+    }
+    if (!clipboardEnt_.classname.empty()) {
+        map::MapEntity e = clipboardEnt_;
+        e.id = doc_.nextId();
+        e.origin += off;
+        e.kv.set("origin", std::to_string((int)e.origin.x) + " " +
+                               std::to_string((int)e.origin.y) + " " +
+                               std::to_string((int)e.origin.z));
+        for (auto& s : e.solids) { s.id = doc_.nextId(); s.translate(off); }
+        doc_.entities().push_back(std::move(e));
+        selectedEntity_ = static_cast<int>(doc_.entities().size()) - 1;
+    }
+    selection_ = sel;
+    afterEdit("Paste");
+    status_ = "Pasted";
+}
+
+void Editor::rotateSelection(int axis, float degrees) {
+    glm::vec3 c(0.0f);
+    int n = 0;
+    for (const auto& r : selection_)
+        if (const map::Solid* s = doc_.resolve(r)) { c += s->center(); ++n; }
+    if (n == 0 && selectedEntity_ >= 0 &&
+        selectedEntity_ < static_cast<int>(doc_.entities().size())) {
+        // Spin a point entity's yaw via its angles key.
+        auto& e = doc_.entities()[selectedEntity_];
+        float p = 0, y = 0, r = 0;
+        std::sscanf(e.kv.get("angles").c_str(), "%f %f %f", &p, &y, &r);
+        y = std::fmod(y + degrees, 360.0f);
+        e.kv.set("angles", std::to_string((int)p) + " " + std::to_string((int)y) +
+                               " " + std::to_string((int)r));
+        afterEdit("Rotate");
+        status_ = "Rotated entity";
+        return;
+    }
+    if (n == 0) return;
+    c /= float(n);
+    glm::vec3 ax(0.0f);
+    ax[std::clamp(axis, 0, 2)] = 1.0f;
+    glm::mat4 m(1.0f);
+    m = glm::translate(m, c);
+    m = glm::rotate(m, glm::radians(degrees), ax);
+    m = glm::translate(m, -c);
+    for (const auto& r : selection_)
+        if (map::Solid* s = doc_.resolve(r)) s->transform(m);
+    afterEdit("Rotate");
+    status_ = "Rotated selection";
 }
 
 void Editor::duplicateSelection() {
@@ -2363,6 +2500,45 @@ void Editor::duplicateSelection() {
     selection_ = newSel;
     afterEdit("Duplicate");
     status_ = "Duplicated " + std::to_string(newSel.size()) + " brush(es)";
+}
+
+void Editor::drawKeysOverlay() {
+    if (!showKeys_) return;
+    using namespace pb::ui;
+    ImGui::SetNextWindowSize(ImVec2(dp(420), 0), ImGuiCond_Appearing);
+    if (ImGui::Begin(ICON_FA_KEYBOARD "  Keyboard shortcuts", &showKeys_,
+                     ImGuiWindowFlags_NoDocking)) {
+        struct KB { const char* k; const char* d; };
+        static const KB rows[] = {
+            {"Ctrl+Z / Ctrl+Y", "Undo / redo"},
+            {"Ctrl+S / Ctrl+Shift+S", "Save / Save As"},
+            {"Ctrl+O", "Open a map"},
+            {"Ctrl+C / V / X", "Copy / paste / cut selection"},
+            {"Ctrl+D", "Duplicate selection"},
+            {"Ctrl+A", "Select all brushes"},
+            {"Delete / Backspace", "Delete selection"},
+            {"[ / ]", "Rotate selection about Z  (Shift = other way)"},
+            {"W / E / R", "Move / rotate / scale gizmo  (Pro, with a selection)"},
+            {"F", "Frame the map / selection"},
+            {"Esc", "Cancel placement / clear selection"},
+            {"Ctrl+K", "Command palette"},
+            {"Ctrl+B", "Build & play"},
+            {"F1", "This list"},
+        };
+        if (ImGui::BeginTable("kb", 2, ImGuiTableFlags_SizingStretchProp)) {
+            for (const auto& r : rows) {
+                ImGui::TableNextRow();
+                ImGui::TableNextColumn();
+                ImGui::PushStyleColor(ImGuiCol_Text, col::acc);
+                ImGui::TextUnformatted(r.k);
+                ImGui::PopStyleColor();
+                ImGui::TableNextColumn();
+                ImGui::TextUnformatted(r.d);
+            }
+            ImGui::EndTable();
+        }
+    }
+    ImGui::End();
 }
 
 void Editor::undo() {
@@ -3561,6 +3737,21 @@ void Editor::drawBrushInspector() {
         ImGui::SameLine();
         ImGui::TextWrapped("%s", m.c_str());
     }
+
+    ImGui::Dummy(ImVec2(0, 8));
+    pb::ui::sectionLabel("ROTATE");
+    const float rbw = (ImGui::GetContentRegionAvail().x - 12) / 3.0f;
+    if (ImGui::Button(ICON_FA_ROTATE_LEFT " Z", ImVec2(rbw, 0)))
+        rotateSelection(2, -90.0f);
+    ImGui::SameLine(0, 6);
+    if (ImGui::Button(ICON_FA_ROTATE_RIGHT " Z", ImVec2(rbw, 0)))
+        rotateSelection(2, 90.0f);
+    ImGui::SameLine(0, 6);
+    if (ImGui::Button("Tip 90", ImVec2(rbw, 0)))
+        rotateSelection(0, 90.0f);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Tip the object onto its side (rotate 90 about X).\n"
+                          "Keyboard:  [ and ]  rotate about Z in 15 steps.");
 
     ImGui::Dummy(ImVec2(0, 8));
     if (ImGui::Button(ICON_FA_CLONE "  Duplicate", ImVec2(-1, 0)))

@@ -134,6 +134,7 @@ private:
     void drawTopBar();
     void drawViewMenuPopup();
     void drawWelcome();
+    void drawKeysOverlay();
     void uiScaleMenu();
     void drawViewportPanel(ViewPanel& p);
     void drawBuildKit();
@@ -210,6 +211,9 @@ private:
     void nudgeSelection(const glm::vec3& worldDelta);
     void deleteSelection();
     void duplicateSelection();
+    void copySelection();
+    void pasteClipboard();
+    void rotateSelection(int axis, float degrees);
     void undo();
     void redo();
     glm::vec3 selectionCenter() const;
@@ -281,6 +285,10 @@ private:
     glm::vec3 resizeStartMin_{0}, resizeStartMax_{0};
     std::vector<map::Solid> resizeSnap_;
     std::vector<map::SolidRef> resizeRefs_;
+
+    std::vector<map::Solid> clipboard_;
+    map::MapEntity clipboardEnt_;
+    bool showKeys_ = false;   // F1 shortcut cheat-sheet
 
     // Block tool
     bool blockDragging_ = false;
