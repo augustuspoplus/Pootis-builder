@@ -115,6 +115,7 @@ bool parseMdl(const std::vector<uint8_t>& d, MdlInfo& out) {
         const size_t o = (size_t)cdIndex + (size_t)i * 4;
         if (o + 4 > d.size()) break;
         std::string c = norm(cstr(d.data(), i32(d.data(), o), 260));
+        while (!c.empty() && (c.front() == '/' || c.front() == ' ')) c.erase(0, 1);
         if (!c.empty() && c.back() != '/') c += '/';
         cds.push_back(c);
     }
@@ -136,13 +137,19 @@ bool parseMdl(const std::vector<uint8_t>& d, MdlInfo& out) {
 
     // Resolve each skinref slot to a full material path. If a texname already
     // contains a slash treat it as a full path; else try each cdmaterials dir.
+    auto stripLead = [](std::string s) {
+        while (!s.empty() && (s.front() == '/' || s.front() == ' ')) s.erase(0, 1);
+        return s;
+    };
     for (size_t s = 0; s < skin0.size(); ++s) {
         const int t = skin0[s];
-        std::string name = (t >= 0 && t < (int)texNames.size()) ? texNames[t] : "";
+        std::string name = stripLead((t >= 0 && t < (int)texNames.size())
+                                         ? texNames[t]
+                                         : std::string());
         std::string full = name;
         if (name.find('/') == std::string::npos && !cds.empty())
             full = cds[0] + name;
-        out.materials.push_back(full);
+        out.materials.push_back(stripLead(full));
     }
     if (out.materials.empty() && !texNames.empty())
         out.materials.push_back(cds[0] + texNames[0]);

@@ -85,7 +85,8 @@ std::vector<glm::vec3> solidWire(const Solid& s) {
     return out;
 }
 
-WorldMesh buildDocMesh(const MapDocument& doc, MaterialLibrary& materials) {
+WorldMesh buildDocMesh(const MapDocument& doc, MaterialLibrary& materials,
+                       const ModelForClass& modelForClass) {
     WorldMesh mesh;
 
     // 8x8 white lightmap atlas so the shared shader's lightmap sample == 1.
@@ -129,21 +130,29 @@ WorldMesh buildDocMesh(const MapDocument& doc, MaterialLibrary& materials) {
     for (const auto& e : doc.entities()) {
         if (!e.solids.empty() || e.hidden) continue;
 
-        // A prop_* with a model becomes a PropInstance so the doc render can
-        // bake its real geometry (see Editor::buildAndUpload).
-        if (e.classname.rfind("prop_", 0) == 0) {
-            const std::string mdl = e.kv.get("model");
-            if (!mdl.empty()) {
-                bsp::PropInstance pi;
-                pi.model = mdl;
-                pi.pos = e.origin;
-                float p = 0, y = 0, r = 0;
-                std::sscanf(e.kv.get("angles").c_str(), "%f %f %f", &p, &y, &r);
-                pi.anglesPYR = {p, y, r};
-                pi.scale = e.kv.getFloat("modelscale");
-                if (pi.scale <= 0.01f) pi.scale = 1.0f;
-                mesh.props.push_back(std::move(pi));
-            }
+        // Bake a real model for prop_* (its model key) and for any point
+        // entity the FGD gives a studio() helper (health kits, ammo, flags…),
+        // so the doc render shows the model instead of a plain box.
+        std::string mdl = e.kv.get("model");
+        if (mdl.empty() && e.classname.rfind("prop_", 0) != 0 && modelForClass)
+            mdl = modelForClass(e.classname);
+        if (mdl.empty())  // any *.mdl-valued key (flag_model, etc.)
+            for (const auto& kv : e.kv.pairs)
+                if (kv.second.size() > 4 &&
+                    kv.second.compare(kv.second.size() - 4, 4, ".mdl") == 0) {
+                    mdl = kv.second;
+                    break;
+                }
+        if (!mdl.empty()) {
+            bsp::PropInstance pi;
+            pi.model = mdl;
+            pi.pos = e.origin;
+            float p = 0, y = 0, r = 0;
+            std::sscanf(e.kv.get("angles").c_str(), "%f %f %f", &p, &y, &r);
+            pi.anglesPYR = {p, y, r};
+            pi.scale = e.kv.getFloat("modelscale");
+            if (pi.scale <= 0.01f) pi.scale = 1.0f;
+            mesh.props.push_back(std::move(pi));
         }
 
         bsp::PointEntity pe;
