@@ -4,12 +4,12 @@ Newest first. See ROADMAP.md for the plan. Q1 = auto-decompile .bsp on open.
 Q2 = Simple-mode kit builds new maps (prioritised). Also doing section G (QoL).
 
 ## Now / next
-- **Milestone D** (in progress): D.1 FGD parser DONE. Next: entity catalogue
-  panel, place point/brush entities, FGD-driven properties panel (plain labels,
-  collapsible groups, typed widgets, nothing removed, live preview), entity I/O
-  connections editor, entity sprites/helpers in the viewports.
-- Then **Milestone C** (sub-object editing), interleaving **G** QoL items.
-- Doc-driven Outliner rewrite still pending (reads the BSP path).
+- **Milestone D** — essentially complete (D.1–D.7 below). Optional polish left:
+  real iconsprite/studio-model rendering for point entities (boxes + tags for
+  now); entity thumbnail in the catalogue/properties header.
+- Next: **Milestone C** (sub-object editing: vertex/edge/face modes, clip,
+  hollow, carve, the Texture/UV tool), interleaving **G** QoL items
+  (autosave, undo history panel, map-check, Ctrl+K palette, prefabs, …).
 
 ## Side quests (user-requested, done out of roadmap order)
 - **3D model import** — `import/ObjModel` (OBJ loader) + `import/ModelImport`:
@@ -64,6 +64,26 @@ playtest in TF2.
     log with follow-scroll, Stop. Save / Ctrl+S / Ctrl+Shift+S wired for real.
   - Verified headless: sample map → 270 KB bsp built + copied to tf/maps,
     vrad lump table streamed into the log panel.
+- **Milestone D** — entities:
+  - D.1 `fgd/Fgd` — lexer + recursive-descent .fgd parser; resolves @include
+    (base.fgd, halflife2.fgd), @PointClass/@SolidClass/@BaseClass headers,
+    keys (type/display/default/help), choices + flags, input/output.
+    `flattened()` expands bases in Hammer order + caches; 446 classes from
+    tf.fgd (274 point / 98 solid).
+  - D.2 `app/PropWidgets` — FGD-driven properties panel: typed widget per key
+    (int/float/bool/choices→combo/flags→checkboxes/color→swatch+brightness/
+    angles→vec3/target→entity dropdown/…), label-above-field layout, help
+    tooltips, "Other keys (not in FGD)" catch-all, I/O connections editor
+    (add/remove rows, output & target dropdowns).
+  - D.3 entity catalogue browser (FGD point/solid classes, search) +
+    place-on-grid + "tie to entity" for selected brushes.
+  - D.4/D.5 entity helpers in every viewport: class-coloured wire box sized
+    from FGD size(), I/O connection lines with arrowheads (hot when tied to
+    the selection), facing tick from `angles`, decluttered labels.
+  - D.6 doc-driven Contents/Outliner — live Entities + World-brushes lists,
+    click-to-select (mirrors viewport), double-click to frame.
+  - D.7 properties panel splits the class's own keys (promoted) from inherited
+    "Shared keys" (collapsed); nothing hidden.
 - **Milestone F** — Simple-mode kit is real:
   - `MapDocument::newBlank()` + `active()`; "New map" opens a blank editable doc.
   - `Editor::placePiece()` — every Build Kit card emits real brushwork/entities
