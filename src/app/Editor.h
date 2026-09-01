@@ -52,6 +52,7 @@ public:
     void debugFocusPanel(const std::string& name) { focusPanel_ = name; focusPanelFrames_ = 6; }
     void debugSubObjectDemo(int solidIdx, int mode);  // select brush, deform one handle
     void debugTextureDemo(int solidIdx);              // pick faces for the Texture tool
+    void debugShapeOp(int op);                        // 0 hollow, 1 carve, 2 clip
     void debugDumpFgd(const std::string& cls);
     void debugImportObj(const std::string& path);  // detail-brush import, headless
     bool saveVmf(const std::string& path);
@@ -137,6 +138,9 @@ private:
     void handleTextureTool(ViewPanel& p);        // Texture tool: pick faces
     void drawFaceOverlay(ViewPanel& p, float aspect, ImDrawList* dl);
     void drawFaceEditPanel();                    // the Face Edit sheet
+    void handleClipTool(ViewPanel& p);           // Clip tool: draw a cut line
+    void drawClipOverlay(ViewPanel& p, float aspect, ImDrawList* dl);
+    void applyClip();
     void applyToTexFaces(const std::function<void(map::BrushFace&)>& fn,
                          const char* undoLabel, bool commit);
     void placePiece(const std::string& piece, const glm::vec3& at);
@@ -191,6 +195,13 @@ private:
     // Texture tool: faces picked for texturing (SolidRef + face index).
     std::vector<std::pair<map::SolidRef, int>> texFaces_;
     char texMaterial_[128] = "dev/dev_measuregeneric01b";
+
+    // Clip tool
+    bool clipDragging_ = false;
+    bool clipArmed_ = false;               // a line has been drawn, awaiting Enter
+    ViewKind clipView_ = ViewKind::Top;
+    glm::vec3 clipA_{0}, clipB_{0};
+    int clipMode_ = 0;                      // 0 keep front, 1 keep back, 2 keep both
 
     // Sub-object (Vertex/Edge/Face) editing — operates on selection_[0].
     SubMode subMode_ = SubMode::Vertex;

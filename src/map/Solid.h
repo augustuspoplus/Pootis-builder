@@ -53,10 +53,23 @@ struct Solid {
     // Convex brush from a set of outward half-space planes (dot(n,p) <= d).
     static Solid fromPlanes(const std::vector<std::pair<glm::vec3, float>>& planes,
                             const std::string& material);
+
+    // Cut with the half-space dot(n,p) <= d: adds the plane as a new face and
+    // re-polygonises. `cutMaterial` textures the exposed face. Returns false
+    // (and leaves the solid unchanged) if the cut would remove the whole brush.
+    bool clip(const glm::vec3& n, float d, const std::string& cutMaterial);
 };
 
 Solid solidFromKv(const KvNode& solidNode);
 KvNode solidToKv(const Solid& s);
+
+// Shell `s` into `wall`-thick slabs (uses its AABB). Returns up to 6 boxes.
+std::vector<Solid> hollow(const Solid& s, float wall);
+
+// Convex carve: `target` minus `cutter`, as a set of convex pieces. Returns
+// { target } unchanged when the two do not overlap; {} when target is wholly
+// inside cutter.
+std::vector<Solid> carve(const Solid& target, const Solid& cutter);
 
 // --- Texture / UV tool helpers (operate on one polygonised face) -----------
 // Reset the U/V axes to world-axis alignment for the face's dominant normal

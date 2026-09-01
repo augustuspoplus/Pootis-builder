@@ -217,6 +217,73 @@ Solid Solid::fromPlanes(const std::vector<std::pair<glm::vec3, float>>& planes,
     return s;
 }
 
+bool Solid::clip(const glm::vec3& nIn, float d, const std::string& cutMaterial) {
+    const glm::vec3 n = glm::normalize(nIn);
+    // Already entirely inside the half-space? Nothing to cut.
+    bool anyOutside = false;
+    for (const auto& f : faces)
+        for (const auto& v : f.verts)
+            if (glm::dot(n, v) > d + kEps) anyOutside = true;
+    if (!anyOutside) return true;
+
+    Solid trial = *this;
+    BrushFace cut;
+    cut.planeN = n;
+    cut.planeD = d;
+    cut.material = cutMaterial;
+    cut.planeFromPoints = false;
+    const glm::vec3 an = glm::abs(n);
+    if (an.z >= an.x && an.z >= an.y) {
+        cut.uAxis = {1, 0, 0, 0};
+        cut.vAxis = {0, -1, 0, 0};
+    } else if (an.x >= an.y) {
+        cut.uAxis = {0, 1, 0, 0};
+        cut.vAxis = {0, 0, -1, 0};
+    } else {
+        cut.uAxis = {1, 0, 0, 0};
+        cut.vAxis = {0, 0, -1, 0};
+    }
+    trial.faces.push_back(cut);
+    trial.polygonise();
+    if (!trial.valid) return false;
+    *this = std::move(trial);
+    return true;
+}
+
+std::vector<Solid> hollow(const Solid& s, float wall) {
+    const glm::vec3 mn = s.boundsMin, mx = s.boundsMax;
+    const glm::vec3 sz = mx - mn;
+    const float t = std::min(wall, 0.49f * std::min(std::min(sz.x, sz.y), sz.z));
+    const std::string mat =
+        s.faces.empty() ? "tools/toolsnodraw" : s.faces.front().material;
+    std::vector<Solid> out;
+    out.push_back(Solid::makeBox(mn, {mx.x, mx.y, mn.z + t}, mat));        // floor
+    out.push_back(Solid::makeBox({mn.x, mn.y, mx.z - t}, mx, mat));        // ceiling
+    out.push_back(Solid::makeBox({mn.x, mn.y, mn.z + t},
+                                 {mn.x + t, mx.y, mx.z - t}, mat));        // -x
+    out.push_back(Solid::makeBox({mx.x - t, mn.y, mn.z + t},
+                                 {mx.x, mx.y, mx.z - t}, mat));            // +x
+    out.push_back(Solid::makeBox({mn.x + t, mn.y, mn.z + t},
+                                 {mx.x - t, mn.y + t, mx.z - t}, mat));    // -y
+    out.push_back(Solid::makeBox({mn.x + t, mx.y - t, mn.z + t},
+                                 {mx.x - t, mx.y, mx.z - t}, mat));        // +y
+    return out;
+}
+
+std::vector<Solid> carve(const Solid& target, const Solid& cutter) {
+    const std::string mat =
+        target.faces.empty() ? "tools/toolsnodraw" : target.faces.front().material;
+    std::vector<Solid> out;
+    Solid remainder = target;
+    for (const auto& cf : cutter.faces) {
+        Solid piece = remainder;
+        if (piece.clip(-cf.planeN, -cf.planeD, mat)) out.push_back(std::move(piece));
+        if (!remainder.clip(cf.planeN, cf.planeD, mat))
+            return {target};  // no overlap — target is untouched
+    }
+    return out;  // remainder == target ∩ cutter is dropped
+}
+
 Solid solidFromKv(const KvNode& node) {
     Solid s;
     s.id = node.getInt("id");

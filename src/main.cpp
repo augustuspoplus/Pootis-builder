@@ -38,6 +38,7 @@ struct Options {
     std::string panel;
     bool subDemo = false;
     bool texDemo = false;
+    int shapeOp = -1;
     int subDemoMode = 0;
     bool workshop = false;
     bool dumpFgd = false;
@@ -74,6 +75,7 @@ Options parseArgs(int argc, char** argv) {
         else if (a == "--panel") o.panel = next("");
         else if (a == "--sub-demo") { o.subDemo = true; o.subDemoMode = std::atoi(next("0").c_str()); }
         else if (a == "--tex-demo") o.texDemo = true;
+        else if (a == "--shape-op") o.shapeOp = std::atoi(next("0").c_str());
         else if (a == "--workshop") o.workshop = true;
         else if (a == "--dump-fgd") { o.dumpFgd = true; o.dumpFgdClass = next(""); }
         else if (a == "--import-obj") o.importObjPath = next("");
@@ -107,6 +109,7 @@ int runHeadlessScreenshot(const Options& opt, GLFWwindow* window, float uiScale)
     if (opt.compile) editor.debugStartCompile(true);
     if (opt.subDemo) editor.debugSubObjectDemo(0, opt.subDemoMode);
     if (opt.texDemo) editor.debugTextureDemo(0);
+    if (opt.shapeOp >= 0) editor.debugShapeOp(opt.shapeOp);
     if (!opt.panel.empty()) editor.debugFocusPanel(opt.panel);
     if (opt.workshop) editor.debugShowWorkshop();
 
