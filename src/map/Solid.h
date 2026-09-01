@@ -33,6 +33,7 @@ struct BrushFace {
 // A convex brush = an intersection of half-spaces {p : dot(faceN,p) <= faceD}.
 struct Solid {
     int id = 0;
+    int group = 0;  // 0 = ungrouped; solids sharing an id select together
     std::vector<BrushFace> faces;
     glm::vec3 boundsMin{0}, boundsMax{0};
     glm::vec3 editorColor{0.7f, 0.55f, 0.35f};

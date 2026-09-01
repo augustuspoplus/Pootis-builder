@@ -314,6 +314,7 @@ Solid solidFromKv(const KvNode& node) {
             glm::vec3 rgb(180);
             if (std::sscanf(col.c_str(), " %f %f %f", &rgb.x, &rgb.y, &rgb.z) == 3)
                 s.editorColor = rgb / 255.0f;
+            s.group = c.getInt("groupid");
         }
     }
     s.polygonise();
@@ -424,6 +425,12 @@ KvNode solidToKv(const Solid& s) {
         side.set("smoothing_groups", std::to_string(f.smoothingGroups));
         n.children.push_back(std::move(side));
     }
+    // Preserve the editor block (colour etc.) and keep groupid in sync.
+    KvNode ed = s.extra;
+    ed.name = "editor";
+    if (s.group > 0)
+        ed.set("groupid", std::to_string(s.group));
+    if (!ed.pairs.empty() || !ed.children.empty()) n.children.push_back(std::move(ed));
     return n;
 }
 
