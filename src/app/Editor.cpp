@@ -663,6 +663,7 @@ void Editor::drawViewportPanel(ViewPanel& p) {
     const ImVec2 avail = ImGui::GetContentRegionAvail();
     const int w = std::max(16, static_cast<int>(avail.x));
     const int h = std::max(16, static_cast<int>(avail.y));
+    const float aspect = h > 0 ? static_cast<float>(w) / h : 1.0f;
     p.contentMin = {ImGui::GetCursorScreenPos().x, ImGui::GetCursorScreenPos().y};
     p.contentSize = {static_cast<float>(w), static_cast<float>(h)};
     p.hovered = ImGui::IsWindowHovered();
@@ -678,12 +679,14 @@ void Editor::drawViewportPanel(ViewPanel& p) {
                  ImVec2(static_cast<float>(w), static_cast<float>(h)), ImVec2(0, 1),
                  ImVec2(1, 0));
 
-    drawGizmo(p, h > 0 ? static_cast<float>(w) / h : 1.0f);
+    drawGizmo(p, aspect);
 
     // Corner label like Hammer.
     ImVec2 tl(p.contentMin.x, p.contentMin.y);
     ImDrawList* dl = ImGui::GetWindowDrawList();
     dl->AddText(ImVec2(tl.x + 8, tl.y + 6), IM_COL32(210, 210, 210, 200), p.title);
+
+    drawEntityTags(p, aspect, dl);
 
     if (!hasMap() && p.kind == ViewKind::Perspective) {
         const char* msg = "Open a .bsp  —  File > Open BSP  (Ctrl+O)  or drag one in";
@@ -693,6 +696,53 @@ void Editor::drawViewportPanel(ViewPanel& p) {
                     IM_COL32(180, 180, 185, 220), msg);
     }
     ImGui::End();
+}
+
+void Editor::drawEntityTags(ViewPanel& p, float aspect, ImDrawList* dl) {
+    if (!hasDoc() || doc_.entities().empty()) return;
+    const glm::mat4 vp = p.camera.proj(aspect) * p.camera.view();
+    const ImVec2 tl(p.contentMin.x, p.contentMin.y);
+    const ImVec2 br(tl.x + p.contentSize.x, tl.y + p.contentSize.y);
+
+    // Greedy declutter: a label is drawn only if no earlier label sits within
+    // ~46px of it (the selected entity always wins).
+    std::vector<ImVec2> labelled;
+    auto crowded = [&](const ImVec2& s) {
+        for (const auto& q : labelled)
+            if (std::fabs(q.x - s.x) < 46.0f && std::fabs(q.y - s.y) < 16.0f)
+                return true;
+        return false;
+    };
+
+    for (int i = 0; i < static_cast<int>(doc_.entities().size()); ++i) {
+        const auto& e = doc_.entities()[i];
+        if (!e.solids.empty()) continue;  // brush ents already show as wire
+        const glm::vec4 c = vp * glm::vec4(e.origin, 1.0f);
+        if (c.w <= 1e-4f) continue;
+        const ImVec2 sp(tl.x + (c.x / c.w * 0.5f + 0.5f) * p.contentSize.x,
+                        tl.y + (1.0f - (c.y / c.w * 0.5f + 0.5f)) * p.contentSize.y);
+        if (sp.x < tl.x || sp.x > br.x || sp.y < tl.y || sp.y > br.y) continue;
+
+        const bool sel = (i == selectedEntity_);
+        glm::vec3 rgb(0.90f, 0.82f, 0.62f);
+        if (const fgd::EntityClass* ec = fgd_.flattened(e.classname); ec && ec->hasColor)
+            rgb = ec->color;
+        const ImU32 col =
+            sel ? IM_COL32(255, 170, 80, 255)
+                : IM_COL32((int)(rgb.r * 255), (int)(rgb.g * 255), (int)(rgb.b * 255),
+                           235);
+        dl->AddRectFilled(ImVec2(sp.x - 3, sp.y - 3), ImVec2(sp.x + 3, sp.y + 3), col);
+        if (sel)
+            dl->AddRect(ImVec2(sp.x - 6, sp.y - 6), ImVec2(sp.x + 6, sp.y + 6), col, 0,
+                        0, 2.0f);
+
+        if (!sel && crowded(sp)) continue;
+        labelled.push_back(sp);
+        const std::string& tn = e.kv.get("targetname");
+        const std::string lbl = tn.empty() ? e.classname : e.classname + "  " + tn;
+        dl->AddText(ImVec2(sp.x + 8, sp.y - 7), IM_COL32(20, 20, 22, 220), lbl.c_str());
+        dl->AddText(ImVec2(sp.x + 7, sp.y - 8), col, lbl.c_str());
+    }
 }
 
 void Editor::drawGizmo(ViewPanel& p, float aspect) {

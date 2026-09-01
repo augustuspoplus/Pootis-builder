@@ -123,6 +123,7 @@ private:
     void clearSelection();
     void afterEdit(const char* label);   // re-mesh + record undo + refresh
     void drawGizmo(ViewPanel& p, float aspect);
+    void drawEntityTags(ViewPanel& p, float aspect, ImDrawList* dl);
     void handleBlockTool(ViewPanel& p);
     void placePiece(const std::string& piece, const glm::vec3& at);
     void placeFgdEntity(const std::string& cls, const glm::vec3& at);
