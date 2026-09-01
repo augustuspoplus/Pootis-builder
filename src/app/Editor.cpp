@@ -971,10 +971,12 @@ void Editor::drawViewportPanel(ViewPanel& p) {
 
 void Editor::drawEntityTags(ViewPanel& p, float aspect, ImDrawList* dl) {
     if (!hasDoc() || doc_.entities().empty()) return;
-    // The 3D view stays clean by default on real (often 1000+ entity) decompiled
-    // maps; flip Settings > View menu "Point entities" on to see helpers there
-    // too. The 2D views always show them — that's core Hammer editing utility.
-    if (p.kind == ViewKind::Perspective && !settings_.showPointEntities) return;
+    // Always show entity markers on a hand-built map; on a big decompile (1000+
+    // entities) the 3D view only shows them when "Point entities" is on, or it
+    // becomes an unreadable scribble.
+    const bool few = doc_.entities().size() <= 200;
+    if (p.kind == ViewKind::Perspective && !settings_.showPointEntities && !few)
+        return;
     const glm::mat4 vp = p.camera.proj(aspect) * p.camera.view();
     const ImVec2 tl(p.contentMin.x, p.contentMin.y);
     const ImVec2 br(tl.x + p.contentSize.x, tl.y + p.contentSize.y);
@@ -1063,10 +1065,44 @@ void Editor::drawEntityTags(ViewPanel& p, float aspect, ImDrawList* dl) {
         }
     }
 
+    // --- path_track / path_corner route lines -------------------------------
+    // These chain via the `target` key (not the I/O block), so trace them
+    // separately and draw the route as a bright polyline with arrowheads.
+    {
+        const ImU32 routeCol = IM_COL32(120, 230, 120, 230);
+        for (int i = 0; i < (int)doc_.entities().size(); ++i) {
+            const std::string& c = doc_.entities()[i].classname;
+            if (c != "path_track" && c != "path_corner" && c != "move_rope" &&
+                c != "keyframe_rope")
+                continue;
+            const std::string tgt = doc_.entities()[i].kv.get("target");
+            if (tgt.empty()) continue;
+            auto range = byName.equal_range(tgt);
+            for (auto it = range.first; it != range.second; ++it) {
+                bool a, b;
+                const ImVec2 s0 = project(centres[i], a);
+                const ImVec2 s1 = project(centres[it->second], b);
+                if (!a || !b) continue;
+                dl->AddLine(s0, s1, routeCol, 2.5f);
+                const ImVec2 d(s1.x - s0.x, s1.y - s0.y);
+                const float L = std::sqrt(d.x * d.x + d.y * d.y);
+                if (L > 12.0f) {
+                    const ImVec2 u(d.x / L, d.y / L), n(-u.y, u.x);
+                    const ImVec2 mid((s0.x + s1.x) * 0.5f, (s0.y + s1.y) * 0.5f);
+                    dl->AddTriangleFilled(
+                        ImVec2(mid.x + u.x * 8, mid.y + u.y * 8),
+                        ImVec2(mid.x - u.x * 4 + n.x * 5, mid.y - u.y * 4 + n.y * 5),
+                        ImVec2(mid.x - u.x * 4 - n.x * 5, mid.y - u.y * 4 - n.y * 5),
+                        routeCol);
+                }
+            }
+        }
+    }
+
     // --- per-entity helper box + label -------------------------------------
-    // Label only the selection, entities wired to it, and (when the map is
-    // small) everything; otherwise just boxes + dots, Hammer-style.
-    const bool labelAll = doc_.entities().size() <= 12 && selectedEntity_ < 0;
+    // A hand-built map labels every entity; a big decompile labels just the
+    // selection + what's wired to it (or the view is an unreadable scribble).
+    const bool labelAll = few && selectedEntity_ < 0;
     std::vector<ImVec2> labelled;
     auto crowded = [&](const ImVec2& s) {
         for (const auto& q : labelled)
@@ -1136,9 +1172,21 @@ void Editor::drawEntityTags(ViewPanel& p, float aspect, ImDrawList* dl) {
             }
         }
 
-        dl->AddRectFilled(ImVec2(sp.x - 3, sp.y - 3), ImVec2(sp.x + 3, sp.y + 3), col);
+        // Clear diamond marker (bigger + outlined so model-less entities like
+        // path_track / lights actually read in the 3D view).
+        if (!brush) {
+            const float rr = sel ? 8.0f : 6.0f;
+            const ImVec2 dpts[4] = {{sp.x, sp.y - rr}, {sp.x + rr, sp.y},
+                                    {sp.x, sp.y + rr}, {sp.x - rr, sp.y}};
+            dl->AddConvexPolyFilled(dpts, 4, col);
+            dl->AddPolyline(dpts, 4, IM_COL32(15, 15, 18, 235), ImDrawFlags_Closed,
+                            1.6f);
+        } else {
+            dl->AddRectFilled(ImVec2(sp.x - 3, sp.y - 3), ImVec2(sp.x + 3, sp.y + 3),
+                              col);
+        }
         if (sel)
-            dl->AddRect(ImVec2(sp.x - 6, sp.y - 6), ImVec2(sp.x + 6, sp.y + 6), col, 0,
+            dl->AddRect(ImVec2(sp.x - 9, sp.y - 9), ImVec2(sp.x + 9, sp.y + 9), col, 0,
                         0, 2.0f);
 
         const bool wantLabel = sel || labelAll || (i < (int)linked.size() && linked[i]);
@@ -1965,14 +2013,46 @@ void Editor::placePiece(const std::string& piece, const glm::vec3& atRaw) {
         box({at.x - 128, at.y - 128, at.z - 16}, {at.x + 128, at.y + 128, at.z},
             floorMat);
     } else if (piece == "Payload track") {
-        // Three path_track nodes chained; the cart + watcher come later.
-        for (int i = 0; i < 3; ++i) {
+        // A working payload spine: 4 chained path_track nodes, a func_tracktrain
+        // cart sitting on the first, a cap trigger parented to it, and a
+        // team_train_watcher spanning the first->last node.
+        const int N = 4;
+        for (int i = 0; i < N; ++i) {
             const std::string nm = "cart_path_" + std::to_string(i + 1);
             const std::string nxt = "cart_path_" + std::to_string(i + 2);
-            ent("path_track", at + glm::vec3(i * 256.0f, 0, 8),
+            ent("path_track", at + glm::vec3(i * 320.0f, 0, 8),
                 {{"targetname", nm.c_str()},
-                 {"target", i < 2 ? nxt.c_str() : ""}});
+                 {"target", i < N - 1 ? nxt.c_str() : ""},
+                 {"orientationtype", "1"}});
         }
+        brushEnt("func_tracktrain", {at.x - 48, at.y - 40, at.z},
+                 {at.x + 48, at.y + 40, at.z + 90},
+                 {{"targetname", "cart"},
+                  {"target", "cart_path_1"},
+                  {"startspeed", "90"},
+                  {"speed", "90"},
+                  {"bank", "0"},
+                  {"orientationtype", "1"},
+                  {"wheels", "50"},
+                  {"height", "24"}});
+        brushEnt("trigger_capture_area", {at.x - 128, at.y - 128, at.z},
+                 {at.x + 128, at.y + 128, at.z + 128},
+                 {{"targetname", "cart_cap"},
+                  {"parentname", "cart"},
+                  {"area_cap_point", "control_point_1"},
+                  {"team_cancap_3", "1"},
+                  {"team_numcap_3", "1"}});
+        ent("team_train_watcher", at + glm::vec3(0, 0, 8),
+            {{"targetname", "cart_watcher"},
+             {"train", "cart"},
+             {"start_node", "cart_path_1"},
+             {"goal_node", ("cart_path_" + std::to_string(N)).c_str()},
+             {"linked_pathtrack_1", "cart_path_1"}});
+        ent("team_control_point", at + glm::vec3(N * 320.0f - 320.0f, 0, 8),
+            {{"targetname", "control_point_1"},
+             {"point_printname", "The Point"},
+             {"point_default_owner", "2"},
+             {"point_index", "0"}});
     } else if (piece == "Point light") {
         ent("light", at + glm::vec3(0, 0, 128),
             {{"_light", "255 255 224 200"}, {"_constant_attn", "0"},
