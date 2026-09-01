@@ -4,14 +4,35 @@ Newest first. See ROADMAP.md for the plan. Q1 = auto-decompile .bsp on open.
 Q2 = Simple-mode kit builds new maps (prioritised). Also doing section G (QoL).
 
 ## Now / next
-- **Milestones A–F + D + C are all done.** Remaining roadmap: section **G**
-  (QoL — autosave/backups, undo history panel, map-check, Ctrl+K command
-  palette, prefab library, instances, cordon, measure tool, visgroups,
-  groups, .pbproj, bspzip packing, camera bookmarks, snap presets, log
-  panel, favourites, keybinds, tutorial) and the visual-fidelity parallel
-  track (prop MDL rendering, displacements, blend materials).
-- Optional polish: iconsprite/model rendering for point entities (boxes +
-  tags today); entity thumbnail in the catalogue header.
+- **Milestones A–F, C, D done. Section G well underway** (see below).
+- **Section G still to do:** instances (func_instance), cordon, visgroups /
+  layers, .pbproj project bundle, bspzip content packing on compile, asset
+  favourites, keybind customisation, Simple-mode tutorial, welcome tips,
+  a dedicated measure tool (live selection dims already land).
+- Visual-fidelity parallel track: prop MDL rendering, displacements,
+  $basetexture2 blend materials.
+- Optional polish: iconsprite/model rendering for point entities.
+
+## UI scaling
+- `ui::g_scale` + `dp(px)`; top bar, fonts and icons are DPI-aware. Font
+  Awesome merge retuned (advance ~0.9em, pixel-snapped baseline). Top-bar
+  right cluster measures itself so it never overlaps. `--scale <f>` previews
+  a scale headlessly. Verified clean at 100% and 150%.
+
+## Section G — quality of life (done so far)
+- Autosave (`<map>.autosave.vmf`, menu-configurable interval) + rolling
+  `.vmf.bak1-3` on every real save. `MapDocument::saveVmf(…, updateState)`.
+- History panel — full undo stack, click any step to jump. Log panel —
+  `core/Log` ring buffer, severity colours, follow-scroll, copy-all.
+- Map Check — spawns / lights / skybox / objective / invalid + oversized
+  brushes / dangling I/O targets; severity-sorted, click to select+frame.
+- Command palette (Ctrl+K) — actions, tool switches, "Place entity: <class>".
+- Live selection dimensions (w×h) in every ortho view.
+- Camera bookmarks ×6 + go-to-coordinate (View ▸ Camera).
+- Brush groups (Solid.group, VMF editor{groupid} round-trip; pick one → whole
+  group selects; Group/Ungroup in the inspector).
+- Prefab library — panel lists prefab .vmf files, click-to-drop with fresh
+  ids at the snapped cursor; "Save selection as prefab…".
 
 ## Side quests (user-requested, done out of roadmap order)
 - **3D model import** — `import/ObjModel` (OBJ loader) + `import/ModelImport`:
