@@ -190,6 +190,33 @@ Solid Solid::makeBox(const glm::vec3& mn, const glm::vec3& mx,
     return s;
 }
 
+Solid Solid::fromPlanes(const std::vector<std::pair<glm::vec3, float>>& planes,
+                        const std::string& material) {
+    Solid s;
+    for (const auto& [n, d] : planes) {
+        BrushFace f;
+        f.planeN = glm::normalize(n);
+        f.planeD = d;
+        f.material = material;
+        f.planeFromPoints = false;
+        // A rough UV projection: pick the axis least aligned with the normal.
+        const glm::vec3 an = glm::abs(f.planeN);
+        if (an.z >= an.x && an.z >= an.y) {
+            f.uAxis = {1, 0, 0, 0};
+            f.vAxis = {0, -1, 0, 0};
+        } else if (an.x >= an.y) {
+            f.uAxis = {0, 1, 0, 0};
+            f.vAxis = {0, 0, -1, 0};
+        } else {
+            f.uAxis = {1, 0, 0, 0};
+            f.vAxis = {0, 0, -1, 0};
+        }
+        s.faces.push_back(f);
+    }
+    s.polygonise();
+    return s;
+}
+
 Solid solidFromKv(const KvNode& node) {
     Solid s;
     s.id = node.getInt("id");
@@ -234,8 +261,16 @@ KvNode solidToKv(const Solid& s) {
     for (const auto& f : s.faces) {
         KvNode side;
         side.name = "side";
-        std::snprintf(buf, sizeof(buf), "(%g %g %g) (%g %g %g) (%g %g %g)", f.p0.x,
-                      f.p0.y, f.p0.z, f.p1.x, f.p1.y, f.p1.z, f.p2.x, f.p2.y, f.p2.z);
+        // Emit the plane from the polygonised verts (clockwise from the front,
+        // which is the reverse of our CCW-around-normal winding).
+        glm::vec3 a = f.p0, b = f.p1, c = f.p2;
+        if (f.verts.size() >= 3) {
+            a = f.verts[2];
+            b = f.verts[1];
+            c = f.verts[0];
+        }
+        std::snprintf(buf, sizeof(buf), "(%g %g %g) (%g %g %g) (%g %g %g)", a.x, a.y,
+                      a.z, b.x, b.y, b.z, c.x, c.y, c.z);
         side.set("plane", buf);
         side.set("material", f.material);
         std::snprintf(buf, sizeof(buf), "[%g %g %g %g] %g", f.uAxis.x, f.uAxis.y,

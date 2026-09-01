@@ -37,6 +37,8 @@ public:
     void promptOpenMap();  // native file dialog
     void setProMode() { mode_ = Mode::Pro; layoutDirty_ = true; }
     void debugSelectWorldSolid(int i);  // test hook for headless screenshots
+    void debugBuildSampleMap();
+    bool saveVmf(const std::string& path);
 
     // Persisted settings + UI scaling (the font atlas rebuild is done by the
     // caller so it happens outside a frame).
@@ -55,8 +57,8 @@ public:
     // Offscreen 2x2 render matching the default editor layout.
     bool renderQuadToImage(int w, int h, std::vector<uint8_t>& rgba);
 
-    bool hasMap() const { return bsp_.loaded() || !doc_.empty(); }
-    bool hasDoc() const { return !doc_.empty(); }
+    bool hasMap() const { return bsp_.loaded() || doc_.active(); }
+    bool hasDoc() const { return doc_.active(); }
     bool busy() const { return decompileRunning_.load(); }
     const std::string& status() const { return status_; }
 
@@ -98,6 +100,8 @@ private:
     void afterEdit(const char* label);   // re-mesh + record undo + refresh
     void drawGizmo(ViewPanel& p, float aspect);
     void handleBlockTool(ViewPanel& p);
+    void placePiece(const std::string& piece, const glm::vec3& at);
+    glm::vec3 viewPlanePoint(ViewPanel& p, const ImVec2& mouse) const;
     glm::vec3 snapVec(const glm::vec3& v) const;
     void nudgeSelection(const glm::vec3& worldDelta);
     void deleteSelection();

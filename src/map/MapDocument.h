@@ -35,9 +35,11 @@ struct SolidRef {
 class MapDocument {
 public:
     void clear();
+    void newBlank(const std::string& name = "untitled");
     bool loadVmf(const std::string& path, std::string* err = nullptr);
     bool saveVmf(const std::string& path, std::string* err = nullptr);
     bool empty() const { return worldSolids_.empty() && entities_.empty(); }
+    bool active() const { return active_; }  // a document is open (may be empty)
 
     std::vector<Solid>& worldSolids() { return worldSolids_; }
     const std::vector<Solid>& worldSolids() const { return worldSolids_; }
@@ -61,6 +63,7 @@ private:
     std::vector<MapEntity> entities_;
     std::string path_, name_;
     bool dirty_ = false;
+    bool active_ = false;
     int lastId_ = 0;
 };
 
