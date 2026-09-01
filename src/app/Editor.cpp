@@ -872,11 +872,18 @@ void Editor::drawViewportPanel(ViewPanel& p) {
                  ImVec2(1, 0));
 
     // Drop target: drag a model / entity / prefab card straight onto a viewport.
-    // Image() has no ID, so use a rect-based custom target over the viewport.
-    {
-        const ImRect bb(imgTL, ImVec2(imgTL.x + w, imgTL.y + h));
-        if (ImGui::BeginDragDropTargetCustom(bb, ImGui::GetID("##vpdrop"))) {
-            auto dropAt = [&] { return viewPlanePoint(p, ImGui::GetMousePos()); };
+    // Only exists while a drag is in progress, so it never affects normal
+    // viewport input. Image() has no ID, hence the InvisibleButton overlay.
+    if (ImGui::GetDragDropPayload() != nullptr) {
+        ImGui::SetCursorScreenPos(imgTL);
+        ImGui::InvisibleButton("##vpdroptarget", ImVec2((float)w, (float)h),
+                               ImGuiButtonFlags_MouseButtonLeft);
+        if (ImGui::BeginDragDropTarget()) {
+            auto dropAt = [&] {
+                const glm::vec3 at = dropWorldPoint(p, ImGui::GetMousePos());
+                PB_INFO("drop @ (%.0f %.0f %.0f)", at.x, at.y, at.z);
+                return at;
+            };
             if (const ImGuiPayload* pl = ImGui::AcceptDragDropPayload("PB_MODEL")) {
                 const std::string tag(static_cast<const char*>(pl->Data));
                 if (!doc_.active()) { doc_.newBlank("untitled"); history_.reset(doc_); }
@@ -1712,6 +1719,35 @@ void Editor::handleBlockTool(ViewPanel& p) {
             }
         }
     }
+}
+
+glm::vec3 Editor::dropWorldPoint(ViewPanel& p, const ImVec2& mouse) {
+    glm::vec3 ro, rd;
+    p.camera.pixelRay({mouse.x - p.contentMin.x, mouse.y - p.contentMin.y},
+                      p.contentSize, ro, rd);
+
+    if (p.kind != ViewKind::Perspective) return snapVec(viewPlanePoint(p, mouse));
+
+    // 3D view: prefer a hit on existing brushwork, then the ground, then a
+    // point a fixed distance in front of the camera so it always lands in view.
+    float bestT = 1e30f;
+    for (const auto& s : doc_.worldSolids()) {
+        float t;
+        if (s.valid && map::raySolid(ro, rd, s, t) && t > 0.0f && t < bestT) bestT = t;
+    }
+    for (const auto& e : doc_.entities())
+        for (const auto& s : e.solids) {
+            float t;
+            if (s.valid && map::raySolid(ro, rd, s, t) && t > 0.0f && t < bestT)
+                bestT = t;
+        }
+    if (bestT < 1e29f) return snapVec(ro + rd * bestT);
+
+    if (std::fabs(rd.z) > 1e-4f) {
+        const float t = -ro.z / rd.z;
+        if (t > 1.0f && t < 16384.0f) return snapVec(ro + rd * t);
+    }
+    return snapVec(ro + rd * 384.0f);
 }
 
 glm::vec3 Editor::viewPlanePoint(ViewPanel& p, const ImVec2& m) const {
