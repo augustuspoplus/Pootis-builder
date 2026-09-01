@@ -1073,6 +1073,12 @@ glm::vec3 Editor::snapVec(const glm::vec3& v) const {
     return glm::round(v / g) * g;
 }
 
+float Editor::snapF(float v) const {
+    if (!snap_ || gridSize_ <= 0) return v;
+    const float g = float(gridSize_);
+    return std::round(v / g) * g;
+}
+
 // --------------------------------------------------------------------------
 // Sub-object (Vertex / Edge / Face) editing
 // --------------------------------------------------------------------------
@@ -4882,9 +4888,11 @@ inline void orthoAxes(ViewKind k, int& u, int& v) {
 }  // namespace
 
 void Editor::handleSelectionResize(ViewPanel& p) {
-    if (p.kind == ViewKind::Perspective || tool_ != Tool::Select ||
-        selection_.empty() || gizmoUsing_)
-        { resizeHot_ = -1; return; }
+    if (tool_ != Tool::Select || selection_.empty() || gizmoUsing_) {
+        resizeHot_ = -1;
+        return;
+    }
+    const bool persp = p.kind == ViewKind::Perspective;
 
     glm::vec3 mn(1e30f), mx(-1e30f);
     for (const auto& r : selection_)
@@ -4894,16 +4902,24 @@ void Editor::handleSelectionResize(ViewPanel& p) {
         }
     if (mn.x > mx.x) { resizeHot_ = -1; return; }
 
-    int au, av;
-    orthoAxes(p.kind, au, av);
-    const glm::mat4 vp = p.camera.proj(p.contentSize.x /
-                                       std::max(1.0f, p.contentSize.y)) *
-                         p.camera.view();
-    // 8 handle world positions: 4 corners then 4 edge midpoints (u-,u+,v-,v+).
+    int au = 0, av = 1;
+    if (!persp) orthoAxes(p.kind, au, av);
+    const float aspect = p.contentSize.x / std::max(1.0f, p.contentSize.y);
+    const glm::mat4 vp = p.camera.proj(aspect) * p.camera.view();
+    const glm::vec3 ctr = 0.5f * (mn + mx);
+    const int nHandles = persp ? 6 : 8;
+
+    // Perspective: 6 face-centre handles, one per +/- world axis.
+    // Ortho: 4 corners + 4 edge midpoints in the view plane.
     auto handleWorld = [&](int h) {
-        glm::vec3 w = 0.5f * (mn + mx);
+        glm::vec3 w = ctr;
+        if (persp) {
+            const int ax = h / 2;
+            w[ax] = (h & 1) ? mx[ax] : mn[ax];
+            return w;
+        }
         const float lo[2] = {mn[au], mn[av]}, hi[2] = {mx[au], mx[av]};
-        const float mid[2] = {0.5f * (lo[0] + hi[0]), 0.5f * (lo[1] + hi[1])};
+        const float mid[2] = {ctr[au], ctr[av]};
         float cu = mid[0], cv = mid[1];
         switch (h) {
             case 0: cu = lo[0]; cv = lo[1]; break;
@@ -4921,6 +4937,7 @@ void Editor::handleSelectionResize(ViewPanel& p) {
     };
     auto project = [&](const glm::vec3& w) {
         const glm::vec4 c = vp * glm::vec4(w, 1.0f);
+        if (c.w <= 1e-4f) return ImVec2(-9999, -9999);
         return ImVec2(p.contentMin.x + (c.x / c.w * 0.5f + 0.5f) * p.contentSize.x,
                       p.contentMin.y + (1.0f - (c.y / c.w * 0.5f + 0.5f)) * p.contentSize.y);
     };
@@ -4928,26 +4945,29 @@ void Editor::handleSelectionResize(ViewPanel& p) {
     const ImVec2 m = ImGui::GetMousePos();
     resizeHot_ = -1;
     if (resizeHandle_ < 0) {
-        float best = 9.0f;
-        for (int h = 0; h < 8; ++h) {
+        float best = persp ? 11.0f : 9.0f;
+        for (int h = 0; h < nHandles; ++h) {
             const ImVec2 s = project(handleWorld(h));
             const float d = std::hypot(s.x - m.x, s.y - m.y);
             if (d < best) { best = d; resizeHot_ = h; }
         }
     }
 
-    if (resizeHot_ >= 0 && p.hovered &&
-        ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+    if (resizeHot_ >= 0 && p.hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
         resizeHandle_ = resizeHot_;
         resizeStartMin_ = mn;
         resizeStartMax_ = mx;
-        resizeAnchor_ = 0.5f * (mn + mx);
+        resizeAnchor_ = ctr;
         const int h = resizeHandle_;
-        if (h == 0 || h == 3 || h == 4) resizeAnchor_[au] = mx[au];
-        if (h == 1 || h == 2 || h == 5) resizeAnchor_[au] = mn[au];
-        if (h == 0 || h == 1 || h == 6) resizeAnchor_[av] = mx[av];
-        if (h == 2 || h == 3 || h == 7) resizeAnchor_[av] = mn[av];
-        // Snapshot the geometry so each drag frame maps from a stable origin.
+        if (persp) {
+            const int ax = h / 2;
+            resizeAnchor_[ax] = (h & 1) ? mn[ax] : mx[ax];  // opposite face
+        } else {
+            if (h == 0 || h == 3 || h == 4) resizeAnchor_[au] = mx[au];
+            if (h == 1 || h == 2 || h == 5) resizeAnchor_[au] = mn[au];
+            if (h == 0 || h == 1 || h == 6) resizeAnchor_[av] = mx[av];
+            if (h == 2 || h == 3 || h == 7) resizeAnchor_[av] = mn[av];
+        }
         resizeSnap_.clear();
         resizeRefs_.clear();
         for (const auto& r : selection_)
@@ -4958,22 +4978,34 @@ void Editor::handleSelectionResize(ViewPanel& p) {
     }
 
     if (resizeHandle_ >= 0 && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
-        const glm::vec3 hit = snapVec(viewPlanePoint(p, m));
-        glm::vec3 nmn = resizeStartMin_, nmx = resizeStartMax_;
         const int h = resizeHandle_;
-        const bool moveU = (h != 6 && h != 7);
-        const bool moveV = (h != 4 && h != 5);
-        if (moveU) {
-            if (resizeAnchor_[au] == resizeStartMin_[au])
-                nmx[au] = std::max(hit[au], resizeAnchor_[au] + 1.0f);
+        glm::vec3 nmn = resizeStartMin_, nmx = resizeStartMax_;
+
+        auto applyAxis = [&](int ax, float coord) {
+            if (resizeAnchor_[ax] == resizeStartMin_[ax])
+                nmx[ax] = std::max(coord, resizeAnchor_[ax] + 1.0f);
             else
-                nmn[au] = std::min(hit[au], resizeAnchor_[au] - 1.0f);
-        }
-        if (moveV) {
-            if (resizeAnchor_[av] == resizeStartMin_[av])
-                nmx[av] = std::max(hit[av], resizeAnchor_[av] + 1.0f);
-            else
-                nmn[av] = std::min(hit[av], resizeAnchor_[av] - 1.0f);
+                nmn[ax] = std::min(coord, resizeAnchor_[ax] - 1.0f);
+        };
+
+        if (persp) {
+            const int ax = h / 2;
+            glm::vec3 ro, rd;
+            p.camera.pixelRay({m.x - p.contentMin.x, m.y - p.contentMin.y},
+                              p.contentSize, ro, rd);
+            // Closest approach between the ray and the world-axis line through ctr.
+            glm::vec3 u(0.0f);
+            u[ax] = 1.0f;
+            const glm::vec3 w0 = ctr - ro;
+            const float b = glm::dot(u, rd), c = glm::dot(rd, rd);
+            const float d = glm::dot(u, w0), e = glm::dot(rd, w0);
+            const float denom = c - b * b;
+            const float t = std::fabs(denom) > 1e-5f ? (b * e - c * d) / denom : 0.0f;
+            applyAxis(ax, snapF(ctr[ax] + t));
+        } else {
+            const glm::vec3 hit = snapVec(viewPlanePoint(p, m));
+            if (h != 6 && h != 7) applyAxis(au, hit[au]);
+            if (h != 4 && h != 5) applyAxis(av, hit[av]);
         }
 
         const glm::vec3 os = glm::max(resizeStartMax_ - resizeStartMin_,
@@ -4985,8 +5017,8 @@ void Editor::handleSelectionResize(ViewPanel& p) {
         mtx = glm::translate(mtx, -resizeStartMin_);
         for (size_t i = 0; i < resizeRefs_.size(); ++i)
             if (map::Solid* s = doc_.resolve(resizeRefs_[i])) {
-                *s = resizeSnap_[i];   // restore grab-time shape
-                s->transform(mtx);     // then map into the new box
+                *s = resizeSnap_[i];
+                s->transform(mtx);
             }
         docMeshDirty_ = true;
     }
@@ -5000,7 +5032,7 @@ void Editor::handleSelectionResize(ViewPanel& p) {
 }
 
 void Editor::drawSelectionDims(ViewPanel& p, float aspect, ImDrawList* dl) {
-    if (p.kind == ViewKind::Perspective || selection_.empty()) return;
+    if (selection_.empty()) return;
     glm::vec3 mn(1e30f), mx(-1e30f);
     for (const auto& r : selection_)
         if (const map::Solid* s = doc_.resolve(r)) {
@@ -5012,6 +5044,29 @@ void Editor::drawSelectionDims(ViewPanel& p, float aspect, ImDrawList* dl) {
     auto pr = [&](const glm::vec3& w, bool& ok) {
         return projectPt(p.kind, vp, p.contentMin, p.contentSize, w, ok);
     };
+
+    // 3D view: 6 face-centre handles + a faint box, no dimension text.
+    if (p.kind == ViewKind::Perspective) {
+        if (tool_ != Tool::Select) return;
+        const glm::vec3 ctr = 0.5f * (mn + mx);
+        for (int hnd = 0; hnd < 6; ++hnd) {
+            const int ax = hnd / 2;
+            glm::vec3 wp = ctr;
+            wp[ax] = (hnd & 1) ? mx[ax] : mn[ax];
+            bool ok;
+            const ImVec2 s = pr(wp, ok);
+            if (!ok) continue;
+            const bool hot = (hnd == resizeHot_ || hnd == resizeHandle_);
+            const float r = hot ? 6.0f : 4.0f;
+            const ImU32 hc = hot ? IM_COL32(255, 180, 90, 255)
+                                 : IM_COL32(255, 210, 140, 210);
+            dl->AddRectFilled(ImVec2(s.x - r, s.y - r), ImVec2(s.x + r, s.y + r), hc);
+            dl->AddRect(ImVec2(s.x - r, s.y - r), ImVec2(s.x + r, s.y + r),
+                        IM_COL32(20, 20, 25, 220));
+        }
+        return;
+    }
+
     bool a, b;
     const ImVec2 s0 = pr(mn, a);
     const ImVec2 s1 = pr(mx, b);

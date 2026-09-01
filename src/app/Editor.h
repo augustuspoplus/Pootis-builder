@@ -187,6 +187,7 @@ private:
     void tieSelectionToEntity(const std::string& cls);
     glm::vec3 viewPlanePoint(ViewPanel& p, const ImVec2& mouse) const;
     glm::vec3 snapVec(const glm::vec3& v) const;
+    float snapF(float v) const;
     void nudgeSelection(const glm::vec3& worldDelta);
     void deleteSelection();
     void duplicateSelection();
