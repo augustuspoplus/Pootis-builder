@@ -14,6 +14,7 @@
 #include "fgd/Fgd.h"
 #include "import/ModelImport.h"
 #include "import/ObjModel.h"
+#include "map/BrushEdit.h"
 #include "map/History.h"
 #include "publish/Workshop.h"
 #include "map/MapDocument.h"
@@ -48,6 +49,7 @@ public:
     void debugStartCompile(bool fast);
     void debugShowWorkshop();
     void debugFocusPanel(const std::string& name) { focusPanel_ = name; focusPanelFrames_ = 6; }
+    void debugSubObjectDemo(int solidIdx, int mode);  // select brush, deform one handle
     void debugDumpFgd(const std::string& cls);
     void debugImportObj(const std::string& path);  // detail-brush import, headless
     bool saveVmf(const std::string& path);
@@ -87,6 +89,7 @@ private:
 
     enum class Mode { Simple, Pro };
     enum class Tool { Select, Block, Vertex, Clip, Texture, Entity };
+    enum class SubMode { Vertex, Edge, Face };
 
     void buildAndUpload(const MeshBuildOptions& opts);
     void loadFgd();
@@ -126,6 +129,9 @@ private:
     void drawGizmo(ViewPanel& p, float aspect);
     void drawEntityTags(ViewPanel& p, float aspect, ImDrawList* dl);
     void handleBlockTool(ViewPanel& p);
+    void rebuildHandles();                       // sub-object handles for selection_[0]
+    void handleSubObjectInput(ViewPanel& p);
+    void drawSubObjectOverlay(ViewPanel& p, float aspect, ImDrawList* dl);
     void placePiece(const std::string& piece, const glm::vec3& at);
     void placeFgdEntity(const std::string& cls, const glm::vec3& at);
     void tieSelectionToEntity(const std::string& cls);
@@ -174,6 +180,15 @@ private:
     glm::vec3 blockA_{0}, blockB_{0};
     float newBrushDepth_ = 128.0f;
     std::string blockMaterial_ = "dev/dev_measuregeneric01b";
+
+    // Sub-object (Vertex/Edge/Face) editing — operates on selection_[0].
+    SubMode subMode_ = SubMode::Vertex;
+    map::BrushHandles handles_;
+    bool handlesDirty_ = true;
+    int subSel_ = -1;             // index into verts / edges / faces per subMode_
+    int subHot_ = -1;            // hovered handle this frame
+    bool subDragging_ = false;
+    glm::vec3 subDragStartHit_{0}, subDragStartPos_{0}, subCurPos_{0};
 
     Mode mode_ = Mode::Simple;
     Tool tool_ = Tool::Select;

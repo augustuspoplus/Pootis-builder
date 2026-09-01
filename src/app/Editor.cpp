@@ -403,9 +403,27 @@ void Editor::drawTopBar() {
                                      ICON_FA_BEZIER_CURVE,   ICON_FA_SCISSORS,
                                      ICON_FA_IMAGE,          ICON_FA_LIGHTBULB};
         int r = segmented("tool", tools, 6, static_cast<int>(tool_), row);
-        if (r >= 0) tool_ = static_cast<Tool>(r);
+        if (r >= 0 && r != static_cast<int>(tool_)) {
+            tool_ = static_cast<Tool>(r);
+            handlesDirty_ = true;
+            subDragging_ = false;
+        }
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("Select / Block / Vertex / Clip / Texture / Entity");
+
+        if (tool_ == Tool::Vertex) {
+            ImGui::SameLine(0, 10);
+            ImGui::SetCursorPosY((barH - row) * 0.5f);
+            const char* const subs[] = {ICON_FA_CIRCLE_DOT "  Vertex",
+                                        ICON_FA_GRIP_LINES "  Edge",
+                                        ICON_FA_SQUARE "  Face"};
+            int sr = segmented("submode", subs, 3, static_cast<int>(subMode_), row);
+            if (sr >= 0 && sr != static_cast<int>(subMode_)) {
+                subMode_ = static_cast<SubMode>(sr);
+                handlesDirty_ = true;
+                subDragging_ = false;
+            }
+        }
     }
 
     // Right cluster
@@ -692,6 +710,7 @@ void Editor::drawViewportPanel(ViewPanel& p) {
     dl->AddText(ImVec2(tl.x + 8, tl.y + 6), IM_COL32(210, 210, 210, 200), p.title);
 
     drawEntityTags(p, aspect, dl);
+    drawSubObjectOverlay(p, aspect, dl);
 
     if (!hasMap() && p.kind == ViewKind::Perspective) {
         const char* msg = "Open a .bsp  —  File > Open BSP  (Ctrl+O)  or drag one in";
@@ -910,6 +929,203 @@ glm::vec3 Editor::snapVec(const glm::vec3& v) const {
     if (!snap_ || gridSize_ <= 0) return v;
     const float g = float(gridSize_);
     return glm::round(v / g) * g;
+}
+
+// --------------------------------------------------------------------------
+// Sub-object (Vertex / Edge / Face) editing
+// --------------------------------------------------------------------------
+void Editor::rebuildHandles() {
+    handlesDirty_ = false;
+    handles_ = {};
+    subHot_ = -1;
+    if (tool_ != Tool::Vertex || selection_.size() != 1) {
+        subSel_ = -1;
+        return;
+    }
+    if (const map::Solid* s = doc_.resolve(selection_[0]))
+        handles_ = map::extractHandles(*s, 0.5f);
+    const int n = subMode_ == SubMode::Vertex ? (int)handles_.verts.size()
+                  : subMode_ == SubMode::Edge ? (int)handles_.edges.size()
+                                              : (int)handles_.faces.size();
+    if (subSel_ >= n) subSel_ = -1;
+}
+
+namespace {
+// Screen position of a world point in viewport p; ok=false when behind eye.
+ImVec2 projectPt(const ViewKind, const glm::mat4& vp, const glm::vec2& cmin,
+                 const glm::vec2& csize, const glm::vec3& w, bool& ok) {
+    const glm::vec4 c = vp * glm::vec4(w, 1.0f);
+    ok = c.w > 1e-4f;
+    if (!ok) return {};
+    return ImVec2(cmin.x + (c.x / c.w * 0.5f + 0.5f) * csize.x,
+                  cmin.y + (1.0f - (c.y / c.w * 0.5f + 0.5f)) * csize.y);
+}
+}  // namespace
+
+void Editor::handleSubObjectInput(ViewPanel& p) {
+    if (tool_ != Tool::Vertex) return;
+    if (handlesDirty_) rebuildHandles();
+    if (selection_.size() != 1) return;
+    map::Solid* s = doc_.resolve(selection_[0]);
+    if (!s) return;
+
+    ImGuiIO& io = ImGui::GetIO();
+    const glm::mat4 vp = p.camera.proj(p.contentSize.x / std::max(1.0f, p.contentSize.y)) *
+                         p.camera.view();
+    const ImVec2 mouse = ImGui::GetMousePos();
+
+    // Handle world position for index i in the current sub-mode.
+    auto handlePos = [&](int i) -> glm::vec3 {
+        if (i < 0) return glm::vec3(0);
+        if (subMode_ == SubMode::Vertex) return handles_.verts[i].pos;
+        if (subMode_ == SubMode::Edge)
+            return 0.5f * (handles_.verts[handles_.edges[i].a].pos +
+                           handles_.verts[handles_.edges[i].b].pos);
+        return handles_.faces[i].centroid;
+    };
+    auto vertIdxFor = [&](int i) {
+        std::vector<int> out;
+        if (i < 0) return out;
+        if (subMode_ == SubMode::Vertex) out = {i};
+        else if (subMode_ == SubMode::Edge)
+            out = {handles_.edges[i].a, handles_.edges[i].b};
+        else out = handles_.faces[i].verts;
+        return out;
+    };
+    const int count = subMode_ == SubMode::Vertex ? (int)handles_.verts.size()
+                      : subMode_ == SubMode::Edge ? (int)handles_.edges.size()
+                                                  : (int)handles_.faces.size();
+
+    // Hover test.
+    subHot_ = -1;
+    float bestD = 12.0f;
+    for (int i = 0; i < count; ++i) {
+        bool ok;
+        const ImVec2 sp = projectPt(p.kind, vp, p.contentMin, p.contentSize,
+                                    handlePos(i), ok);
+        if (!ok) continue;
+        const float d = std::hypot(sp.x - mouse.x, sp.y - mouse.y);
+        if (d < bestD) { bestD = d; subHot_ = i; }
+    }
+
+    // Drag plane: screen-parallel through the handle.
+    auto planeHit = [&](const ImVec2& m, const glm::vec3& through) {
+        glm::vec3 ro, rd;
+        p.camera.pixelRay({m.x - p.contentMin.x, m.y - p.contentMin.y}, p.contentSize,
+                          ro, rd);
+        const glm::vec3 n = p.kind == ViewKind::Perspective
+                                ? -p.camera.forward()
+                                : p.camera.orthoForwardAxis();
+        const float den = glm::dot(n, rd);
+        if (std::fabs(den) < 1e-6f) return through;
+        const float t = (glm::dot(n, through) - glm::dot(n, ro)) / den;
+        return ro + rd * t;
+    };
+
+    if (ImGui::IsMouseClicked(ImGuiMouseButton_Left) && p.hovered) {
+        subSel_ = subHot_;
+        if (subSel_ >= 0) {
+            subDragging_ = true;
+            subDragStartPos_ = subCurPos_ = handlePos(subSel_);
+            subDragStartHit_ = planeHit(mouse, subDragStartPos_);
+        }
+    }
+
+    if (subDragging_ && ImGui::IsMouseDown(ImGuiMouseButton_Left) && subSel_ >= 0) {
+        const glm::vec3 hit = planeHit(mouse, subDragStartPos_);
+        glm::vec3 want = subDragStartPos_ + (hit - subDragStartHit_);
+        if (snap_) want = snapVec(want);
+        const glm::vec3 delta = want - subCurPos_;
+        if (glm::dot(delta, delta) > 1e-10f) {
+            map::moveVertexHandles(*s, handles_, vertIdxFor(subSel_), delta);
+            subCurPos_ = want;
+            docMeshDirty_ = true;
+            // keep handle cache positions in step so the overlay tracks the drag
+            for (int vi : vertIdxFor(subSel_))
+                if (vi >= 0 && vi < (int)handles_.verts.size())
+                    handles_.verts[vi].pos += delta;
+            for (auto& fh : handles_.faces) {
+                glm::vec3 c(0);
+                for (int vi : fh.verts) c += handles_.verts[vi].pos;
+                if (!fh.verts.empty()) fh.centroid = c / (float)fh.verts.size();
+            }
+        }
+    }
+
+    if (subDragging_ && ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
+        subDragging_ = false;
+        if (glm::distance(subCurPos_, subDragStartPos_) > 1e-3f) {
+            afterEdit(subMode_ == SubMode::Vertex ? "Edit vertex"
+                      : subMode_ == SubMode::Edge ? "Edit edge"
+                                                  : "Edit face");
+            handlesDirty_ = true;
+        }
+    }
+}
+
+void Editor::drawSubObjectOverlay(ViewPanel& p, float aspect, ImDrawList* dl) {
+    if (tool_ != Tool::Vertex || selection_.size() != 1) return;
+    if (handlesDirty_) rebuildHandles();
+    const glm::mat4 vp = p.camera.proj(aspect) * p.camera.view();
+
+    auto pr = [&](const glm::vec3& w, bool& ok) {
+        return projectPt(p.kind, vp, p.contentMin, p.contentSize, w, ok);
+    };
+
+    const ImU32 cCold = IM_COL32(120, 200, 255, 230);
+    const ImU32 cHot = IM_COL32(255, 235, 150, 255);
+    const ImU32 cSel = IM_COL32(255, 150, 60, 255);
+
+    if (subMode_ == SubMode::Edge) {
+        for (int i = 0; i < (int)handles_.edges.size(); ++i) {
+            bool a, b;
+            const ImVec2 pa = pr(handles_.verts[handles_.edges[i].a].pos, a);
+            const ImVec2 pb = pr(handles_.verts[handles_.edges[i].b].pos, b);
+            if (!a || !b) continue;
+            const ImU32 c = i == subSel_ ? cSel : i == subHot_ ? cHot : cCold;
+            dl->AddLine(pa, pb, c, i == subSel_ ? 3.0f : 1.6f);
+            const ImVec2 m((pa.x + pb.x) * 0.5f, (pa.y + pb.y) * 0.5f);
+            dl->AddRectFilled(ImVec2(m.x - 3, m.y - 3), ImVec2(m.x + 3, m.y + 3), c);
+        }
+    } else if (subMode_ == SubMode::Face) {
+        for (int i = 0; i < (int)handles_.faces.size(); ++i) {
+            const auto& fh = handles_.faces[i];
+            const ImU32 c = i == subSel_ ? cSel : i == subHot_ ? cHot : cCold;
+            for (size_t k = 0; k < fh.verts.size(); ++k) {
+                bool a, b;
+                const ImVec2 pa = pr(handles_.verts[fh.verts[k]].pos, a);
+                const ImVec2 pb =
+                    pr(handles_.verts[fh.verts[(k + 1) % fh.verts.size()]].pos, b);
+                if (a && b) dl->AddLine(pa, pb, c, i == subSel_ ? 2.5f : 1.0f);
+            }
+            bool ok;
+            const ImVec2 cc = pr(fh.centroid, ok);
+            if (ok) {
+                dl->AddCircleFilled(cc, i == subSel_ ? 6.0f : 4.0f, c);
+            }
+        }
+    } else {  // Vertex
+        for (int i = 0; i < (int)handles_.verts.size(); ++i) {
+            bool ok;
+            const ImVec2 sp = pr(handles_.verts[i].pos, ok);
+            if (!ok) continue;
+            const ImU32 c = i == subSel_ ? cSel : i == subHot_ ? cHot : cCold;
+            const float r = i == subSel_ ? 5.0f : i == subHot_ ? 4.5f : 3.5f;
+            dl->AddRectFilled(ImVec2(sp.x - r, sp.y - r), ImVec2(sp.x + r, sp.y + r), c);
+            dl->AddRect(ImVec2(sp.x - r, sp.y - r), ImVec2(sp.x + r, sp.y + r),
+                        IM_COL32(20, 25, 35, 220));
+        }
+    }
+
+    // Readout of the current handle position while dragging.
+    if (subDragging_) {
+        char b[64];
+        std::snprintf(b, sizeof(b), "%.0f  %.0f  %.0f", subCurPos_.x, subCurPos_.y,
+                      subCurPos_.z);
+        const ImVec2 tl(p.contentMin.x + 8, p.contentMin.y + p.contentSize.y - 24);
+        dl->AddText(ImVec2(tl.x + 1, tl.y + 1), IM_COL32(0, 0, 0, 200), b);
+        dl->AddText(tl, IM_COL32(255, 210, 140, 255), b);
+    }
 }
 
 void Editor::handleBlockTool(ViewPanel& p) {
@@ -1219,6 +1435,10 @@ void Editor::handleViewportInput(ViewPanel& p) {
 
     handleBlockTool(p);
 
+    // Vertex/Edge/Face editing owns the mouse when a single brush is selected.
+    const bool subActive = tool_ == Tool::Vertex && selection_.size() == 1;
+    if (subActive) handleSubObjectInput(p);
+
     if (!io.KeyCtrl && !ImGui::IsMouseDown(ImGuiMouseButton_Right)) {
         if (ImGui::IsKeyPressed(ImGuiKey_W)) gizmoMode_ = 0;
         if (ImGui::IsKeyPressed(ImGuiKey_E)) gizmoMode_ = 1;
@@ -1264,12 +1484,18 @@ void Editor::handleViewportInput(ViewPanel& p) {
 
     if (ImGui::IsKeyPressed(ImGuiKey_F) && hasMap()) frameAllViews();
 
-    // Left-click select (no drag) with the Select tool on an editable document.
-    if (hasDoc() && tool_ == Tool::Select &&
+    // Left-click select (no drag) with the Select tool, or with the Vertex tool
+    // when the click missed every sub-object handle (so you can pick a brush to
+    // start editing / switch to another one).
+    const bool vtxPassthrough =
+        tool_ == Tool::Vertex && !subDragging_ && subHot_ < 0 &&
+        !(subActive && subSel_ >= 0);
+    if (hasDoc() && (tool_ == Tool::Select || vtxPassthrough) &&
         ImGui::IsMouseReleased(ImGuiMouseButton_Left) &&
         !ImGui::IsMouseDragPastThreshold(ImGuiMouseButton_Left, 4.0f)) {
         const ImVec2 m = ImGui::GetMousePos();
         pickAt(p, {m.x - p.contentMin.x, m.y - p.contentMin.y}, io.KeyShift);
+        handlesDirty_ = true;
     }
     if (ImGui::IsKeyPressed(ImGuiKey_Escape) && !selection_.empty()) clearSelection();
     if (ImGui::IsKeyPressed(ImGuiKey_Delete)) deleteSelection();
@@ -1387,6 +1613,9 @@ void Editor::clearSelection() {
     selection_.clear();
     selectedEntity_ = -1;
     renderer_.setSelectionWire({});
+    handlesDirty_ = true;
+    subSel_ = -1;
+    subDragging_ = false;
 }
 
 glm::vec3 Editor::selectionCenter() const {
@@ -1405,6 +1634,7 @@ void Editor::afterEdit(const char* label) {
     history_.record(doc_, label);
     buildAndUpload(meshOpts_);
     rebuildSelectionWire();
+    handlesDirty_ = true;
 }
 
 void Editor::nudgeSelection(const glm::vec3& d) {
@@ -1712,6 +1942,32 @@ void Editor::debugSelectWorldSolid(int i) {
                 }
             }
     }
+}
+
+void Editor::debugSubObjectDemo(int solidIdx, int mode) {
+    debugSelectWorldSolid(solidIdx);
+    tool_ = Tool::Vertex;
+    mode_ = Mode::Pro;
+    layoutDirty_ = true;
+    subMode_ = static_cast<SubMode>(std::clamp(mode, 0, 2));
+    handlesDirty_ = true;
+    rebuildHandles();
+    map::Solid* s = doc_.resolve(selection_[0]);
+    if (!s || handles_.verts.empty()) return;
+    // Deform: lift handle 0 (and its sub-object group) by +96 on Z.
+    subSel_ = 0;
+    std::vector<int> vidx;
+    if (subMode_ == SubMode::Vertex) vidx = {0};
+    else if (subMode_ == SubMode::Edge)
+        vidx = {handles_.edges[0].a, handles_.edges[0].b};
+    else vidx = handles_.faces[0].verts;
+    map::moveVertexHandles(*s, handles_, vidx, glm::vec3(0, 0, 96));
+    afterEdit("Edit vertex (demo)");
+    rebuildHandles();
+    subSel_ = 0;
+    PB_INFO("sub-object demo: solid %d, mode %d, %zu verts / %zu edges / %zu faces",
+            solidIdx, mode, handles_.verts.size(), handles_.edges.size(),
+            handles_.faces.size());
 }
 
 // ---------------------------------------------------------------------------
