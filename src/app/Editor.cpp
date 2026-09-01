@@ -227,6 +227,7 @@ void Editor::frameAllViews() {
 // ---------------------------------------------------------------------------
 void Editor::frame() {
     pollDecompile();
+    compiler_.poll();
     ImGuizmo::BeginFrame();
     docMeshDirty_ = false;
     ImGuiViewport* vp = ImGui::GetMainViewport();
@@ -258,16 +259,8 @@ void Editor::frame() {
     if (ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_Y) ||
         ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_Z))
         redo();
-    if (ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_S) && hasDoc()) {
-        std::string err;
-        const std::string out = doc_.path().empty()
-                                    ? (executableDir() + "/" + doc_.name() + ".vmf")
-                                    : doc_.path();
-        if (doc_.saveVmf(out, &err))
-            status_ = "Saved " + out;
-        else
-            status_ = "Save failed: " + err;
-    }
+    if (ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_S) && hasDoc())
+        saveMap(ImGui::GetIO().KeyShift);  // Ctrl+Shift+S = Save As
 
     if (mode_ == Mode::Simple) {
         drawBuildKit();
@@ -281,6 +274,7 @@ void Editor::frame() {
     }
     for (auto& v : views_) drawViewportPanel(v);
     drawStatusBar();
+    drawCompileWindow();
     drawWelcome();
 
     // Live preview while dragging the gizmo (history is recorded on release).
@@ -360,8 +354,13 @@ void Editor::drawTopBar() {
     ImGui::SameLine(0, 2);
     if (toolButton(ICON_FA_DOWNLOAD "  Import map")) promptOpenMap();
     ImGui::SameLine(0, 2);
-    if (toolButton(ICON_FA_FLOPPY_DISK "  Save"))
-        status_ = "Saving to VMF is not wired up yet.";
+    if (toolButton(ICON_FA_FLOPPY_DISK "  Save", false,
+                   "Save the map to .vmf  (Ctrl+S,  Ctrl+Shift+S = Save As)")) {
+        if (hasDoc())
+            saveMap(ImGui::GetIO().KeyShift);
+        else
+            status_ = "Open or start a map first.";
+    }
 
     // Simple / Pro
     ImGui::SameLine(0, 16);
@@ -416,8 +415,10 @@ void Editor::drawTopBar() {
     ImGui::PushStyleColor(ImGuiCol_Button, col::bg2);
     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, col::bg3);
     ImGui::PushStyleColor(ImGuiCol_Text, col::acc);
-    if (ImGui::Button(ICON_FA_PLAY "  Build & play", ImVec2(0, row)))
-        status_ = "Offline vbsp/vvis/vrad + in-game preview is on the roadmap.";
+    if (ImGui::Button(ICON_FA_PLAY "  Build & play", ImVec2(0, row))) {
+        showCompile_ = true;
+        if (!compiler_.running() && hasDoc()) startCompile();
+    }
     ImGui::PopStyleColor(3);
 
     ImGui::EndChild();
@@ -1183,6 +1184,153 @@ bool Editor::saveVmf(const std::string& path) {
     const bool ok = doc_.saveVmf(path, &err);
     status_ = ok ? ("Saved " + path) : ("Save failed: " + err);
     return ok;
+}
+
+void Editor::debugStartCompile(bool fast) {
+    showCompile_ = true;
+    compileProfile_ = fast ? 0 : 1;
+    compileLaunch_ = false;  // never launch TF2 from a headless test
+    if (!hasDoc()) return;
+    if (doc_.path().empty())
+        saveVmf(executableDir() + "/_compiletest.vmf");
+    startCompile();
+}
+
+// ---------------------------------------------------------------------------
+// Milestone E — save, compile, play
+// ---------------------------------------------------------------------------
+bool Editor::saveMap(bool forceDialog) {
+    if (!hasDoc()) {
+        status_ = "Nothing to save yet.";
+        return false;
+    }
+    std::string out = doc_.path();
+    if (out.empty() || forceDialog) {
+        const std::string suggested = doc_.name().empty() ? "untitled" : doc_.name();
+        out = saveFileDialog("Save map as", "Hammer VMF\0*.vmf\0All files\0*.*\0",
+                             suggested.c_str(), "vmf",
+                             out.empty() ? nullptr : out.c_str());
+        if (out.empty()) return false;  // cancelled
+    }
+    std::string err;
+    if (doc_.saveVmf(out, &err)) {
+        status_ = "Saved  " + out;
+        return true;
+    }
+    status_ = "Save failed: " + err;
+    return false;
+}
+
+void Editor::startCompile() {
+    if (compiler_.running() || !hasDoc()) return;
+    // A compile needs a real .vmf on disk. Save first (prompt if unsaved).
+    if (doc_.path().empty()) {
+        if (!saveMap(false)) {
+            status_ = "Save the map before building.";
+            return;
+        }
+    } else {
+        doc_.saveVmf(doc_.path());
+    }
+    if (!gamePaths_.valid()) gamePaths_ = compile::GamePaths::detect();
+
+    compile::CompileOptions opts;
+    opts.profile = compileProfile_ == 0 ? compile::Profile::Fast
+                                        : compile::Profile::Final;
+    opts.runVvis = compileVvis_;
+    opts.runVrad = compileVrad_;
+    opts.launchGame = compileLaunch_;
+    compileLogSeen_ = 0;
+    compiler_.start(doc_.path(), opts, gamePaths_);
+    status_ = "Compiling " + doc_.name() + " …";
+}
+
+void Editor::drawCompileWindow() {
+    if (!showCompile_) return;
+    using namespace pb::ui;
+
+    ImGui::SetNextWindowSize(ImVec2(720 * uiScale_, 520 * uiScale_),
+                             ImGuiCond_FirstUseEver);
+    if (!ImGui::Begin(ICON_FA_PLAY "  Build & playtest", &showCompile_)) {
+        ImGui::End();
+        return;
+    }
+
+    const bool running = compiler_.running();
+
+    ImGui::BeginDisabled(running);
+    sectionLabel("PROFILE");
+    ImGui::RadioButton("Fast  (quick, for iterating)", &compileProfile_, 0);
+    ImGui::SameLine(0, 16);
+    ImGui::RadioButton("Final  (full lighting)", &compileProfile_, 1);
+    ImGui::Checkbox("Visibility (vvis)", &compileVvis_);
+    ImGui::SameLine(0, 16);
+    ImGui::Checkbox("Lighting (vrad)", &compileVrad_);
+    ImGui::SameLine(0, 16);
+    ImGui::Checkbox("Launch TF2 when done", &compileLaunch_);
+    ImGui::EndDisabled();
+
+    if (!gamePaths_.valid()) gamePaths_ = compile::GamePaths::detect();
+    if (!gamePaths_.valid()) {
+        ImGui::PushStyleColor(ImGuiCol_Text, col::warn);
+        ImGui::TextWrapped(ICON_FA_TRIANGLE_EXCLAMATION
+                           "  TF2 compile tools not found. Set the TF2_DIR "
+                           "environment variable to your Team Fortress 2 folder.");
+        ImGui::PopStyleColor();
+    } else {
+        ImGui::PushStyleColor(ImGuiCol_Text, col::faint);
+        ImGui::TextWrapped("%s", gamePaths_.gameDir.c_str());
+        ImGui::PopStyleColor();
+    }
+
+    ImGui::Dummy(ImVec2(0, 4));
+    if (running) {
+        char label[96];
+        std::snprintf(label, sizeof(label), ICON_FA_STOP "  Stop  (%s, %.0fs)",
+                      compiler_.stage().c_str(), compiler_.elapsedSeconds());
+        if (ImGui::Button(label, ImVec2(-1, 34 * uiScale_))) compiler_.cancel();
+    } else {
+        const bool can = hasDoc() && gamePaths_.valid();
+        ImGui::BeginDisabled(!can);
+        if (ImGui::Button(ICON_FA_PLAY "  Build now", ImVec2(-1, 34 * uiScale_)))
+            startCompile();
+        ImGui::EndDisabled();
+    }
+
+    if (!running && compiler_.finished()) {
+        ImGui::PushStyleColor(ImGuiCol_Text,
+                              compiler_.succeeded() ? col::good : col::warn);
+        ImGui::TextUnformatted(compiler_.succeeded()
+                                   ? (compiler_.launched()
+                                          ? ICON_FA_CHECK "  Built and launched."
+                                          : ICON_FA_CHECK "  Build finished.")
+                                   : ICON_FA_XMARK "  Build failed — see the log.");
+        ImGui::PopStyleColor();
+    }
+
+    ImGui::Dummy(ImVec2(0, 4));
+    sectionLabel("LOG");
+    ImGui::SameLine();
+    ImGui::Checkbox("follow", &compileAutoScroll_);
+    if (fontMono) ImGui::PushFont(fontMono);
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, col::bg0);
+    if (ImGui::BeginChild("##compilelog", ImVec2(0, 0), ImGuiChildFlags_Borders)) {
+        const std::vector<std::string> lines = compiler_.log();
+        ImGuiListClipper clip;
+        clip.Begin(static_cast<int>(lines.size()));
+        while (clip.Step())
+            for (int i = clip.DisplayStart; i < clip.DisplayEnd; ++i)
+                ImGui::TextUnformatted(lines[i].c_str());
+        if (compileAutoScroll_ && lines.size() != compileLogSeen_) {
+            ImGui::SetScrollHereY(1.0f);
+            compileLogSeen_ = lines.size();
+        }
+    }
+    ImGui::EndChild();
+    ImGui::PopStyleColor();
+    if (fontMono) ImGui::PopFont();
+
+    ImGui::End();
 }
 
 void Editor::debugSelectWorldSolid(int i) {

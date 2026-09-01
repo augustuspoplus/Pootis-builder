@@ -20,6 +20,7 @@ inline const ImVec4 acc{0.925f, 0.604f, 0.267f, 1.0f};   // #ec9a44 accent
 inline const ImVec4 acc2{0.788f, 0.494f, 0.184f, 1.0f};  // #c97e2f accent deep
 inline const ImVec4 sel{0.329f, 0.655f, 0.886f, 1.0f};   // #54a7e2 selection
 inline const ImVec4 good{0.42f, 0.73f, 0.49f, 1.0f};     // checklist done
+inline const ImVec4 warn{0.91f, 0.51f, 0.36f, 1.0f};     // #e88259 error / warning
 }  // namespace col
 
 inline ImU32 u32(const ImVec4& c, float a = 1.0f) {
