@@ -3,15 +3,38 @@
 Newest first. See ROADMAP.md for the plan. Q1 = auto-decompile .bsp on open.
 Q2 = Simple-mode kit builds new maps (prioritised). Also doing section G (QoL).
 
+## Visual fidelity (done)
+- **prop_static models**: `model/StudioModel` parses MDL + VVD + VTX (LOD 0,
+  bind pose); `bakePropModels` folds every prop's geometry into the BSP
+  WorldMesh transformed to world space. Verified ctf_turbine 406/406.
+  `--no-decompile` inspects the raw BSP + baked props; `--dump-props` prints
+  per-instance / per-model diagnostics.
+- **Displacements**: `BspMesh` builds the (2^power+1)^2 grid per dispinfo face
+  (bilinear base quad + dispvert push), reusing the flat-face lightmap/UV
+  projection. Verified hoodoo/gorge/badwater.
+- Fixed the D.5 entity overlay flooding the 3D view on big decompiled maps —
+  perspective now respects `showPointEntities`; connection lines past 60
+  entities only draw for the selection.
+
+## 3D view / editing UX (done this pass)
+- Infinite ground grid in the 3D view (distance fade, red +X / green +Y axes)
+  + a world-origin ring marker while the map is empty.
+- Hammer-style 8-handle bounding-box resize in the 2D views (corner = 2 axes,
+  edge = 1; snapshot + affine remap; one undo step).
+- Models browser — 16k+ game models, filterable thumbnail grid, click-to-drop
+  as prop_static.
+- Build Kit cards size to their text (no more clipped hints).
+
 ## Now / next
 - **Milestones A–F, C, D done. Section G well underway** (see below).
-- **Section G still to do:** instances (func_instance), cordon, visgroups /
-  layers, .pbproj project bundle, bspzip content packing on compile, asset
-  favourites, keybind customisation, Simple-mode tutorial, welcome tips,
-  a dedicated measure tool (live selection dims already land).
-- Visual-fidelity parallel track: prop MDL rendering, displacements,
-  $basetexture2 blend materials.
-- Optional polish: iconsprite/model rendering for point entities.
+- **Section G still to do:** instances (func_instance), asset favourites,
+  keybind customisation, Simple-mode tutorial + welcome tips, a dedicated
+  measure tool. (cordon, bspzip, visgroups, .pbproj, camera bookmarks, log
+  panel, map-check, palette, history, autosave — all DONE.)
+- Visual fidelity remaining: `$basetexture2` blend materials; real
+  iconsprite / rendered-model thumbnails (browser uses first-material now).
+- Prop models: LOD only, no per-prop lighting/skins; no neighbour-stitching
+  on displacement seams (Valve's CDispNeighbor data is skipped).
 
 ## UI scaling
 - `ui::g_scale` + `dp(px)`; top bar, fonts and icons are DPI-aware. Font
