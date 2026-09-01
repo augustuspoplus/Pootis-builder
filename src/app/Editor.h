@@ -155,6 +155,7 @@ private:
     void drawMaterialList();
     void drawTextureBrowser();
     void drawModelBrowser();
+    void drawModelGrid();   // shared body: Pro "Models" dock + Simple Props tab
     void drawEntityCatalog();
     void drawStatusBar();
     void drawHistoryPanel();
