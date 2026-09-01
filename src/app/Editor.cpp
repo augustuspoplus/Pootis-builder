@@ -2111,6 +2111,8 @@ void Editor::handleViewportInput(ViewPanel& p) {
         const glm::vec3 at = viewPlanePoint(p, ImGui::GetMousePos());
         if (placing_.rfind("@ent:", 0) == 0)
             placeFgdEntity(placing_.substr(5), at);
+        else if (placing_.rfind("@kit:", 0) == 0)
+            placePiece(placing_.substr(5), at);
         else if (placing_.rfind("@prefab:", 0) == 0)
             placePrefab(placing_.substr(8), at);
         else if (placing_.rfind("@model:", 0) == 0) {
@@ -3568,6 +3570,14 @@ void Editor::drawBuildKit() {
             kitCards(play, IM_ARRAYSIZE(play), &placing_, &status_);
             ImGui::EndTabItem();
         }
+        const ImGuiTabItemFlags tf =
+            kitTab_ == 1 ? ImGuiTabItemFlags_SetSelected : 0;
+        if (ImGui::BeginTabItem(ICON_FA_BOLT " Things", nullptr, tf)) {
+            kitTab_ = 0;  // consume the one-shot
+            ImGui::Dummy(ImVec2(0, 4));
+            drawSimpleEntities();
+            ImGui::EndTabItem();
+        }
         if (ImGui::BeginTabItem(ICON_FA_IMAGE " Props")) {
             ImGui::Dummy(ImVec2(0, 4));
             drawModelGrid();
@@ -3833,6 +3843,105 @@ void Editor::drawBrushInspector() {
         ImGui::TextWrapped("(some selected brushes belong to entities — brush-entity "
                            "editing is limited for now)");
         ImGui::PopStyleColor();
+    }
+}
+
+void Editor::drawSimpleEntities() {
+    using namespace pb::ui;
+    struct SE { const char* name; const char* spec; const char* hint; };
+    // spec: "kit:<Name>" -> placePiece, otherwise a raw entity classname.
+    static const SE items[] = {
+        {"RED spawn room", "kit:RED spawn", "Where RED players start (room + spawns)"},
+        {"BLU spawn room", "kit:BLU spawn", "Where BLU players start (room + spawns)"},
+        {"One spawn point", "info_player_teamspawn", "A single respawn spot"},
+        {"Capture point", "kit:Capture point", "Stand on it to capture"},
+        {"Payload path", "kit:Payload track", "Track nodes for the cart"},
+        {"Resupply cabinet", "kit:Resupply", "Refills health and ammo"},
+        {"Small health", "item_healthkit_small", "+ a bit of health"},
+        {"Medium health", "item_healthkit_medium", "+ half health"},
+        {"Full health", "item_healthkit_full", "Full heal"},
+        {"Small ammo", "item_ammopack_small", ""},
+        {"Medium ammo", "item_ammopack_medium", ""},
+        {"Full ammo", "item_ammopack_full", ""},
+        {"Intel briefcase", "item_teamflag", "The flag for CTF"},
+        {"Hurt zone", "trigger_hurt", "Brush trigger — hurts players inside"},
+        {"Push / jump pad", "trigger_push", "Brush trigger — shoves players"},
+        {"Sliding door", "func_door", "Select a brush, then click this"},
+        {"Ambient sound", "ambient_generic", "A looping sound at a spot"},
+        {"Particle effect", "info_particle_system", "Smoke / fire / sparks"},
+        {"Map fog", "env_fog_controller", "Map-wide fog colour + distance"},
+    };
+
+    ImGui::PushStyleColor(ImGuiCol_Text, col::faint);
+    ImGui::TextWrapped("Click one, then click in a viewport (or drag it in).");
+    ImGui::PopStyleColor();
+    ImGui::Dummy(ImVec2(0, 4));
+
+    const float cell = dp(52.0f);
+    for (const auto& it : items) {
+        const bool isKit = std::strncmp(it.spec, "kit:", 4) == 0;
+        const std::string cls = isKit ? "" : it.spec;
+        const std::string payload = isKit ? std::string("@kit:") + (it.spec + 4)
+                                          : std::string("@ent:") + cls;
+        const bool on = placing_ == payload;
+
+        GLuint tex = 0;
+        const fgd::EntityClass* ec = cls.empty() ? nullptr : fgd_.flattened(cls);
+        if (ec && !ec->studioModel.empty()) {
+            const std::string& mp = ec->studioModel;
+            if (modelThumbs_.has(mp))
+                tex = modelThumbs_.get(mp, model::loadStudioModel(sourceFs_, mp),
+                                       materials_);
+            else
+                tex = modelThumbs_.get(mp, model::loadStudioModel(sourceFs_, mp),
+                                       materials_);
+        }
+
+        ImGui::PushID(it.name);
+        ImGui::BeginGroup();
+        if (tex) {
+            ImGui::Image(static_cast<ImTextureID>((intptr_t)tex), ImVec2(cell, cell));
+        } else {
+            glm::vec3 rgb = ec && ec->hasColor ? ec->color : glm::vec3(0.62f);
+            ImGui::PushStyleColor(ImGuiCol_Button,
+                                  ImVec4(rgb.r, rgb.g, rgb.b, 0.28f));
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(rgb.r, rgb.g, rgb.b, 1.0f));
+            ImGui::Button(isKit ? ICON_FA_CUBES : ICON_FA_BOLT, ImVec2(cell, cell));
+            ImGui::PopStyleColor(2);
+        }
+        ImGui::SameLine();
+        ImGui::BeginGroup();
+        if (fontUiMed) ImGui::PushFont(fontUiMed);
+        ImGui::TextUnformatted(it.name);
+        if (fontUiMed) ImGui::PopFont();
+        ImGui::PushStyleColor(ImGuiCol_Text, col::faint);
+        ImGui::PushTextWrapPos(0.0f);
+        ImGui::TextUnformatted(it.hint[0] ? it.hint : it.spec);
+        ImGui::PopTextWrapPos();
+        ImGui::PopStyleColor();
+        ImGui::EndGroup();
+        ImGui::EndGroup();
+
+        if (ImGui::IsItemClicked()) {
+            placing_ = payload;
+            status_ = std::string("Placing ") + it.name +
+                      " — click a viewport, or drag it in.";
+        }
+        if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID)) {
+            if (isKit)
+                ImGui::SetDragDropPayload("PB_KIT", it.spec + 4,
+                                         std::strlen(it.spec + 4) + 1);
+            else
+                ImGui::SetDragDropPayload("PB_ENTITY", cls.c_str(), cls.size() + 1);
+            ImGui::TextUnformatted(it.name);
+            ImGui::EndDragDropSource();
+        }
+        if (on)
+            ImGui::GetWindowDrawList()->AddRect(ImGui::GetItemRectMin(),
+                                                ImGui::GetItemRectMax(),
+                                                u32(col::acc), 3.0f, 0, 2.0f);
+        ImGui::PopID();
+        ImGui::Dummy(ImVec2(0, 3));
     }
 }
 

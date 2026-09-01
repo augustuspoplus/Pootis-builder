@@ -74,6 +74,7 @@ public:
         placePiece("Hill", glm::vec3(0, 0, 0));
         frameAllViews();
     }
+    void debugKitTab(int t) { kitTab_ = t; showWelcome_ = false; }
     void debugNewBlank() {
         doc_.newBlank("untitled");
         history_.reset(doc_);
@@ -138,6 +139,7 @@ private:
     void uiScaleMenu();
     void drawViewportPanel(ViewPanel& p);
     void drawBuildKit();
+    void drawSimpleEntities();   // curated plain-language entity list (Simple)
     void openModelImport();
     void reloadModelPreview();
     void drawModelImportDialog();
