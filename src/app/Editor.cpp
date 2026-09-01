@@ -117,6 +117,11 @@ bool Editor::openMap(const std::string& path) {
         return e;
     }();
 
+    if (ext == ".pbproj") {
+        openProject(path);
+        return hasDoc();
+    }
+
     if (ext == ".vmf") {
         std::string err;
         if (!doc_.loadVmf(path, &err)) {
@@ -291,6 +296,7 @@ void Editor::frame() {
         drawMapCheckPanel();
         drawLogPanel();
         drawPrefabPanel();
+        drawVisgroupsPanel();
     }
     for (auto& v : views_) drawViewportPanel(v);
     drawStatusBar();
@@ -344,6 +350,7 @@ void Editor::buildDockLayout(unsigned int dockId, const ImVec2& size) {
         ImGui::DockBuilderDockWindow("Map Check", left);
         ImGui::DockBuilderDockWindow("Log", left);
         ImGui::DockBuilderDockWindow("Prefabs", left);
+        ImGui::DockBuilderDockWindow("Visgroups", left);
         ImGui::DockBuilderDockWindow("3D View", tl);
         ImGui::DockBuilderDockWindow("Top (x/y)", tr);
         ImGui::DockBuilderDockWindow("Front (x/z)", bl);
@@ -546,6 +553,18 @@ void Editor::drawViewMenuPopup() {
         ImGui::SetNextItemWidth(140);
         ImGui::SliderFloat("every (min)", &autosaveMins_, 1.0f, 30.0f, "%.0f");
         ImGui::TextDisabled("writes <map>.autosave.vmf + rolling .bak1-3 on save");
+        ImGui::EndMenu();
+    }
+    if (ImGui::BeginMenu(ICON_FA_FOLDER_TREE "  Project (.pbproj)")) {
+        if (ImGui::MenuItem("Save project", "", false, hasDoc())) saveProject(false);
+        if (ImGui::MenuItem("Save project as…", "", false, hasDoc())) saveProject(true);
+        if (ImGui::MenuItem("Open project…")) {
+            const std::string p =
+                openFileDialog("Open project", "Pootis project\0*.pbproj\0All\0*.*\0");
+            if (!p.empty()) openProject(p);
+        }
+        ImGui::TextDisabled("bundles the vmf + cordon + camera bookmarks +");
+        ImGui::TextDisabled("compile settings + custom-content list");
         ImGui::EndMenu();
     }
     if (ImGui::BeginMenu(ICON_FA_VECTOR_SQUARE "  Cordon")) {
@@ -1968,7 +1987,7 @@ void Editor::pickAt(ViewPanel& p, const glm::vec2& px, bool additive) {
     float bestT = 1e30f;
     auto test = [&](const map::Solid& s, int ent, int idx) {
         float t;
-        if (s.valid && map::raySolid(ro, rd, s, t) && t < bestT) {
+        if (s.valid && !s.hidden && map::raySolid(ro, rd, s, t) && t < bestT) {
             bestT = t;
             best = {ent, idx};
         }
@@ -1984,7 +2003,7 @@ void Editor::pickAt(ViewPanel& p, const glm::vec2& px, bool additive) {
     int bestPointEnt = -1;
     for (int e = 0; e < static_cast<int>(doc_.entities().size()); ++e) {
         const auto& ent = doc_.entities()[e];
-        if (!ent.solids.empty()) continue;
+        if (!ent.solids.empty() || ent.hidden) continue;
         glm::vec3 mn(-16), mx(16);
         if (const fgd::EntityClass* ec = fgd_.flattened(ent.classname);
             ec && ec->hasSize) {
@@ -2273,6 +2292,19 @@ bool Editor::saveMap(bool forceDialog) {
 
 map::MapDocument Editor::buildCompileDoc() {
     map::MapDocument out = doc_;
+
+    // Visgroup-hidden objects are left out of the compile.
+    {
+        auto& ws = out.worldSolids();
+        ws.erase(std::remove_if(ws.begin(), ws.end(),
+                                [](const map::Solid& s) { return s.hidden; }),
+                 ws.end());
+        auto& es = out.entities();
+        es.erase(std::remove_if(es.begin(), es.end(),
+                                [](const map::MapEntity& e) { return e.hidden; }),
+                 es.end());
+    }
+
     if (!cordonOn_) return out;
     const glm::vec3 mn = glm::min(cordonMin_, cordonMax_);
     const glm::vec3 mx = glm::max(cordonMin_, cordonMax_);
@@ -2327,18 +2359,23 @@ void Editor::startCompile() {
         doc_.saveVmf(doc_.path());
     }
 
-    // With the cordon on, compile a filtered + sealed copy instead.
+    // With the cordon on or anything visgroup-hidden, compile a filtered copy.
+    bool anyHidden = false;
+    for (const auto& s : doc_.worldSolids()) anyHidden |= s.hidden;
+    for (const auto& e : doc_.entities()) anyHidden |= e.hidden;
+
     std::string compilePath = doc_.path();
-    if (cordonOn_) {
+    if (cordonOn_ || anyHidden) {
         map::MapDocument cd = buildCompileDoc();
         compilePath = (fs::path(doc_.path()).parent_path() /
                        (doc_.name() + ".cordon.vmf")).string();
         std::string err;
         if (!cd.saveVmf(compilePath, &err, /*updateState=*/false)) {
-            status_ = "Cordon export failed: " + err;
+            status_ = "Filtered export failed: " + err;
             return;
         }
-        status_ = "Cordon active — compiling a boxed region.";
+        status_ = cordonOn_ ? "Cordon active — compiling a boxed region."
+                            : "Compiling with hidden objects left out.";
     }
 
     if (!gamePaths_.valid()) gamePaths_ = compile::GamePaths::detect();
@@ -4384,6 +4421,199 @@ void Editor::drawLogPanel() {
     ImGui::EndChild();
     ImGui::PopStyleColor();
     if (pb::ui::fontMono) ImGui::PopFont();
+    ImGui::End();
+}
+
+void Editor::saveProject(bool forceDialog) {
+    if (!hasDoc()) { status_ = "Open a map before saving a project."; return; }
+    if (doc_.path().empty() && !saveMap(false)) return;  // project references the vmf
+
+    std::string out = projectPath_;
+    if (out.empty() || forceDialog) {
+        out = saveFileDialog("Save project", "Pootis project\0*.pbproj\0",
+                             doc_.name().c_str(), "pbproj",
+                             out.empty() ? nullptr : out.c_str());
+        if (out.empty()) return;
+    }
+    projectPath_ = out;
+
+    map::KvNode root;
+    root.name = "#root";
+    map::KvNode pj;
+    pj.name = "pbproj";
+    pj.set("version", "1");
+    pj.set("vmf", doc_.path());
+    pj.set("grid", std::to_string(gridSize_));
+    pj.set("cordon", cordonOn_ ? "1" : "0");
+    char b[96];
+    std::snprintf(b, sizeof(b), "%g %g %g", cordonMin_.x, cordonMin_.y, cordonMin_.z);
+    pj.set("cordon_min", b);
+    std::snprintf(b, sizeof(b), "%g %g %g", cordonMax_.x, cordonMax_.y, cordonMax_.z);
+    pj.set("cordon_max", b);
+    pj.set("compile_profile", std::to_string(compileProfile_));
+    pj.set("compile_pack", compilePack_ ? "1" : "0");
+    for (int i = 0; i < 6; ++i) {
+        if (!camMarks_[i].set) continue;
+        std::snprintf(b, sizeof(b), "%g %g %g %g %g", camMarks_[i].pos.x,
+                      camMarks_[i].pos.y, camMarks_[i].pos.z, camMarks_[i].yaw,
+                      camMarks_[i].pitch);
+        pj.set("cam" + std::to_string(i), b);
+    }
+    for (const auto& pf : packFiles_) pj.set("pack", pf);
+    root.children.push_back(std::move(pj));
+
+    const std::string text = map::writeKv(root);
+    FILE* f = std::fopen(out.c_str(), "wb");
+    if (!f) { status_ = "Could not write " + out; return; }
+    std::fwrite(text.data(), 1, text.size(), f);
+    std::fclose(f);
+    status_ = "Saved project  " + fs::path(out).filename().string();
+    prefs_.pushRecent(out);
+    prefs_.save();
+}
+
+void Editor::openProject(const std::string& path) {
+    const std::string text = readTextFile(path);
+    if (text.empty()) { status_ = "Cannot read " + path; return; }
+    const map::KvNode root = map::parseKv(text);
+    const map::KvNode* pj = root.child("pbproj");
+    if (!pj) { status_ = "Not a Pootis project: " + path; return; }
+    projectPath_ = path;
+
+    const std::string vmf = pj->get("vmf");
+    if (!vmf.empty() && !openMap(vmf)) {
+        status_ = "Project's map is missing: " + vmf;
+        return;
+    }
+    if (int g = pj->getInt("grid")) gridSize_ = g;
+    cordonOn_ = pj->getInt("cordon") != 0;
+    std::sscanf(pj->get("cordon_min").c_str(), "%f %f %f", &cordonMin_.x,
+                &cordonMin_.y, &cordonMin_.z);
+    std::sscanf(pj->get("cordon_max").c_str(), "%f %f %f", &cordonMax_.x,
+                &cordonMax_.y, &cordonMax_.z);
+    compileProfile_ = pj->getInt("compile_profile");
+    compilePack_ = pj->getInt("compile_pack") != 0;
+    for (int i = 0; i < 6; ++i) {
+        const std::string s = pj->get("cam" + std::to_string(i));
+        if (s.empty()) continue;
+        CamMark m;
+        m.set = std::sscanf(s.c_str(), "%f %f %f %f %f", &m.pos.x, &m.pos.y, &m.pos.z,
+                            &m.yaw, &m.pitch) == 5;
+        if (m.set) camMarks_[i] = m;
+    }
+    packFiles_.clear();
+    for (const auto& kv : pj->pairs)
+        if (kv.first == "pack") packFiles_.push_back(kv.second);
+    status_ = "Opened project  " + fs::path(path).filename().string();
+    prefs_.pushRecent(path);
+    prefs_.save();
+}
+
+void Editor::drawVisgroupsPanel() {
+    ImGui::Begin("Visgroups");
+    if (!hasDoc()) {
+        ImGui::TextDisabled("Open an editable map to use visgroups.");
+        ImGui::End();
+        return;
+    }
+    ImGui::PushStyleColor(ImGuiCol_Text, pb::ui::col::faint);
+    ImGui::TextWrapped("Toggle whole categories of the map on and off. Hidden "
+                       "objects don't render or pick, and are skipped by compile.");
+    ImGui::PopStyleColor();
+
+    // Auto categories: predicate over an entity or a world solid.
+    struct Cat {
+        const char* label;
+        std::function<bool(const map::MapEntity*)> entMatch;
+        std::function<bool(const map::Solid&)> worldMatch;
+    };
+    auto pfx = [](const std::string& s, const char* p) {
+        return s.rfind(p, 0) == 0;
+    };
+    std::vector<Cat> cats = {
+        {"World brushwork", nullptr, [](const map::Solid&) { return true; }},
+        {"Tool brushes",
+         nullptr,
+         [](const map::Solid& s) {
+             return !s.faces.empty() && s.faces[0].material.rfind("tools/", 0) == 0;
+         }},
+        {"Lights",
+         [pfx](const map::MapEntity* e) { return pfx(e->classname, "light"); },
+         nullptr},
+        {"Triggers",
+         [pfx](const map::MapEntity* e) { return pfx(e->classname, "trigger"); },
+         nullptr},
+        {"Props",
+         [pfx](const map::MapEntity* e) { return pfx(e->classname, "prop_"); },
+         nullptr},
+        {"Logic / relays",
+         [pfx](const map::MapEntity* e) {
+             return pfx(e->classname, "logic_") || pfx(e->classname, "math_") ||
+                    pfx(e->classname, "filter_") ||
+                    pfx(e->classname, "point_template");
+         },
+         nullptr},
+        {"Spawns & pickups",
+         [pfx](const map::MapEntity* e) {
+             return pfx(e->classname, "info_player") || pfx(e->classname, "item_") ||
+                    pfx(e->classname, "func_regenerate");
+         },
+         nullptr},
+        {"Brush entities (func_*)",
+         [pfx](const map::MapEntity* e) {
+             return pfx(e->classname, "func_") && !e->solids.empty();
+         },
+         nullptr},
+    };
+
+    ImGui::Separator();
+    bool changed = false;
+    for (auto& c : cats) {
+        int total = 0, hidden = 0;
+        if (c.worldMatch) {
+            for (auto& s : doc_.worldSolids())
+                if (c.worldMatch(s)) { ++total; hidden += s.hidden ? 1 : 0; }
+        }
+        if (c.entMatch) {
+            for (auto& e : doc_.entities())
+                if (c.entMatch(&e)) { ++total; hidden += e.hidden ? 1 : 0; }
+        }
+        if (total == 0) continue;
+        bool vis = hidden < total;
+        ImGui::PushID(c.label);
+        if (ImGui::Checkbox("##v", &vis)) {
+            if (c.worldMatch)
+                for (auto& s : doc_.worldSolids())
+                    if (c.worldMatch(s)) s.hidden = !vis;
+            if (c.entMatch)
+                for (auto& e : doc_.entities())
+                    if (c.entMatch(&e)) {
+                        e.hidden = !vis;
+                        for (auto& s : e.solids) s.hidden = !vis;
+                    }
+            changed = true;
+        }
+        ImGui::SameLine();
+        ImGui::Text("%s", c.label);
+        ImGui::SameLine();
+        ImGui::TextDisabled("(%d)", total);
+        ImGui::PopID();
+    }
+
+    ImGui::Separator();
+    if (ImGui::Button(ICON_FA_EYE "  Show everything", ImVec2(-1, 0))) {
+        for (auto& s : doc_.worldSolids()) s.hidden = false;
+        for (auto& e : doc_.entities()) {
+            e.hidden = false;
+            for (auto& s : e.solids) s.hidden = false;
+        }
+        changed = true;
+    }
+    if (changed) {
+        clearSelection();
+        buildAndUpload(meshOpts_);
+        rebuildSelectionWire();
+    }
     ImGui::End();
 }
 

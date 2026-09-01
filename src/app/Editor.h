@@ -139,6 +139,9 @@ private:
     void runMapCheck();
     void drawCommandPalette();
     void drawLogPanel();
+    void drawVisgroupsPanel();
+    void saveProject(bool forceDialog);   // .pbproj bundle
+    void openProject(const std::string& path);
     void drawCordonOverlay(ViewPanel& p, float aspect, ImDrawList* dl);
     void handleCordonDrag(ViewPanel& p);
     map::MapDocument buildCompileDoc();   // applies the cordon, adds seal brushes
@@ -223,6 +226,7 @@ private:
     struct CamMark { bool set = false; glm::vec3 pos{0}; float yaw = 0, pitch = 0; };
     std::array<CamMark, 6> camMarks_;
     glm::vec3 gotoCoord_{0};
+    std::string projectPath_;
 
     char outlinerFilter_[128] = {0};
     char materialFilter_[128] = {0};

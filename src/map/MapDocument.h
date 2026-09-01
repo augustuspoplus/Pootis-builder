@@ -14,6 +14,7 @@ struct MapEntity {
     std::string classname;
     KvNode kv;  // every key/value (origin, angles, targetname, spawnflags, ...)
     glm::vec3 origin{0};
+    bool hidden = false;  // transient: hidden by a visgroup
     std::vector<Solid> solids;  // non-empty for brush entities
     std::vector<std::pair<std::string, std::string>> connections;  // output -> args
 
