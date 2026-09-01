@@ -14,6 +14,7 @@
 #include <glm/gtc/matrix_transform.hpp>
 
 #include "IconsFontAwesome6.h"
+#include "app/PropWidgets.h"
 #include "app/Ui.h"
 #include "core/File.h"
 #include "core/Log.h"
@@ -393,16 +394,17 @@ void Editor::drawTopBar() {
     if (mode_ == Mode::Pro) {
         ImGui::SameLine(0, 12);
         ImGui::SetCursorPosY((barH - row) * 0.5f);
-        const char* const tools[] = {
-            ICON_FA_ARROW_POINTER " Select", ICON_FA_CUBE " Block",
-            ICON_FA_BEZIER_CURVE " Vertex",  ICON_FA_SCISSORS " Clip",
-            ICON_FA_IMAGE " Texture",        ICON_FA_LIGHTBULB " Entity"};
+        const char* const tools[] = {ICON_FA_ARROW_POINTER, ICON_FA_CUBE,
+                                     ICON_FA_BEZIER_CURVE,   ICON_FA_SCISSORS,
+                                     ICON_FA_IMAGE,          ICON_FA_LIGHTBULB};
         int r = segmented("tool", tools, 6, static_cast<int>(tool_), row);
         if (r >= 0) tool_ = static_cast<Tool>(r);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Select / Block / Vertex / Clip / Texture / Entity");
     }
 
     // Right cluster
-    const float rightW = 340.0f * uiScale_;
+    const float rightW = 480.0f * uiScale_;
     ImGui::SameLine();
     ImGui::SetCursorPosX(ImGui::GetWindowWidth() - rightW);
     ImGui::SetCursorPosY((barH - row) * 0.5f);
@@ -1074,6 +1076,32 @@ void Editor::pickAt(ViewPanel& p, const glm::vec2& px, bool additive) {
         for (int i = 0; i < static_cast<int>(es.size()); ++i) test(es[i], e, i);
     }
 
+    // Point entities: ray vs a helper box around the origin (FGD size or +-16).
+    int bestPointEnt = -1;
+    for (int e = 0; e < static_cast<int>(doc_.entities().size()); ++e) {
+        const auto& ent = doc_.entities()[e];
+        if (!ent.solids.empty()) continue;
+        glm::vec3 mn(-16), mx(16);
+        if (const fgd::EntityClass* ec = fgd_.flattened(ent.classname);
+            ec && ec->hasSize) {
+            mn = ec->sizeMin;
+            mx = ec->sizeMax;
+        }
+        float t;
+        if (map::rayAabb(ro, rd, ent.origin + mn, ent.origin + mx, t) && t < bestT) {
+            bestT = t;
+            bestPointEnt = e;
+            best = {};
+        }
+    }
+    if (bestPointEnt >= 0) {
+        selectedEntity_ = bestPointEnt;
+        selection_.clear();
+        rebuildSelectionWire();
+        status_ = doc_.entities()[bestPointEnt].classname + " selected";
+        return;
+    }
+
     if (!best.valid()) {
         if (!additive) clearSelection();
         return;
@@ -1087,8 +1115,20 @@ void Editor::pickAt(ViewPanel& p, const glm::vec2& px, bool additive) {
     } else {
         selection_ = {best};
     }
+    syncSelectedEntity();
     rebuildSelectionWire();
     status_ = std::to_string(selection_.size()) + " brush(es) selected";
+}
+
+void Editor::syncSelectedEntity() {
+    // If every selected solid belongs to the same real entity, treat that
+    // entity as selected so its properties show; otherwise clear.
+    int ent = -2;
+    for (const auto& r : selection_) {
+        if (ent == -2) ent = r.entity;
+        else if (ent != r.entity) ent = -3;
+    }
+    selectedEntity_ = (ent >= 0) ? ent : -1;
 }
 
 void Editor::rebuildSelectionWire() {
@@ -1103,6 +1143,7 @@ void Editor::rebuildSelectionWire() {
 
 void Editor::clearSelection() {
     selection_.clear();
+    selectedEntity_ = -1;
     renderer_.setSelectionWire({});
 }
 
@@ -1394,6 +1435,17 @@ void Editor::drawCompileWindow() {
     if (fontMono) ImGui::PopFont();
 
     ImGui::End();
+}
+
+void Editor::debugSelectEntity(int i) {
+    if (i >= 0 && i < static_cast<int>(doc_.entities().size())) {
+        selectedEntity_ = i;
+        selection_.clear();
+        mode_ = Mode::Pro;
+        layoutDirty_ = true;
+        status_ = "Selected entity " + std::to_string(i) + " (" +
+                  doc_.entities()[i].classname + ")";
+    }
 }
 
 void Editor::debugSelectWorldSolid(int i) {
@@ -2127,6 +2179,9 @@ void Editor::drawSelectionPanel() {
         ImGui::PopStyleColor();
         ImGui::Dummy(ImVec2(0, 6));
         if (ImGui::Button("Cancel", ImVec2(-1, 0))) placing_.clear();
+    } else if (selectedEntity_ >= 0 &&
+               selectedEntity_ < static_cast<int>(doc_.entities().size())) {
+        drawEntityProperties();
     } else if (hasDoc()) {
         drawBrushInspector();
     } else if (hasMap()) {
@@ -2147,11 +2202,220 @@ void Editor::drawSelectionPanel() {
 
 void Editor::drawProperties() {
     ImGui::Begin("Properties");
-    if (hasDoc())
+    if (selectedEntity_ >= 0 &&
+        selectedEntity_ < static_cast<int>(doc_.entities().size()))
+        drawEntityProperties();
+    else if (hasDoc())
         drawBrushInspector();
     else
         ImGui::TextDisabled("Load a map to edit brushes.");
     ImGui::End();
+}
+
+void Editor::drawIoEditor(map::MapEntity& e, bool* committed) {
+    using namespace pb::ui;
+    // VMF connection: "OutputName" "target,InputName,parameter,delay,timesToFire"
+    if (ImGui::BeginTable("io", 6,
+                          ImGuiTableFlags_Borders | ImGuiTableFlags_SizingStretchProp |
+                              ImGuiTableFlags_RowBg)) {
+        ImGui::TableSetupColumn("On (output)");
+        ImGui::TableSetupColumn("Target");
+        ImGui::TableSetupColumn("Input");
+        ImGui::TableSetupColumn("Parameter");
+        ImGui::TableSetupColumn("Delay", ImGuiTableColumnFlags_WidthFixed, 46);
+        ImGui::TableSetupColumn("##x", ImGuiTableColumnFlags_WidthFixed, 24);
+        ImGui::TableHeadersRow();
+
+        int removeRow = -1;
+        for (int i = 0; i < static_cast<int>(e.connections.size()); ++i) {
+            auto& c = e.connections[i];
+            // split the value on commas into 5 slots
+            std::array<std::string, 5> f;
+            {
+                std::string s = c.second;
+                size_t start = 0;
+                for (int k = 0; k < 5; ++k) {
+                    size_t comma = s.find(',', start);
+                    f[k] = s.substr(start, comma == std::string::npos
+                                               ? std::string::npos
+                                               : comma - start);
+                    if (comma == std::string::npos) break;
+                    start = comma + 1;
+                }
+            }
+            ImGui::PushID(i);
+            ImGui::TableNextRow();
+            auto cell = [&](int col, std::string& v, float w) {
+                ImGui::TableSetColumnIndex(col);
+                char b[160];
+                std::snprintf(b, sizeof(b), "%s", v.c_str());
+                ImGui::SetNextItemWidth(w > 0 ? w : -1);
+                ImGui::PushID(col);
+                if (ImGui::InputText("##c", b, sizeof(b))) v = b;
+                if (committed && ImGui::IsItemDeactivatedAfterEdit()) *committed = true;
+                ImGui::PopID();
+            };
+            cell(0, c.first, -1);
+            cell(1, f[1], -1);
+            cell(2, f[2], -1);
+            cell(3, f[3], -1);
+            cell(4, f[4], 40);
+            ImGui::TableSetColumnIndex(5);
+            if (ImGui::SmallButton(ICON_FA_XMARK)) removeRow = i;
+            ImGui::PopID();
+
+            std::string joined = f[1];
+            for (int k = 2; k < 5; ++k) joined += "," + f[k];
+            c.second = joined;
+        }
+        ImGui::EndTable();
+        if (removeRow >= 0) {
+            e.connections.erase(e.connections.begin() + removeRow);
+            if (committed) *committed = true;
+        }
+    }
+    if (ImGui::SmallButton(ICON_FA_PLUS "  Add output")) {
+        e.connections.push_back({"OnTrigger", ",Trigger,,0,-1"});
+        if (committed) *committed = true;
+    }
+}
+
+void Editor::drawEntityProperties() {
+    using namespace pb::ui;
+    map::MapEntity& e = doc_.entities()[selectedEntity_];
+    const fgd::EntityClass* ec = fgd_.flattened(e.classname);
+
+    if (fontUiMed) ImGui::PushFont(fontUiMed);
+    ImGui::PushStyleColor(ImGuiCol_Text, col::acc);
+    ImGui::Text(ICON_FA_CIRCLE_NODES "  %s", e.classname.c_str());
+    ImGui::PopStyleColor();
+    if (fontUiMed) ImGui::PopFont();
+    if (ec && !ec->description.empty()) {
+        ImGui::PushStyleColor(ImGuiCol_Text, col::faint);
+        ImGui::TextWrapped("%s", ec->description.c_str());
+        ImGui::PopStyleColor();
+    }
+    if (!ec) {
+        ImGui::PushStyleColor(ImGuiCol_Text, col::warn);
+        ImGui::TextWrapped(ICON_FA_TRIANGLE_EXCLAMATION
+                           "  Not in the FGD — showing raw keys only.");
+        ImGui::PopStyleColor();
+    }
+
+    bool committed = false;
+
+    // Name is the thing you reach for most — keep it pinned at the top.
+    {
+        char nm[128];
+        std::snprintf(nm, sizeof(nm), "%s", e.kv.get("targetname").c_str());
+        ImGui::SetNextItemWidth(-1);
+        if (ImGui::InputTextWithHint("##tn", "targetname (name)", nm, sizeof(nm)))
+            e.kv.set("targetname", nm);
+        if (ImGui::IsItemDeactivatedAfterEdit()) committed = true;
+    }
+
+    ImGui::SetNextItemWidth(-1);
+    ImGui::InputTextWithHint("##pf", ICON_FA_MAGNIFYING_GLASS " filter keys",
+                             propFilter_, sizeof(propFilter_));
+    const std::string filt = propFilter_;
+    auto match = [&](const fgd::Var& v) {
+        if (filt.empty()) return true;
+        auto has = [&](const std::string& s) {
+            auto it = std::search(
+                s.begin(), s.end(), filt.begin(), filt.end(),
+                [](char a, char b) { return std::tolower(a) == std::tolower(b); });
+            return it != s.end();
+        };
+        return has(v.key) || has(v.displayName);
+    };
+
+    // Names for target dropdowns.
+    std::vector<std::string> names;
+    for (const auto& other : doc_.entities()) {
+        const std::string n = other.kv.get("targetname");
+        if (!n.empty() && std::find(names.begin(), names.end(), n) == names.end())
+            names.push_back(n);
+    }
+    std::sort(names.begin(), names.end());
+
+    ImGui::Dummy(ImVec2(0, 4));
+    sectionLabel("PROPERTIES");
+    const fgd::Var* spawnflags = nullptr;
+    if (ec) {
+        for (const auto& v : ec->vars) {
+            if (v.type == fgd::VarType::Flags || v.key == "spawnflags") {
+                spawnflags = &v;
+                continue;
+            }
+            if (v.key == "targetname") continue;
+            if (!match(v)) continue;
+            if (pb::ui::fgdField(v, e.kv, names, &committed)) docMeshDirty_ = true;
+        }
+    }
+
+    if (spawnflags && filt.empty()) {
+        ImGui::Dummy(ImVec2(0, 4));
+        sectionLabel("FLAGS");
+        if (pb::ui::fgdFlags(*spawnflags, e.kv, &committed)) docMeshDirty_ = true;
+    }
+
+    // Any keys not described by the FGD — always editable, never hidden.
+    if (filt.empty()) {
+        std::vector<const std::pair<std::string, std::string>*> extra;
+        for (const auto& p : e.kv.pairs) {
+            if (p.first == "classname" || p.first == "id") continue;
+            bool known = (p.first == "targetname" || p.first == "spawnflags");
+            if (ec)
+                for (const auto& v : ec->vars)
+                    if (v.key == p.first) known = true;
+            if (!known) extra.push_back(&p);
+        }
+        if (!extra.empty()) {
+            ImGui::Dummy(ImVec2(0, 4));
+            if (ImGui::CollapsingHeader("Other keys (not in FGD)",
+                                        ImGuiTreeNodeFlags_DefaultOpen)) {
+                for (const auto* p : extra) {
+                    char b[320];
+                    std::snprintf(b, sizeof(b), "%s", p->second.c_str());
+                    ImGui::SetNextItemWidth(-1);
+                    ImGui::PushID(p->first.c_str());
+                    if (ImGui::InputText(p->first.c_str(), b, sizeof(b))) {
+                        e.kv.set(p->first, b);
+                        docMeshDirty_ = true;
+                    }
+                    if (ImGui::IsItemDeactivatedAfterEdit()) committed = true;
+                    ImGui::PopID();
+                }
+            }
+        }
+    }
+
+    ImGui::Dummy(ImVec2(0, 6));
+    sectionLabel("OUTPUTS  (I/O)");
+    drawIoEditor(e, &committed);
+
+    ImGui::Dummy(ImVec2(0, 8));
+    if (ImGui::Button(ICON_FA_TRASH "  Delete entity")) {
+        doc_.entities().erase(doc_.entities().begin() + selectedEntity_);
+        selectedEntity_ = -1;
+        afterEdit("Delete entity");
+        return;
+    }
+
+    // Keep origin/x-y-z in sync and record one undo step per finished edit.
+    if (docMeshDirty_) {
+        const std::string o = e.kv.get("origin");
+        if (!o.empty()) {
+            glm::vec3 v = e.origin;
+            std::sscanf(o.c_str(), "%f %f %f", &v.x, &v.y, &v.z);
+            e.origin = v;
+        }
+    }
+    if (committed) {
+        afterEdit("Edit entity");
+    } else if (docMeshDirty_) {
+        buildAndUpload(meshOpts_);
+    }
 }
 
 // ---------------------------------------------------------------------------

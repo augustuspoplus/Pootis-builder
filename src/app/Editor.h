@@ -42,6 +42,7 @@ public:
     void promptOpenMap();  // native file dialog
     void setProMode() { mode_ = Mode::Pro; layoutDirty_ = true; }
     void debugSelectWorldSolid(int i);  // test hook for headless screenshots
+    void debugSelectEntity(int i);
     void debugBuildSampleMap();
     void debugStartCompile(bool fast);
     void debugShowWorkshop();
@@ -107,6 +108,9 @@ private:
     void startCompile();
     void drawProperties();
     void drawBrushInspector();
+    void drawEntityProperties();   // FGD-driven, for the selected entity
+    void drawIoEditor(map::MapEntity& e, bool* committed);
+    void syncSelectedEntity();     // set selectedEntity_ from the solid selection
     void drawOutliner();
     void drawMaterialList();
     void drawTextureBrowser();
@@ -150,6 +154,8 @@ private:
     float flySpeed_ = 900.0f;
 
     std::vector<map::SolidRef> selection_;
+    int selectedEntity_ = -1;          // index into doc_.entities(), or -1
+    char propFilter_[96] = {0};
     map::History history_;
     int gizmoMode_ = 0;          // 0 move, 1 rotate, 2 scale
     bool gizmoUsing_ = false;
