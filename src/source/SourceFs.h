@@ -39,6 +39,11 @@ public:
 
     std::optional<std::vector<uint8_t>> read(const std::string& path) const;
 
+    // All mounted files under `prefix` (e.g. "models/props") ending in `ext`
+    // (e.g. ".mdl"), de-duplicated and sorted. For the model / asset browsers.
+    std::vector<std::string> listFiles(const std::string& prefix,
+                                       const std::string& ext) const;
+
     // name: material path without "materials/" prefix or ".vmt" suffix.
     ResolvedMaterial resolveMaterial(std::string name) const;
 

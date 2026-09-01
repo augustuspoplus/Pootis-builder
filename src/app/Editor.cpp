@@ -290,6 +290,7 @@ void Editor::frame() {
         drawProperties();
         drawOutliner();
         drawTextureBrowser();
+        drawModelBrowser();
         drawMaterialList();
         drawEntityCatalog();
         drawHistoryPanel();
@@ -344,6 +345,7 @@ void Editor::buildDockLayout(unsigned int dockId, const ImVec2& size) {
         ImGui::DockBuilderDockWindow("Properties", left);
         ImGui::DockBuilderDockWindow("Contents", left);
         ImGui::DockBuilderDockWindow("Textures", left);
+        ImGui::DockBuilderDockWindow("Models", left);
         ImGui::DockBuilderDockWindow("Materials", left);
         ImGui::DockBuilderDockWindow("Entities", left);
         ImGui::DockBuilderDockWindow("History", left);
@@ -1880,7 +1882,12 @@ void Editor::handleViewportInput(ViewPanel& p) {
             placeFgdEntity(placing_.substr(5), at);
         else if (placing_.rfind("@prefab:", 0) == 0)
             placePrefab(placing_.substr(8), at);
-        else
+        else if (placing_.rfind("@model:", 0) == 0) {
+            placeFgdEntity("prop_static", at);
+            if (!doc_.entities().empty())
+                doc_.entities().back().kv.set("model", placing_.substr(7));
+            afterEdit("Place prop");
+        } else
             placePiece(placing_, at);
         if (!io.KeyShift) placing_.clear();  // hold Shift to place several
         return;
@@ -3962,6 +3969,106 @@ void Editor::drawTextureBrowser() {
                                   info.height, info.found ? "" : "  (vmt not found)",
                                   info.tool ? "  [tool]" : "");
             if (++col % cols != 0) ImGui::SameLine();
+        }
+    }
+    ImGui::EndChild();
+    ImGui::End();
+}
+
+void Editor::drawModelBrowser() {
+    using namespace pb::ui;
+    ImGui::Begin("Models");
+    if (!sourceFs_.ready()) {
+        ImGui::TextDisabled("No game content mounted.");
+        ImGui::End();
+        return;
+    }
+    if (!modelListBuilt_) {
+        modelList_ = sourceFs_.listFiles("models/", ".mdl");
+        modelListBuilt_ = true;
+        PB_INFO("model browser: %zu models", modelList_.size());
+    }
+
+    ImGui::SetNextItemWidth(-1);
+    ImGui::InputTextWithHint("##mdlfilter",
+                             ICON_FA_MAGNIFYING_GLASS " filter models (e.g. props_2fort)",
+                             modelFilter_, sizeof(modelFilter_));
+    std::string needle = modelFilter_;
+    std::transform(needle.begin(), needle.end(), needle.begin(), ::tolower);
+
+    std::vector<const std::string*> shown;
+    shown.reserve(256);
+    for (const auto& m : modelList_) {
+        if (!needle.empty() && m.find(needle) == std::string::npos) continue;
+        shown.push_back(&m);
+        if (shown.size() >= 4000) break;
+    }
+    ImGui::TextDisabled("%zu / %zu models   —   click one, then click a viewport",
+                        shown.size(), modelList_.size());
+    if (!placing_.empty() && placing_.rfind("@model:", 0) == 0) {
+        ImGui::SameLine();
+        if (ImGui::SmallButton("cancel")) placing_.clear();
+    }
+
+    const float cell = dp(84.0f);
+    const int cols = std::max(1, (int)(ImGui::GetContentRegionAvail().x / (cell + dp(8.0f))));
+    if (ImGui::BeginChild("mdlgrid")) {
+        int budget = 3;  // resolve at most a few MDLs per frame to stay smooth
+        ImGuiListClipper clip;
+        clip.Begin((int)((shown.size() + cols - 1) / cols), cell + dp(30.0f));
+        while (clip.Step()) {
+            for (int row = clip.DisplayStart; row < clip.DisplayEnd; ++row) {
+                for (int cIdx = 0; cIdx < cols; ++cIdx) {
+                    const int i = row * cols + cIdx;
+                    if (i >= (int)shown.size()) break;
+                    const std::string& path = *shown[i];
+                    ImGui::PushID(i);
+
+                    // Icon = the model's first material thumbnail, resolved lazily.
+                    GLuint tex = 0;
+                    auto it = modelFirstMat_.find(path);
+                    if (it == modelFirstMat_.end() && budget > 0) {
+                        const model::StudioModel& sm =
+                            model::loadStudioModel(sourceFs_, path);
+                        const std::string mat =
+                            (sm.ok && !sm.meshes.empty()) ? sm.meshes[0].material : "";
+                        modelFirstMat_[path] = mat;
+                        it = modelFirstMat_.find(path);
+                        --budget;
+                    }
+                    if (it != modelFirstMat_.end() && !it->second.empty())
+                        tex = materials_.get(it->second).texture;
+
+                    const bool on = placing_ == "@model:" + path;
+                    ImGui::BeginGroup();
+                    if (tex)
+                        ImGui::Image(static_cast<ImTextureID>((intptr_t)tex),
+                                     ImVec2(cell, cell));
+                    else {
+                        ImGui::PushStyleColor(ImGuiCol_Button, col::bg2);
+                        ImGui::Button(ICON_FA_CUBE "##t", ImVec2(cell, cell));
+                        ImGui::PopStyleColor();
+                    }
+                    if (on)
+                        ImGui::GetWindowDrawList()->AddRect(
+                            ImGui::GetItemRectMin(), ImGui::GetItemRectMax(),
+                            u32(col::acc), 3.0f, 0, 2.0f);
+                    std::string label = path.substr(path.rfind('/') + 1);
+                    if (label.size() > 4) label.resize(label.size() - 4);  // .mdl
+                    ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + cell);
+                    ImGui::TextWrapped("%s", label.c_str());
+                    ImGui::PopTextWrapPos();
+                    ImGui::EndGroup();
+                    if (ImGui::IsItemClicked()) {
+                        placing_ = "@model:" + path;
+                        status_ = "Placing prop  " + label +
+                                  "  — click in a viewport";
+                    }
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", path.c_str());
+                    if (cIdx + 1 < cols) ImGui::SameLine();
+                    ImGui::PopID();
+                }
+            }
         }
     }
     ImGui::EndChild();

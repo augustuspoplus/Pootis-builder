@@ -80,6 +80,34 @@ std::optional<std::vector<uint8_t>> SourceFs::read(const std::string& path) cons
     return std::nullopt;
 }
 
+std::vector<std::string> SourceFs::listFiles(const std::string& prefix,
+                                            const std::string& ext) const {
+    const std::string pfx = lower(prefix);
+    const std::string ex = lower(ext);
+    std::vector<std::string> out;
+    auto want = [&](const std::string& p) {
+        return p.size() > ex.size() && p.compare(0, pfx.size(), pfx) == 0 &&
+               p.compare(p.size() - ex.size(), ex.size(), ex) == 0;
+    };
+    for (const auto& v : vpks_)
+        for (const auto& [name, entry] : v->entries())
+            if (want(name)) out.push_back(name);
+    for (const std::string& root : looseRoots_) {
+        std::error_code ec;
+        const fs::path base = fs::path(root) / pfx;
+        if (!fs::is_directory(base, ec)) continue;
+        for (auto it = fs::recursive_directory_iterator(base, ec);
+             it != fs::recursive_directory_iterator(); it.increment(ec)) {
+            if (ec || !it->is_regular_file()) continue;
+            std::string rel = lower(fs::relative(it->path(), root, ec).generic_string());
+            if (want(rel)) out.push_back(std::move(rel));
+        }
+    }
+    std::sort(out.begin(), out.end());
+    out.erase(std::unique(out.begin(), out.end()), out.end());
+    return out;
+}
+
 VtfImage SourceFs::loadTexture(std::string texRel) const {
     texRel = lower(texRel);
     if (texRel.rfind("materials/", 0) != 0) texRel = "materials/" + texRel;

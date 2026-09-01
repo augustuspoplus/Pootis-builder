@@ -139,6 +139,7 @@ private:
     void drawOutliner();
     void drawMaterialList();
     void drawTextureBrowser();
+    void drawModelBrowser();
     void drawEntityCatalog();
     void drawStatusBar();
     void drawHistoryPanel();
@@ -239,6 +240,10 @@ private:
     char outlinerFilter_[128] = {0};
     char materialFilter_[128] = {0};
     char textureFilter_[128] = {0};
+    char modelFilter_[128] = {0};
+    std::vector<std::string> modelList_;             // every models/**.mdl, sorted
+    std::unordered_map<std::string, std::string> modelFirstMat_;  // path -> material
+    bool modelListBuilt_ = false;
     float flySpeed_ = 900.0f;
 
     std::vector<map::SolidRef> selection_;
