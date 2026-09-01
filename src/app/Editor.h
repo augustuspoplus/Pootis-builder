@@ -1,6 +1,7 @@
 #pragma once
 #include <array>
 #include <atomic>
+#include <functional>
 #include <memory>
 #include <string>
 #include <thread>
@@ -50,6 +51,7 @@ public:
     void debugShowWorkshop();
     void debugFocusPanel(const std::string& name) { focusPanel_ = name; focusPanelFrames_ = 6; }
     void debugSubObjectDemo(int solidIdx, int mode);  // select brush, deform one handle
+    void debugTextureDemo(int solidIdx);              // pick faces for the Texture tool
     void debugDumpFgd(const std::string& cls);
     void debugImportObj(const std::string& path);  // detail-brush import, headless
     bool saveVmf(const std::string& path);
@@ -132,6 +134,11 @@ private:
     void rebuildHandles();                       // sub-object handles for selection_[0]
     void handleSubObjectInput(ViewPanel& p);
     void drawSubObjectOverlay(ViewPanel& p, float aspect, ImDrawList* dl);
+    void handleTextureTool(ViewPanel& p);        // Texture tool: pick faces
+    void drawFaceOverlay(ViewPanel& p, float aspect, ImDrawList* dl);
+    void drawFaceEditPanel();                    // the Face Edit sheet
+    void applyToTexFaces(const std::function<void(map::BrushFace&)>& fn,
+                         const char* undoLabel, bool commit);
     void placePiece(const std::string& piece, const glm::vec3& at);
     void placeFgdEntity(const std::string& cls, const glm::vec3& at);
     void tieSelectionToEntity(const std::string& cls);
@@ -180,6 +187,10 @@ private:
     glm::vec3 blockA_{0}, blockB_{0};
     float newBrushDepth_ = 128.0f;
     std::string blockMaterial_ = "dev/dev_measuregeneric01b";
+
+    // Texture tool: faces picked for texturing (SolidRef + face index).
+    std::vector<std::pair<map::SolidRef, int>> texFaces_;
+    char texMaterial_[128] = "dev/dev_measuregeneric01b";
 
     // Sub-object (Vertex/Edge/Face) editing — operates on selection_[0].
     SubMode subMode_ = SubMode::Vertex;

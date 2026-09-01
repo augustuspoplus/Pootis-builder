@@ -9,6 +9,10 @@ namespace pb::map {
 // hit distance in `tHit`. `rd` need not be normalised — `tHit` is in units of rd.
 bool raySolid(const glm::vec3& ro, const glm::vec3& rd, const Solid& s, float& tHit);
 
+// As raySolid, but also reports which face was hit (index into s.faces).
+bool raySolidFace(const glm::vec3& ro, const glm::vec3& rd, const Solid& s,
+                  float& tHit, int& faceHit);
+
 bool rayAabb(const glm::vec3& ro, const glm::vec3& rd, const glm::vec3& mn,
              const glm::vec3& mx, float& tHit);
 

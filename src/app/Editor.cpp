@@ -711,6 +711,7 @@ void Editor::drawViewportPanel(ViewPanel& p) {
 
     drawEntityTags(p, aspect, dl);
     drawSubObjectOverlay(p, aspect, dl);
+    drawFaceOverlay(p, aspect, dl);
 
     if (!hasMap() && p.kind == ViewKind::Perspective) {
         const char* msg = "Open a .bsp  —  File > Open BSP  (Ctrl+O)  or drag one in";
@@ -1128,6 +1129,214 @@ void Editor::drawSubObjectOverlay(ViewPanel& p, float aspect, ImDrawList* dl) {
     }
 }
 
+// --------------------------------------------------------------------------
+// Texture / Face-edit tool
+// --------------------------------------------------------------------------
+void Editor::handleTextureTool(ViewPanel& p) {
+    if (tool_ != Tool::Texture || !hasDoc() || !p.hovered) return;
+    ImGuiIO& io = ImGui::GetIO();
+    if (!ImGui::IsMouseReleased(ImGuiMouseButton_Left) ||
+        ImGui::IsMouseDragPastThreshold(ImGuiMouseButton_Left, 4.0f))
+        return;
+
+    const ImVec2 m = ImGui::GetMousePos();
+    glm::vec3 ro, rd;
+    p.camera.pixelRay({m.x - p.contentMin.x, m.y - p.contentMin.y}, p.contentSize, ro,
+                      rd);
+
+    map::SolidRef hitRef;
+    int hitFace = -1;
+    float bestT = 1e30f;
+    auto test = [&](const map::Solid& s, int ent, int idx) {
+        float t;
+        int fi;
+        if (s.valid && map::raySolidFace(ro, rd, s, t, fi) && t < bestT) {
+            bestT = t;
+            hitRef = {ent, idx};
+            hitFace = fi;
+        }
+    };
+    const auto& ws = doc_.worldSolids();
+    for (int i = 0; i < (int)ws.size(); ++i) test(ws[i], -1, i);
+    for (int e = 0; e < (int)doc_.entities().size(); ++e) {
+        const auto& es = doc_.entities()[e].solids;
+        for (int i = 0; i < (int)es.size(); ++i) test(es[i], e, i);
+    }
+
+    if (hitFace < 0) {
+        if (!io.KeyShift) texFaces_.clear();
+        return;
+    }
+    const std::pair<map::SolidRef, int> pick{hitRef, hitFace};
+    auto it = std::find(texFaces_.begin(), texFaces_.end(), pick);
+    if (io.KeyShift) {
+        if (it != texFaces_.end())
+            texFaces_.erase(it);
+        else
+            texFaces_.push_back(pick);
+    } else {
+        texFaces_ = {pick};
+    }
+    // Load the clicked face's material into the panel field.
+    if (const map::Solid* s = doc_.resolve(hitRef);
+        s && hitFace < (int)s->faces.size())
+        std::snprintf(texMaterial_, sizeof(texMaterial_), "%s",
+                      s->faces[hitFace].material.c_str());
+    status_ = std::to_string(texFaces_.size()) + " face(s) selected";
+}
+
+void Editor::drawFaceOverlay(ViewPanel& p, float aspect, ImDrawList* dl) {
+    if (tool_ != Tool::Texture || texFaces_.empty()) return;
+    const glm::mat4 vp = p.camera.proj(aspect) * p.camera.view();
+    auto pr = [&](const glm::vec3& w, bool& ok) {
+        return projectPt(p.kind, vp, p.contentMin, p.contentSize, w, ok);
+    };
+    for (const auto& [ref, fi] : texFaces_) {
+        const map::Solid* s = doc_.resolve(ref);
+        if (!s || fi >= (int)s->faces.size()) continue;
+        const auto& f = s->faces[fi];
+        if (f.verts.size() < 3) continue;
+        std::vector<ImVec2> poly;
+        bool all = true;
+        for (const auto& v : f.verts) {
+            bool ok;
+            poly.push_back(pr(v, ok));
+            all = all && ok;
+        }
+        if (!all) continue;
+        dl->AddConvexPolyFilled(poly.data(), (int)poly.size(),
+                                IM_COL32(90, 170, 255, 60));
+        for (size_t k = 0; k < poly.size(); ++k)
+            dl->AddLine(poly[k], poly[(k + 1) % poly.size()],
+                        IM_COL32(120, 200, 255, 235), 2.0f);
+    }
+}
+
+void Editor::applyToTexFaces(const std::function<void(map::BrushFace&)>& fn,
+                             const char* undoLabel, bool commit) {
+    if (texFaces_.empty()) return;
+    for (const auto& [ref, fi] : texFaces_) {
+        map::Solid* s = doc_.resolve(ref);
+        if (s && fi < (int)s->faces.size()) fn(s->faces[fi]);
+    }
+    if (commit)
+        afterEdit(undoLabel);
+    else
+        buildAndUpload(meshOpts_);  // live preview, no undo entry yet
+}
+
+void Editor::drawFaceEditPanel() {
+    using namespace pb::ui;
+    if (fontUiMed) ImGui::PushFont(fontUiMed);
+    ImGui::PushStyleColor(ImGuiCol_Text, col::acc);
+    ImGui::TextUnformatted(ICON_FA_IMAGE "  Face edit");
+    ImGui::PopStyleColor();
+    if (fontUiMed) ImGui::PopFont();
+
+    if (texFaces_.empty()) {
+        ImGui::PushStyleColor(ImGuiCol_Text, col::faint);
+        ImGui::TextWrapped("Click a face in any viewport to texture it. "
+                           "Shift-click to add / remove faces.");
+        ImGui::PopStyleColor();
+        return;
+    }
+    ImGui::TextDisabled("%zu face(s) selected", texFaces_.size());
+
+    // Representative face for showing current values.
+    const map::Solid* rs = doc_.resolve(texFaces_[0].first);
+    if (!rs || texFaces_[0].second >= (int)rs->faces.size()) return;
+    const map::BrushFace& rf = rs->faces[texFaces_[0].second];
+    const auto& minfo = materials_.get(texMaterial_);
+
+    sectionLabel("MATERIAL");
+    ImGui::Image(static_cast<ImTextureID>(static_cast<intptr_t>(minfo.texture)),
+                 ImVec2(64, 64));
+    ImGui::SameLine();
+    ImGui::BeginGroup();
+    ImGui::SetNextItemWidth(-1);
+    ImGui::InputText("##mat", texMaterial_, sizeof(texMaterial_));
+    if (ImGui::Button(ICON_FA_CHECK "  Apply material", ImVec2(-1, 0))) {
+        std::string mm = texMaterial_;
+        applyToTexFaces([&](map::BrushFace& f) { f.material = mm; }, "Apply material",
+                        true);
+    }
+    if (ImGui::Button("Use current browser pick", ImVec2(-1, 0)))
+        std::snprintf(texMaterial_, sizeof(texMaterial_), "%s",
+                      blockMaterial_.c_str());
+    ImGui::EndGroup();
+    ImGui::TextDisabled("%dx%d%s", minfo.width, minfo.height,
+                        minfo.found ? "" : "  (not found)");
+
+    sectionLabel("PROJECTION");
+    auto flabel = [](const char* t) {
+        ImGui::PushStyleColor(ImGuiCol_Text, col::faint);
+        ImGui::TextUnformatted(t);
+        ImGui::PopStyleColor();
+    };
+    flabel("Shift  X / Y  (texels)");
+    float shift[2] = {rf.uAxis.w, rf.vAxis.w};
+    ImGui::SetNextItemWidth(-1);
+    if (ImGui::DragFloat2("##shift", shift, 1.0f, 0, 0, "%.1f"))
+        applyToTexFaces(
+            [&](map::BrushFace& f) { f.uAxis.w = shift[0]; f.vAxis.w = shift[1]; },
+            "Texture shift", false);
+    if (ImGui::IsItemDeactivatedAfterEdit())
+        applyToTexFaces([&](map::BrushFace&) {}, "Texture shift", true);
+    flabel("Scale  X / Y");
+    float scale[2] = {rf.uScale, rf.vScale};
+    ImGui::SetNextItemWidth(-1);
+    if (ImGui::DragFloat2("##scale", scale, 0.01f, 0.001f, 1000.0f, "%.3f"))
+        applyToTexFaces(
+            [&](map::BrushFace& f) {
+                f.uScale = scale[0] == 0 ? 0.25f : scale[0];
+                f.vScale = scale[1] == 0 ? 0.25f : scale[1];
+            },
+            "Texture scale", false);
+    if (ImGui::IsItemDeactivatedAfterEdit())
+        applyToTexFaces([&](map::BrushFace&) {}, "Texture scale", true);
+    flabel("Rotation");
+    float rot = rf.rotation;
+    ImGui::SetNextItemWidth(-1);
+    if (ImGui::DragFloat("##rot", &rot, 1.0f, -360.0f, 360.0f, "%.0f deg")) {
+        const float delta = rot - rf.rotation;
+        applyToTexFaces([&](map::BrushFace& f) { map::faceRotateUV(f, delta); },
+                        "Texture rotate", false);
+    }
+    if (ImGui::IsItemDeactivatedAfterEdit())
+        applyToTexFaces([&](map::BrushFace&) {}, "Texture rotate", true);
+    flabel("Lightmap scale");
+    float lm = rf.lightmapScale;
+    ImGui::SetNextItemWidth(-1);
+    if (ImGui::DragFloat("##lm", &lm, 1.0f, 1.0f, 512.0f, "%.0f"))
+        applyToTexFaces([&](map::BrushFace& f) { f.lightmapScale = lm; },
+                        "Lightmap scale", false);
+    if (ImGui::IsItemDeactivatedAfterEdit())
+        applyToTexFaces([&](map::BrushFace&) {}, "Lightmap scale", true);
+
+    sectionLabel("ALIGN");
+    if (ImGui::Button("World", ImVec2(-1, 0)))
+        applyToTexFaces([&](map::BrushFace& f) { map::faceAlignWorld(f); },
+                        "Align to world", true);
+    if (ImGui::Button("Face", ImVec2(-1, 0)))
+        applyToTexFaces([&](map::BrushFace& f) { map::faceAlignToFace(f); },
+                        "Align to face", true);
+
+    sectionLabel("JUSTIFY");
+    const int tw = minfo.width, th = minfo.height;
+    struct J { const char* label; int mode; };
+    const J js[] = {{"Fit", 0},  {"Top", 1},    {"Bottom", 2},
+                    {"Left", 3}, {"Right", 4},  {"Center", 5}};
+    for (int i = 0; i < 6; ++i) {
+        if (i % 3) ImGui::SameLine();
+        if (ImGui::Button(js[i].label, ImVec2(88, 0))) {
+            const int mode = js[i].mode;
+            applyToTexFaces(
+                [&](map::BrushFace& f) { map::faceJustifyUV(f, tw, th, mode); },
+                "Justify texture", true);
+        }
+    }
+}
+
 void Editor::handleBlockTool(ViewPanel& p) {
     if (tool_ != Tool::Block || !hasDoc() || p.kind == ViewKind::Perspective) return;
     ImGuiIO& io = ImGui::GetIO();
@@ -1438,6 +1647,7 @@ void Editor::handleViewportInput(ViewPanel& p) {
     // Vertex/Edge/Face editing owns the mouse when a single brush is selected.
     const bool subActive = tool_ == Tool::Vertex && selection_.size() == 1;
     if (subActive) handleSubObjectInput(p);
+    handleTextureTool(p);
 
     if (!io.KeyCtrl && !ImGui::IsMouseDown(ImGuiMouseButton_Right)) {
         if (ImGui::IsKeyPressed(ImGuiKey_W)) gizmoMode_ = 0;
@@ -1942,6 +2152,23 @@ void Editor::debugSelectWorldSolid(int i) {
                 }
             }
     }
+}
+
+void Editor::debugTextureDemo(int solidIdx) {
+    debugSelectWorldSolid(solidIdx);
+    mode_ = Mode::Pro;
+    tool_ = Tool::Texture;
+    layoutDirty_ = true;
+    texFaces_.clear();
+    const map::Solid* s = doc_.resolve(selection_[0]);
+    if (!s) return;
+    for (int fi = 0; fi < (int)s->faces.size() && fi < 3; ++fi)
+        texFaces_.push_back({{-1, solidIdx}, fi});
+    if (!s->faces.empty())
+        std::snprintf(texMaterial_, sizeof(texMaterial_), "%s",
+                      s->faces[0].material.c_str());
+    selection_.clear();  // texture tool works on faces, not the whole brush
+    PB_INFO("texture demo: solid %d, %zu faces picked", solidIdx, texFaces_.size());
 }
 
 void Editor::debugSubObjectDemo(int solidIdx, int mode) {
@@ -2710,7 +2937,9 @@ void Editor::drawSelectionPanel() {
 
 void Editor::drawProperties() {
     ImGui::Begin("Properties");
-    if (selectedEntity_ >= 0 &&
+    if (tool_ == Tool::Texture && hasDoc())
+        drawFaceEditPanel();
+    else if (selectedEntity_ >= 0 &&
         selectedEntity_ < static_cast<int>(doc_.entities().size()))
         drawEntityProperties();
     else if (hasDoc())
