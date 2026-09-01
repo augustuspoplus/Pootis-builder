@@ -836,6 +836,7 @@ void Editor::drawViewportPanel(ViewPanel& p) {
     drawClipOverlay(p, aspect, dl);
     drawSelectionDims(p, aspect, dl);
     drawCordonOverlay(p, aspect, dl);
+    drawRoadOverlay(p, aspect, dl);
 
     if (!hasMap() && p.kind == ViewKind::Perspective) {
         const char* msg = "Open a .bsp  —  File > Open BSP  (Ctrl+O)  or drag one in";
@@ -1666,6 +1667,7 @@ void Editor::placePiece(const std::string& piece, const glm::vec3& atRaw) {
 
     std::vector<map::Solid> made;
     std::vector<map::MapEntity> madeEnts;
+    bool asFuncDetail = false;
 
     auto box = [&](glm::vec3 mn, glm::vec3 mx, const std::string& mat) {
         made.push_back(map::Solid::makeBox(mn, mx, mat));
@@ -1738,6 +1740,35 @@ void Editor::placePiece(const std::string& piece, const glm::vec3& atRaw) {
              {{0, -1, 0}, -y0},
              {sn, glm::dot(sn, glm::vec3(x0, at.y, z0))}},
             floorMat));
+    } else if (piece == "Hill" || piece == "Mountain") {
+        // A faceted mound: stacked, shrinking, jittered octagonal prisms.
+        const int layers = std::clamp(hillLayers_, 3, 16);
+        const int sides = 8;
+        auto noise = [](float a, float b) {
+            const float s = std::sin(a * 12.9898f + b * 78.233f) * 43758.5453f;
+            return s - std::floor(s);  // 0..1, deterministic
+        };
+        for (int i = 0; i < layers; ++i) {
+            const float t0 = float(i) / layers;
+            const float t1 = float(i + 1) / layers;
+            const float z0 = at.z + t0 * hillHeight_;
+            const float z1 = at.z + t1 * hillHeight_ + 0.5f;
+            const float baseR = hillRadius_ * (1.0f - t0 * 0.92f);
+            const float aoff = noise(float(i), 3.1f) * 0.7f;  // twist each layer
+            std::vector<std::pair<glm::vec3, float>> planes;
+            planes.push_back({{0, 0, 1}, z1});
+            planes.push_back({{0, 0, -1}, -z0});
+            for (int k = 0; k < sides; ++k) {
+                const float ang = aoff + (k / float(sides)) * 6.2831853f;
+                const glm::vec3 n(std::cos(ang), std::sin(ang), 0.0f);
+                const float jitter = 1.0f + hillRough_ * (noise(float(i), float(k)) - 0.5f);
+                const float r = std::max(24.0f, baseR * jitter);
+                planes.push_back({n, glm::dot(n, at) + r});
+            }
+            map::Solid s = map::Solid::fromPlanes(planes, floorMat);
+            if (s.valid) made.push_back(std::move(s));
+        }
+        asFuncDetail = true;
     } else if (piece == "RED spawn" || piece == "BLU spawn") {
         const bool red = piece[0] == 'R';
         const char* team = red ? "2" : "3";
@@ -1800,15 +1831,116 @@ void Editor::placePiece(const std::string& piece, const glm::vec3& atRaw) {
     }
 
     selection_.clear();
-    for (auto& s : made) {
-        s.id = doc_.nextId();
-        doc_.worldSolids().push_back(std::move(s));
-        selection_.push_back({-1, static_cast<int>(doc_.worldSolids().size()) - 1});
+    if (asFuncDetail && !made.empty()) {
+        // One func_detail entity holding all the pieces (keeps vis fast).
+        map::MapEntity fd;
+        fd.id = doc_.nextId();
+        fd.classname = "func_detail";
+        fd.kv.set("classname", "func_detail");
+        for (auto& s : made) {
+            s.id = doc_.nextId();
+            fd.solids.push_back(std::move(s));
+        }
+        doc_.entities().push_back(std::move(fd));
+        selection_.push_back(
+            {static_cast<int>(doc_.entities().size()) - 1, 0});
+    } else {
+        for (auto& s : made) {
+            s.id = doc_.nextId();
+            doc_.worldSolids().push_back(std::move(s));
+            selection_.push_back(
+                {-1, static_cast<int>(doc_.worldSolids().size()) - 1});
+        }
     }
     for (auto& e : madeEnts) doc_.entities().push_back(std::move(e));
 
     afterEdit(("Add " + piece).c_str());
     status_ = "Placed " + piece;
+}
+
+void Editor::finalizeRoad() {
+    if (roadPts_.size() < 2) {
+        status_ = "Need at least 2 points for a road.";
+        return;
+    }
+    if (!doc_.active()) { doc_.newBlank("untitled"); history_.reset(doc_); }
+
+    // Catmull-Rom through the clicked points (clamped endpoints).
+    auto pt = [&](int i) {
+        return roadPts_[std::clamp(i, 0, (int)roadPts_.size() - 1)];
+    };
+    auto cr = [](const glm::vec3& p0, const glm::vec3& p1, const glm::vec3& p2,
+                 const glm::vec3& p3, float t) {
+        const float t2 = t * t, t3 = t2 * t;
+        return 0.5f * ((2.0f * p1) + (-p0 + p2) * t +
+                       (2.0f * p0 - 5.0f * p1 + 4.0f * p2 - p3) * t2 +
+                       (-p0 + 3.0f * p1 - 3.0f * p2 + p3) * t3);
+    };
+    std::vector<glm::vec3> path;
+    const int per = 8;  // samples per input span
+    for (int i = 0; i + 1 < (int)roadPts_.size(); ++i)
+        for (int s = 0; s < per; ++s)
+            path.push_back(cr(pt(i - 1), pt(i), pt(i + 1), pt(i + 2), s / float(per)));
+    path.push_back(roadPts_.back());
+
+    const float hw = roadWidth_ * 0.5f, ht = roadThick_ * 0.5f;
+    std::vector<map::Solid> segs;
+    for (size_t i = 0; i + 1 < path.size(); ++i) {
+        glm::vec3 a = path[i], b = path[i + 1];
+        glm::vec3 f = b - a;
+        const float len = glm::length(f);
+        if (len < 1.0f) continue;
+        f /= len;
+        glm::vec3 rt = glm::normalize(glm::cross(f, glm::vec3(0, 0, 1)));
+        if (!std::isfinite(rt.x)) rt = glm::vec3(1, 0, 0);
+        glm::vec3 up = glm::normalize(glm::cross(rt, f));
+        const glm::vec3 c = 0.5f * (a + b) - up * ht;  // top of road at the path
+        const float hl = len * 0.5f + 1.0f;            // overlap neighbours a hair
+        std::vector<std::pair<glm::vec3, float>> planes = {
+            {f, glm::dot(f, c) + hl},   {-f, glm::dot(-f, c) + hl},
+            {rt, glm::dot(rt, c) + hw}, {-rt, glm::dot(-rt, c) + hw},
+            {up, glm::dot(up, c) + ht}, {-up, glm::dot(-up, c) + ht}};
+        map::Solid seg = map::Solid::fromPlanes(planes, "dev/dev_measuregeneric01b");
+        if (seg.valid) segs.push_back(std::move(seg));
+    }
+    if (segs.empty()) { status_ = "Road had no usable segments."; return; }
+
+    map::MapEntity fd;
+    fd.id = doc_.nextId();
+    fd.classname = "func_detail";
+    fd.kv.set("classname", "func_detail");
+    for (auto& s : segs) { s.id = doc_.nextId(); fd.solids.push_back(std::move(s)); }
+    doc_.entities().push_back(std::move(fd));
+    selection_ = {{(int)doc_.entities().size() - 1, 0}};
+
+    const size_t n = roadPts_.size();
+    roadPts_.clear();
+    roadActive_ = false;
+    placing_.clear();
+    afterEdit("Add road");
+    status_ = "Built a road from " + std::to_string(n) + " points.";
+}
+
+void Editor::drawRoadOverlay(ViewPanel& p, float aspect, ImDrawList* dl) {
+    if (!roadActive_ || roadPts_.empty()) return;
+    const glm::mat4 vp = p.camera.proj(aspect) * p.camera.view();
+    auto pr = [&](const glm::vec3& w, bool& ok) {
+        return projectPt(p.kind, vp, p.contentMin, p.contentSize, w, ok);
+    };
+    const ImU32 col = IM_COL32(120, 200, 255, 235);
+    ImVec2 prev;
+    bool havePrev = false;
+    for (const auto& w : roadPts_) {
+        bool ok;
+        const ImVec2 s = pr(w, ok);
+        if (!ok) { havePrev = false; continue; }
+        dl->AddCircleFilled(s, 4.0f, col);
+        if (havePrev) dl->AddLine(prev, s, col, 2.0f);
+        prev = s;
+        havePrev = true;
+    }
+    dl->AddText(ImVec2(p.contentMin.x + 8, p.contentMin.y + 40), col,
+                "ROAD — click to add points, Enter to build");
 }
 
 void Editor::placeFgdEntity(const std::string& cls, const glm::vec3& atRaw) {
@@ -1879,6 +2011,27 @@ void Editor::handleViewportInput(ViewPanel& p) {
     if (!p.hovered) return;
     ImGuiIO& io = ImGui::GetIO();
     const float dt = std::clamp(io.DeltaTime, 0.0f, 0.1f);
+
+    // Curvy road: each click adds a spline point; Enter finishes, Esc cancels.
+    if (placing_ == "Curvy road") {
+        if (ImGui::IsMouseReleased(ImGuiMouseButton_Left) &&
+            !ImGui::IsMouseDragPastThreshold(ImGuiMouseButton_Left, 4.0f)) {
+            roadPts_.push_back(snapVec(viewPlanePoint(p, ImGui::GetMousePos())));
+            roadActive_ = true;
+            status_ = std::to_string(roadPts_.size()) +
+                      " road point(s) — click more, Enter to build, Esc to cancel";
+        }
+        if (ImGui::IsKeyPressed(ImGuiKey_Enter) ||
+            ImGui::IsKeyPressed(ImGuiKey_KeypadEnter))
+            finalizeRoad();
+        if (ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+            roadPts_.clear();
+            roadActive_ = false;
+            placing_.clear();
+            status_ = "Road cancelled.";
+        }
+        return;
+    }
 
     // Kit placement: click drops the pending piece.
     if (!placing_.empty() && ImGui::IsMouseReleased(ImGuiMouseButton_Left) &&
@@ -3184,8 +3337,9 @@ void Editor::drawBuildKit() {
                 {ICON_FA_SQUARE, "Wall", "Solid cover"},
                 {ICON_FA_TABLE_CELLS_LARGE, "Room", "4 walls + floor + ceiling"},
                 {ICON_FA_DIAGRAM_PROJECT, "Ramp", "Change height smoothly"},
-                {ICON_FA_DRAW_POLYGON, "Route", "Draw a path, get sections"},
                 {ICON_FA_GRIP, "Pillar", "Vertical cover"},
+                {ICON_FA_MOUND, "Hill", "Faceted mountain / mound of brushwork"},
+                {ICON_FA_ROAD, "Curvy road", "Click points, get a smooth road ribbon"},
             };
             ImGui::Dummy(ImVec2(0, 4));
             kitCards(shapes, IM_ARRAYSIZE(shapes), &placing_, &status_);
@@ -3472,6 +3626,32 @@ void Editor::drawSelectionPanel() {
         ImGui::PushStyleColor(ImGuiCol_Text, pb::ui::col::dim);
         ImGui::TextWrapped("Click in a viewport to drop it.");
         ImGui::PopStyleColor();
+        if (placing_ == "Hill" || placing_ == "Mountain") {
+            ImGui::Dummy(ImVec2(0, 6));
+            pb::ui::sectionLabel("HILL");
+            ImGui::SetNextItemWidth(-1);
+            ImGui::SliderFloat("radius", &hillRadius_, 64.0f, 4096.0f, "%.0f");
+            ImGui::SetNextItemWidth(-1);
+            ImGui::SliderFloat("height", &hillHeight_, 32.0f, 4096.0f, "%.0f");
+            ImGui::SetNextItemWidth(-1);
+            ImGui::SliderFloat("roughness", &hillRough_, 0.0f, 1.0f, "%.2f");
+            ImGui::SetNextItemWidth(-1);
+            ImGui::SliderInt("layers", &hillLayers_, 3, 16);
+        }
+        if (placing_ == "Curvy road") {
+            ImGui::Dummy(ImVec2(0, 6));
+            pb::ui::sectionLabel("ROAD");
+            ImGui::SetNextItemWidth(-1);
+            ImGui::SliderFloat("width", &roadWidth_, 32.0f, 1024.0f, "%.0f");
+            ImGui::SetNextItemWidth(-1);
+            ImGui::SliderFloat("thickness", &roadThick_, 4.0f, 128.0f, "%.0f");
+            ImGui::PushStyleColor(ImGuiCol_Text, pb::ui::col::dim);
+            ImGui::TextWrapped("Click points in a 2D view. Enter builds the "
+                               "curve, Esc cancels.");
+            ImGui::PopStyleColor();
+            if (roadPts_.size() >= 2 && ImGui::Button("Build road now", ImVec2(-1, 0)))
+                finalizeRoad();
+        }
         ImGui::Dummy(ImVec2(0, 6));
         if (ImGui::Button("Cancel", ImVec2(-1, 0))) placing_.clear();
     } else if (selectedEntity_ >= 0 &&

@@ -58,6 +58,21 @@ public:
     void debugPlacePrefab(const std::string& p) { placePrefab(p, glm::vec3(0)); }
     void debugDumpProps();
     void debugNoDecompile() { suppressAutoDecompile_ = true; }
+    void debugRoad() {
+        doc_.newBlank("roadtest");
+        history_.reset(doc_);
+        showWelcome_ = false;
+        roadPts_ = {{-512, -256, 0}, {-128, 256, 0}, {256, -128, 0}, {640, 320, 0}};
+        finalizeRoad();
+        frameAllViews();
+    }
+    void debugHill() {
+        doc_.newBlank("hilltest");
+        history_.reset(doc_);
+        showWelcome_ = false;
+        placePiece("Hill", glm::vec3(0, 0, 0));
+        frameAllViews();
+    }
     void debugNewBlank() {
         doc_.newBlank("untitled");
         history_.reset(doc_);
@@ -183,6 +198,8 @@ private:
     void applyToTexFaces(const std::function<void(map::BrushFace&)>& fn,
                          const char* undoLabel, bool commit);
     void placePiece(const std::string& piece, const glm::vec3& at);
+    void finalizeRoad();
+    void drawRoadOverlay(ViewPanel& p, float aspect, ImDrawList* dl);
     void placeFgdEntity(const std::string& cls, const glm::vec3& at);
     void tieSelectionToEntity(const std::string& cls);
     glm::vec3 viewPlanePoint(ViewPanel& p, const ImVec2& mouse) const;
@@ -305,6 +322,12 @@ private:
     bool snap_ = true;
     int kitTab_ = 0;
     std::string placing_;
+    float hillRadius_ = 384.0f, hillHeight_ = 320.0f, hillRough_ = 0.32f;
+    int hillLayers_ = 7;
+    // Curvy-road spline tool
+    std::vector<glm::vec3> roadPts_;
+    bool roadActive_ = false;
+    float roadWidth_ = 192.0f, roadThick_ = 16.0f;
 
     // Background BSP -> VMF decompile.
     std::thread decompileThread_;

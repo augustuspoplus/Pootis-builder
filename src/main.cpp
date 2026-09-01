@@ -49,6 +49,7 @@ struct Options {
     bool noDecompile = false;
     float cordon = -1.0f;
     bool newBlank = false;
+    int shape = 0;  // 1=hill 2=road
     bool dumpFgd = false;
     std::string dumpFgdClass;
     std::string importObjPath;
@@ -91,6 +92,8 @@ Options parseArgs(int argc, char** argv) {
         else if (a == "--dump-props") o.dumpProps = true;
         else if (a == "--no-decompile") o.noDecompile = true;
         else if (a == "--new-map") o.newBlank = true;
+        else if (a == "--hill") o.shape = 1;
+        else if (a == "--road") o.shape = 2;
         else if (a == "--cordon") o.cordon = static_cast<float>(std::atof(next("768").c_str()));
         else if (a == "--workshop") o.workshop = true;
         else if (a == "--dump-fgd") { o.dumpFgd = true; o.dumpFgdClass = next(""); }
@@ -124,6 +127,8 @@ int runHeadlessScreenshot(const Options& opt, GLFWwindow* window, float uiScale)
     if (opt.selectSolid >= 0) editor.debugSelectWorldSolid(opt.selectSolid);
     if (opt.selectEnt >= 0) editor.debugSelectEntity(opt.selectEnt);
     if (opt.newBlank) editor.debugNewBlank();
+    if (opt.shape == 1) editor.debugHill();
+    if (opt.shape == 2) editor.debugRoad();
     if (opt.cordon > 0.0f) editor.debugCordon(opt.cordon);
     if (opt.compile) editor.debugStartCompile(true);
     if (opt.subDemo) editor.debugSubObjectDemo(0, opt.subDemoMode);
