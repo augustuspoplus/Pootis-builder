@@ -130,6 +130,8 @@ private:
     void drawMapCheckPanel();
     void runMapCheck();
     void drawCommandPalette();
+    void drawLogPanel();
+    void drawSelectionDims(ViewPanel& p, float aspect, ImDrawList* dl);
     void autosaveTick();
     void writeBackup(const std::string& vmfPath);
     void handleViewportInput(ViewPanel& p);
@@ -196,6 +198,13 @@ private:
     double lastAutosave_ = 0.0;
     bool autosaveOn_ = true;
     float autosaveMins_ = 5.0f;
+    bool logAutoScroll_ = true;
+    size_t logSeen_ = 0;
+
+    // Camera bookmarks (per 3D-view state) + go-to-coordinate.
+    struct CamMark { bool set = false; glm::vec3 pos{0}; float yaw = 0, pitch = 0; };
+    std::array<CamMark, 6> camMarks_;
+    glm::vec3 gotoCoord_{0};
 
     char outlinerFilter_[128] = {0};
     char materialFilter_[128] = {0};

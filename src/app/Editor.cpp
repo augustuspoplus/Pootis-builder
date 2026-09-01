@@ -284,6 +284,7 @@ void Editor::frame() {
         drawEntityCatalog();
         drawHistoryPanel();
         drawMapCheckPanel();
+        drawLogPanel();
     }
     for (auto& v : views_) drawViewportPanel(v);
     drawStatusBar();
@@ -335,6 +336,7 @@ void Editor::buildDockLayout(unsigned int dockId, const ImVec2& size) {
         ImGui::DockBuilderDockWindow("Entities", left);
         ImGui::DockBuilderDockWindow("History", left);
         ImGui::DockBuilderDockWindow("Map Check", left);
+        ImGui::DockBuilderDockWindow("Log", left);
         ImGui::DockBuilderDockWindow("3D View", tl);
         ImGui::DockBuilderDockWindow("Top (x/y)", tr);
         ImGui::DockBuilderDockWindow("Front (x/z)", bl);
@@ -537,6 +539,42 @@ void Editor::drawViewMenuPopup() {
         ImGui::SetNextItemWidth(140);
         ImGui::SliderFloat("every (min)", &autosaveMins_, 1.0f, 30.0f, "%.0f");
         ImGui::TextDisabled("writes <map>.autosave.vmf + rolling .bak1-3 on save");
+        ImGui::EndMenu();
+    }
+    if (ImGui::BeginMenu(ICON_FA_CAMERA "  Camera")) {
+        Camera& c3d = views_[0].camera;
+        ImGui::TextDisabled("bookmarks");
+        for (int i = 0; i < 6; ++i) {
+            ImGui::PushID(i);
+            char lbl[32];
+            std::snprintf(lbl, sizeof(lbl), "Slot %d%s", i + 1,
+                          camMarks_[i].set ? "" : "  (empty)");
+            if (ImGui::MenuItem(lbl, nullptr, false, true)) {
+                if (camMarks_[i].set) {
+                    c3d.pos = camMarks_[i].pos;
+                    c3d.yawDeg = camMarks_[i].yaw;
+                    c3d.pitchDeg = camMarks_[i].pitch;
+                }
+            }
+            ImGui::SameLine();
+            if (ImGui::SmallButton("set")) {
+                camMarks_[i] = {true, c3d.pos, c3d.yawDeg, c3d.pitchDeg};
+                status_ = fmt("Camera bookmark %d saved", i + 1);
+            }
+            ImGui::PopID();
+        }
+        ImGui::Separator();
+        ImGui::TextDisabled("go to coordinate");
+        ImGui::SetNextItemWidth(180);
+        ImGui::DragFloat3("##goto", &gotoCoord_.x, 1.0f, 0, 0, "%.0f");
+        if (ImGui::MenuItem("Jump there")) {
+            for (auto& v : views_) {
+                if (v.kind == ViewKind::Perspective)
+                    v.camera.pos = gotoCoord_ - v.camera.forward() * 300.0f;
+                else
+                    v.camera.orthoCenter = gotoCoord_;
+            }
+        }
         ImGui::EndMenu();
     }
     ImGui::Separator();
@@ -745,6 +783,7 @@ void Editor::drawViewportPanel(ViewPanel& p) {
     drawSubObjectOverlay(p, aspect, dl);
     drawFaceOverlay(p, aspect, dl);
     drawClipOverlay(p, aspect, dl);
+    drawSelectionDims(p, aspect, dl);
 
     if (!hasMap() && p.kind == ViewKind::Perspective) {
         const char* msg = "Open a .bsp  —  File > Open BSP  (Ctrl+O)  or drag one in";
@@ -4091,6 +4130,75 @@ void Editor::writeBackup(const std::string& vmfPath) {
         if (fs::exists(bak(n), ec))
             fs::rename(bak(n), bak(n + 1), ec);
     fs::copy_file(vmfPath, bak(1), fs::copy_options::overwrite_existing, ec);
+}
+
+void Editor::drawLogPanel() {
+    ImGui::Begin("Log");
+    ImGui::Checkbox("follow", &logAutoScroll_);
+    ImGui::SameLine();
+    if (ImGui::SmallButton("copy all")) {
+        std::string all;
+        for (const auto& l : logTail(2000)) all += l.text + "\n";
+        ImGui::SetClipboardText(all.c_str());
+    }
+    ImGui::Separator();
+    if (pb::ui::fontMono) ImGui::PushFont(pb::ui::fontMono);
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, pb::ui::col::bg0);
+    if (ImGui::BeginChild("##log", ImVec2(0, 0), ImGuiChildFlags_Borders)) {
+        const auto lines = logTail(800);
+        ImGuiListClipper clip;
+        clip.Begin((int)lines.size());
+        while (clip.Step())
+            for (int i = clip.DisplayStart; i < clip.DisplayEnd; ++i) {
+                const auto& l = lines[i];
+                const ImVec4 c = l.level == LogLevel::Error ? pb::ui::col::warn
+                                 : l.level == LogLevel::Warn ? pb::ui::col::acc
+                                                             : pb::ui::col::dim;
+                ImGui::PushStyleColor(ImGuiCol_Text, c);
+                ImGui::TextUnformatted(l.text.c_str());
+                ImGui::PopStyleColor();
+            }
+        const size_t seq = logSeq();
+        if (logAutoScroll_ && seq != logSeen_) {
+            ImGui::SetScrollHereY(1.0f);
+            logSeen_ = seq;
+        }
+    }
+    ImGui::EndChild();
+    ImGui::PopStyleColor();
+    if (pb::ui::fontMono) ImGui::PopFont();
+    ImGui::End();
+}
+
+void Editor::drawSelectionDims(ViewPanel& p, float aspect, ImDrawList* dl) {
+    if (p.kind == ViewKind::Perspective || selection_.empty()) return;
+    glm::vec3 mn(1e30f), mx(-1e30f);
+    for (const auto& r : selection_)
+        if (const map::Solid* s = doc_.resolve(r)) {
+            mn = glm::min(mn, s->boundsMin);
+            mx = glm::max(mx, s->boundsMax);
+        }
+    if (mn.x > mx.x) return;
+    const glm::mat4 vp = p.camera.proj(aspect) * p.camera.view();
+    auto pr = [&](const glm::vec3& w, bool& ok) {
+        return projectPt(p.kind, vp, p.contentMin, p.contentSize, w, ok);
+    };
+    bool a, b;
+    const ImVec2 s0 = pr(mn, a);
+    const ImVec2 s1 = pr(mx, b);
+    if (!a || !b) return;
+    const glm::vec3 rt = p.camera.orthoRightAxis(), up = p.camera.orthoUpAxis();
+    const float w = std::fabs(glm::dot(mx - mn, rt));
+    const float h = std::fabs(glm::dot(mx - mn, up));
+    const float x0 = std::min(s0.x, s1.x), x1 = std::max(s0.x, s1.x);
+    const float y0 = std::min(s0.y, s1.y), y1 = std::max(s0.y, s1.y);
+    const ImU32 c = IM_COL32(255, 210, 140, 220);
+    char b1[32], b2[32];
+    std::snprintf(b1, sizeof(b1), "%.0f", w);
+    std::snprintf(b2, sizeof(b2), "%.0f", h);
+    dl->AddText(ImVec2((x0 + x1) * 0.5f - ImGui::CalcTextSize(b1).x * 0.5f, y0 - 16), c, b1);
+    dl->AddText(ImVec2(x1 + 4, (y0 + y1) * 0.5f - 7), c, b2);
+    dl->AddRect(ImVec2(x0, y0), ImVec2(x1, y1), IM_COL32(255, 210, 140, 90));
 }
 
 void Editor::autosaveTick() {
