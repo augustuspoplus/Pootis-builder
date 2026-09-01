@@ -704,38 +704,157 @@ void Editor::drawEntityTags(ViewPanel& p, float aspect, ImDrawList* dl) {
     const ImVec2 tl(p.contentMin.x, p.contentMin.y);
     const ImVec2 br(tl.x + p.contentSize.x, tl.y + p.contentSize.y);
 
-    // Greedy declutter: a label is drawn only if no earlier label sits within
-    // ~46px of it (the selected entity always wins).
+    // Project a world point to viewport pixels; ok=false when behind the eye.
+    auto project = [&](const glm::vec3& w, bool& ok) -> ImVec2 {
+        const glm::vec4 c = vp * glm::vec4(w, 1.0f);
+        ok = c.w > 1e-4f;
+        if (!ok) return {};
+        return ImVec2(tl.x + (c.x / c.w * 0.5f + 0.5f) * p.contentSize.x,
+                      tl.y + (1.0f - (c.y / c.w * 0.5f + 0.5f)) * p.contentSize.y);
+    };
+    auto onScreen = [&](const ImVec2& s) {
+        return s.x >= tl.x - 64 && s.x <= br.x + 64 && s.y >= tl.y - 64 &&
+               s.y <= br.y + 64;
+    };
+    auto entColor = [&](const std::string& cls, glm::vec3 def) {
+        if (const fgd::EntityClass* ec = fgd_.flattened(cls); ec && ec->hasColor)
+            return ec->color;
+        return def;
+    };
+
+    // --- entity centres, by targetname, for connection lines ------------------
+    auto centreOf = [&](const map::MapEntity& e) {
+        if (e.solids.empty()) return e.origin;
+        glm::vec3 mn(1e30f), mx(-1e30f);
+        for (const auto& s : e.solids) {
+            mn = glm::min(mn, s.boundsMin);
+            mx = glm::max(mx, s.boundsMax);
+        }
+        return 0.5f * (mn + mx);
+    };
+    std::vector<glm::vec3> centres(doc_.entities().size());
+    std::vector<std::pair<std::string, glm::vec3>> named;
+    for (size_t i = 0; i < doc_.entities().size(); ++i) {
+        centres[i] = centreOf(doc_.entities()[i]);
+        const std::string tn = doc_.entities()[i].kv.get("targetname");
+        if (!tn.empty()) named.emplace_back(tn, centres[i]);
+    }
+
+    // --- I/O connection lines (drawn first, behind the boxes) ----------------
+    // `linked` collects every entity index at either end of a drawn connection
+    // so the label pass can name just those + the selection.
+    std::vector<char> linked(doc_.entities().size(), 0);
+    const ImU32 wireCol = IM_COL32(196, 150, 230, 165);
+    const ImU32 wireSel = IM_COL32(255, 190, 120, 235);
+    for (size_t i = 0; i < doc_.entities().size(); ++i) {
+        const auto& e = doc_.entities()[i];
+        for (const auto& conn : e.connections) {
+            std::string tgt = conn.second;
+            const size_t comma = tgt.find_first_of(",\x1b");
+            if (comma != std::string::npos) tgt = tgt.substr(0, comma);
+            if (tgt.empty()) continue;
+            for (size_t j = 0; j < doc_.entities().size(); ++j) {
+                if (doc_.entities()[j].kv.get("targetname") != tgt) continue;
+                bool a, b;
+                const ImVec2 s0 = project(centres[i], a);
+                const ImVec2 s1 = project(centres[j], b);
+                if (!a || !b) continue;
+                const bool hot = (int)i == selectedEntity_ || (int)j == selectedEntity_;
+                if (hot) { linked[i] = linked[j] = 1; }
+                dl->AddLine(s0, s1, hot ? wireSel : wireCol, hot ? 2.0f : 1.3f);
+                const ImVec2 d(s1.x - s0.x, s1.y - s0.y);
+                const float L = std::sqrt(d.x * d.x + d.y * d.y);
+                if (L > 1.0f) {
+                    const ImVec2 u(d.x / L, d.y / L), n(-u.y, u.x);
+                    const ImVec2 tip(s1.x - u.x * 13, s1.y - u.y * 13);
+                    dl->AddTriangleFilled(s1, ImVec2(tip.x + n.x * 6, tip.y + n.y * 6),
+                                          ImVec2(tip.x - n.x * 6, tip.y - n.y * 6),
+                                          hot ? wireSel : wireCol);
+                }
+            }
+        }
+    }
+
+    // --- per-entity helper box + label -------------------------------------
+    // Label only the selection, entities wired to it, and (when the map is
+    // small) everything; otherwise just boxes + dots, Hammer-style.
+    const bool labelAll = doc_.entities().size() <= 12 && selectedEntity_ < 0;
     std::vector<ImVec2> labelled;
     auto crowded = [&](const ImVec2& s) {
         for (const auto& q : labelled)
-            if (std::fabs(q.x - s.x) < 46.0f && std::fabs(q.y - s.y) < 16.0f)
+            if (std::fabs(q.x - s.x) < 60.0f && std::fabs(q.y - s.y) < 15.0f)
                 return true;
         return false;
     };
 
     for (int i = 0; i < static_cast<int>(doc_.entities().size()); ++i) {
         const auto& e = doc_.entities()[i];
-        if (!e.solids.empty()) continue;  // brush ents already show as wire
-        const glm::vec4 c = vp * glm::vec4(e.origin, 1.0f);
-        if (c.w <= 1e-4f) continue;
-        const ImVec2 sp(tl.x + (c.x / c.w * 0.5f + 0.5f) * p.contentSize.x,
-                        tl.y + (1.0f - (c.y / c.w * 0.5f + 0.5f)) * p.contentSize.y);
-        if (sp.x < tl.x || sp.x > br.x || sp.y < tl.y || sp.y > br.y) continue;
-
         const bool sel = (i == selectedEntity_);
-        glm::vec3 rgb(0.90f, 0.82f, 0.62f);
-        if (const fgd::EntityClass* ec = fgd_.flattened(e.classname); ec && ec->hasColor)
-            rgb = ec->color;
+        const bool brush = !e.solids.empty();
+
+        bool ok;
+        const ImVec2 sp = project(centres[i], ok);
+        if (!ok || !onScreen(sp)) continue;
+
+        const glm::vec3 rgb = entColor(e.classname, glm::vec3(0.90f, 0.82f, 0.62f));
         const ImU32 col =
             sel ? IM_COL32(255, 170, 80, 255)
                 : IM_COL32((int)(rgb.r * 255), (int)(rgb.g * 255), (int)(rgb.b * 255),
                            235);
+
+        if (!brush) {
+            // Wire box sized from the FGD (fallback to a small cube).
+            glm::vec3 mn(-8), mx(8);
+            if (const fgd::EntityClass* ec = fgd_.flattened(e.classname);
+                ec && ec->hasSize) {
+                mn = ec->sizeMin;
+                mx = ec->sizeMax;
+            }
+            const glm::vec3 o = e.origin;
+            const glm::vec3 cs[8] = {
+                o + glm::vec3(mn.x, mn.y, mn.z), o + glm::vec3(mx.x, mn.y, mn.z),
+                o + glm::vec3(mx.x, mx.y, mn.z), o + glm::vec3(mn.x, mx.y, mn.z),
+                o + glm::vec3(mn.x, mn.y, mx.z), o + glm::vec3(mx.x, mn.y, mx.z),
+                o + glm::vec3(mx.x, mx.y, mx.z), o + glm::vec3(mn.x, mx.y, mx.z)};
+            ImVec2 pv[8];
+            bool all = true;
+            for (int k = 0; k < 8; ++k) {
+                bool cok;
+                pv[k] = project(cs[k], cok);
+                all = all && cok;
+            }
+            if (all) {
+                static const int E[12][2] = {{0, 1}, {1, 2}, {2, 3}, {3, 0},
+                                             {4, 5}, {5, 6}, {6, 7}, {7, 4},
+                                             {0, 4}, {1, 5}, {2, 6}, {3, 7}};
+                const ImU32 boxc = sel ? col
+                                       : IM_COL32((int)(rgb.r * 255), (int)(rgb.g * 255),
+                                                  (int)(rgb.b * 255), 120);
+                for (auto& ed : E)
+                    dl->AddLine(pv[ed[0]], pv[ed[1]], boxc, sel ? 2.0f : 1.0f);
+            }
+
+            // Facing tick from angles "P Y R" (selected entity only).
+            const std::string ang = sel ? e.kv.get("angles") : std::string();
+            if (!ang.empty()) {
+                float pit = 0, yaw = 0, rol = 0;
+                std::sscanf(ang.c_str(), "%f %f %f", &pit, &yaw, &rol);
+                const float cy = std::cos(yaw * kDeg2Rad), sy = std::sin(yaw * kDeg2Rad);
+                const float cp = std::cos(pit * kDeg2Rad), spp = std::sin(pit * kDeg2Rad);
+                const glm::vec3 dir(cp * cy, cp * sy, -spp);
+                bool eok;
+                const ImVec2 e1 = project(e.origin + dir * 40.0f, eok);
+                if (eok) dl->AddLine(sp, e1, col, sel ? 2.0f : 1.5f);
+            }
+        }
+
         dl->AddRectFilled(ImVec2(sp.x - 3, sp.y - 3), ImVec2(sp.x + 3, sp.y + 3), col);
         if (sel)
             dl->AddRect(ImVec2(sp.x - 6, sp.y - 6), ImVec2(sp.x + 6, sp.y + 6), col, 0,
                         0, 2.0f);
 
+        const bool wantLabel = sel || labelAll || (i < (int)linked.size() && linked[i]);
+        if (!wantLabel) continue;
         if (!sel && crowded(sp)) continue;
         labelled.push_back(sp);
         const std::string& tn = e.kv.get("targetname");
