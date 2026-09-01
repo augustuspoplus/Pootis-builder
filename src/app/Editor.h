@@ -58,6 +58,11 @@ public:
     void debugPlacePrefab(const std::string& p) { placePrefab(p, glm::vec3(0)); }
     void debugDumpProps();
     void debugNoDecompile() { suppressAutoDecompile_ = true; }
+    void debugCordon(float half) {
+        cordonOn_ = true;
+        cordonMin_ = glm::vec3(-half);
+        cordonMax_ = glm::vec3(half);
+    }
     void debugDumpFgd(const std::string& cls);
     void debugImportObj(const std::string& path);  // detail-brush import, headless
     bool saveVmf(const std::string& path);
@@ -134,6 +139,9 @@ private:
     void runMapCheck();
     void drawCommandPalette();
     void drawLogPanel();
+    void drawCordonOverlay(ViewPanel& p, float aspect, ImDrawList* dl);
+    void handleCordonDrag(ViewPanel& p);
+    map::MapDocument buildCompileDoc();   // applies the cordon, adds seal brushes
     void drawPrefabPanel();
     void placePrefab(const std::string& path, const glm::vec3& at);
     void saveSelectionAsPrefab();
@@ -240,6 +248,14 @@ private:
     std::vector<std::pair<map::SolidRef, int>> texFaces_;
     char texMaterial_[128] = "dev/dev_measuregeneric01b";
 
+    // Cordon: compile / preview only a boxed region.
+    bool cordonOn_ = false;
+    bool cordonShow_ = true;
+    glm::vec3 cordonMin_{-1024, -1024, -512};
+    glm::vec3 cordonMax_{1024, 1024, 512};
+    int cordonDragAxis_ = -1;   // 0..5 = -x,+x,-y,+y,-z,+z face being dragged
+    ViewKind cordonDragView_ = ViewKind::Top;
+
     // Clip tool
     bool clipDragging_ = false;
     bool clipArmed_ = false;               // a line has been drawn, awaiting Enter
@@ -304,6 +320,9 @@ private:
     bool compileVrad_ = true;
     bool compileLaunch_ = true;
     bool compileAutoScroll_ = true;
+    bool compilePack_ = false;
+    std::vector<std::string> packFiles_;  // "<bsp/path>|<abs source>"
+    char packAddPath_[512] = {0};
     size_t compileLogSeen_ = 0;
 };
 

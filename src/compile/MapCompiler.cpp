@@ -255,6 +255,31 @@ void MapCompiler::run(std::string vmfPath, CompileOptions opts, GamePaths paths)
         put("\n(skipping vrad — map will be fullbright)");
     }
 
+    // ---- pack custom content with bspzip ----------------------------
+    if (!opts.packFiles.empty() && !cancel_.load()) {
+        stagePrefix("bspzip");
+        const std::string bspzip = (fs::path(paths.binDir) / "bspzip.exe").string();
+        const fs::path listFile = workDir / (name + "_pack.txt");
+        {
+            std::string body;
+            int n = 0;
+            for (const auto& entry : opts.packFiles) {
+                const size_t bar = entry.find('|');
+                if (bar == std::string::npos) continue;
+                body += entry.substr(0, bar) + "\n" + entry.substr(bar + 1) + "\n";
+                ++n;
+            }
+            FILE* f = std::fopen(listFile.string().c_str(), "wb");
+            if (f) { std::fwrite(body.data(), 1, body.size(), f); std::fclose(f); }
+            put("packing " + std::to_string(n) + " file(s)");
+        }
+        const int prc = runProcessStreaming(
+            bspzip, {"-addlist", bsp.string(), listFile.string(), bsp.string()},
+            onLine, &cancel_);
+        if (prc != 0) put("\nbspzip returned " + std::to_string(prc) +
+                          " — content may not be packed");
+    }
+
     // ---- copy into the game -------------------------------------------
     stagePrefix("copy");
     const fs::path dst = fs::path(paths.gameDir) / "maps" / (name + ".bsp");
