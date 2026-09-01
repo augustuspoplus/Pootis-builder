@@ -5,6 +5,7 @@
 #include <cstring>
 #include <filesystem>
 #include <initializer_list>
+#include <unordered_map>
 #include <utility>
 
 #include <imgui.h>
@@ -27,6 +28,7 @@
 #include "map/MapMesh.h"
 #include "publish/Workshop.h"
 #include "map/Raycast.h"
+#include "model/StudioModel.h"
 #include "platform/FileDialog.h"
 
 namespace fs = std::filesystem;
@@ -155,7 +157,8 @@ bool Editor::openMap(const std::string& path) {
     showWelcome_ = false;
 
     // Q1: auto-decompile to editable brushes in the background.
-    if (!decompileRunning_ && decompile::available(executableDir())) {
+    if (!suppressAutoDecompile_ && !decompileRunning_ &&
+        decompile::available(executableDir())) {
         decompileRunning_ = true;
         decompileDone_ = false;
         decompileVmf_.clear();
@@ -198,10 +201,12 @@ void Editor::pollDecompile() {
 }
 
 void Editor::buildAndUpload(const MeshBuildOptions& opts) {
-    if (doc_.active())
+    if (doc_.active()) {
         mesh_ = map::buildDocMesh(doc_, materials_);
-    else
+    } else {
         mesh_ = buildWorldMesh(bsp_, opts);
+        if (meshOpts_.bakeProps) model::bakePropModels(mesh_, sourceFs_);
+    }
     renderer_.upload(mesh_, &materials_);
 
     int textured = 0, missing = 0, shown = 0;
@@ -799,6 +804,10 @@ void Editor::drawViewportPanel(ViewPanel& p) {
 
 void Editor::drawEntityTags(ViewPanel& p, float aspect, ImDrawList* dl) {
     if (!hasDoc() || doc_.entities().empty()) return;
+    // The 3D view stays clean by default on real (often 1000+ entity) decompiled
+    // maps; flip Settings > View menu "Point entities" on to see helpers there
+    // too. The 2D views always show them — that's core Hammer editing utility.
+    if (p.kind == ViewKind::Perspective && !settings_.showPointEntities) return;
     const glm::mat4 vp = p.camera.proj(aspect) * p.camera.view();
     const ImVec2 tl(p.contentMin.x, p.contentMin.y);
     const ImVec2 br(tl.x + p.contentSize.x, tl.y + p.contentSize.y);
@@ -838,28 +847,41 @@ void Editor::drawEntityTags(ViewPanel& p, float aspect, ImDrawList* dl) {
         const std::string tn = doc_.entities()[i].kv.get("targetname");
         if (!tn.empty()) named.emplace_back(tn, centres[i]);
     }
+    std::unordered_multimap<std::string, int> byName;
+    byName.reserve(doc_.entities().size());
+    for (int i = 0; i < (int)doc_.entities().size(); ++i) {
+        const std::string& tn = doc_.entities()[i].kv.get("targetname");
+        if (!tn.empty()) byName.emplace(tn, i);
+    }
 
     // --- I/O connection lines (drawn first, behind the boxes) ----------------
+    // On a small map every wire is useful context; on a real (often 1000+
+    // entity) decompiled map only the selection's own wiring is drawn, or the
+    // view would be an unreadable scribble.
     // `linked` collects every entity index at either end of a drawn connection
     // so the label pass can name just those + the selection.
     std::vector<char> linked(doc_.entities().size(), 0);
+    const bool wireAll = doc_.entities().size() <= 60;
     const ImU32 wireCol = IM_COL32(196, 150, 230, 165);
     const ImU32 wireSel = IM_COL32(255, 190, 120, 235);
     for (size_t i = 0; i < doc_.entities().size(); ++i) {
         const auto& e = doc_.entities()[i];
+        if (e.connections.empty()) continue;
+        if (!wireAll && (int)i != selectedEntity_) continue;
         for (const auto& conn : e.connections) {
             std::string tgt = conn.second;
             const size_t comma = tgt.find_first_of(",\x1b");
             if (comma != std::string::npos) tgt = tgt.substr(0, comma);
             if (tgt.empty()) continue;
-            for (size_t j = 0; j < doc_.entities().size(); ++j) {
-                if (doc_.entities()[j].kv.get("targetname") != tgt) continue;
+            auto range = byName.equal_range(tgt);
+            for (auto it = range.first; it != range.second; ++it) {
+                const int j = it->second;
                 bool a, b;
                 const ImVec2 s0 = project(centres[i], a);
                 const ImVec2 s1 = project(centres[j], b);
                 if (!a || !b) continue;
-                const bool hot = (int)i == selectedEntity_ || (int)j == selectedEntity_;
-                if (hot) { linked[i] = linked[j] = 1; }
+                const bool hot = (int)i == selectedEntity_ || j == selectedEntity_;
+                if (hot) { linked[i] = 1; linked[j] = 1; }
                 dl->AddLine(s0, s1, hot ? wireSel : wireCol, hot ? 2.0f : 1.3f);
                 const ImVec2 d(s1.x - s0.x, s1.y - s0.y);
                 const float L = std::sqrt(d.x * d.x + d.y * d.y);
@@ -2355,6 +2377,26 @@ void Editor::debugSelectEntity(int i) {
         status_ = "Selected entity " + std::to_string(i) + " (" +
                   doc_.entities()[i].classname + ")";
     }
+}
+
+void Editor::debugDumpProps() {
+    std::vector<std::string> seen;
+    for (size_t i = 0; i < mesh_.props.size(); ++i) {
+        const auto& p = mesh_.props[i];
+        if (p.model.empty()) continue;
+        PB_INFO("prop[%zu] '%s'  pos=(%.0f %.0f %.0f) ang=(%.0f %.0f %.0f) scale=%.2f",
+                i, p.model.c_str(), p.pos.x, p.pos.y, p.pos.z, p.anglesPYR.x,
+                p.anglesPYR.y, p.anglesPYR.z, p.scale);
+        if (std::find(seen.begin(), seen.end(), p.model) != seen.end()) continue;
+        seen.push_back(p.model);
+        const model::StudioModel& sm = model::loadStudioModel(sourceFs_, p.model);
+        const glm::vec3 ext = sm.boundsMax - sm.boundsMin;
+        const float span = std::max({ext.x, ext.y, ext.z});
+        if (!sm.ok || span > 500.0f || sm.meshes.size() > 6)
+            model::debugDumpModel(sourceFs_, p.model);
+    }
+    PB_INFO("debugDumpProps: %zu instances, %zu unique models", mesh_.props.size(),
+            seen.size());
 }
 
 void Editor::debugSelectWorldSolid(int i) {

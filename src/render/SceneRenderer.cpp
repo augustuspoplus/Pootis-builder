@@ -339,6 +339,7 @@ void SceneRenderer::drawMarkers(const glm::mat4& vp, const RenderSettings& s, bo
             box.push_back(b);
         };
         for (const auto& p : props_) {
+            if (p.baked) continue;  // real model geometry is in the batches now
             const glm::vec3 c = p.pos;
             glm::vec3 v[8];
             for (int i = 0; i < 8; ++i)
