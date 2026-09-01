@@ -138,6 +138,9 @@ private:
     void pickAt(ViewPanel& p, const glm::vec2& pxInViewport, bool additive);
     void rebuildSelectionWire();
     void clearSelection();
+    void expandSelectionToGroups();   // pull in group-siblings of the picked solids
+    void groupSelection();
+    void ungroupSelection();
     void afterEdit(const char* label);   // re-mesh + record undo + refresh
     void drawGizmo(ViewPanel& p, float aspect);
     void drawEntityTags(ViewPanel& p, float aspect, ImDrawList* dl);

@@ -1969,6 +1969,7 @@ void Editor::pickAt(ViewPanel& p, const glm::vec2& px, bool additive) {
     } else {
         selection_ = {best};
     }
+    expandSelectionToGroups();
     syncSelectedEntity();
     rebuildSelectionWire();
     status_ = std::to_string(selection_.size()) + " brush(es) selected";
@@ -2002,6 +2003,43 @@ void Editor::clearSelection() {
     handlesDirty_ = true;
     subSel_ = -1;
     subDragging_ = false;
+}
+
+void Editor::expandSelectionToGroups() {
+    std::vector<int> groups;
+    for (const auto& r : selection_)
+        if (const map::Solid* s = doc_.resolve(r); s && s->group > 0 && r.entity < 0)
+            if (std::find(groups.begin(), groups.end(), s->group) == groups.end())
+                groups.push_back(s->group);
+    if (groups.empty()) return;
+    const auto& ws = doc_.worldSolids();
+    for (int i = 0; i < (int)ws.size(); ++i) {
+        if (std::find(groups.begin(), groups.end(), ws[i].group) == groups.end())
+            continue;
+        map::SolidRef r{-1, i};
+        if (std::find(selection_.begin(), selection_.end(), r) == selection_.end())
+            selection_.push_back(r);
+    }
+}
+
+void Editor::groupSelection() {
+    int worldSel = 0;
+    for (const auto& r : selection_) if (r.entity < 0) ++worldSel;
+    if (worldSel < 2) { status_ = "Select 2+ world brushes to group."; return; }
+    int gid = 0;
+    for (const auto& s : doc_.worldSolids()) gid = std::max(gid, s.group);
+    ++gid;
+    for (const auto& r : selection_)
+        if (map::Solid* s = doc_.resolve(r); s && r.entity < 0) s->group = gid;
+    afterEdit("Group");
+    status_ = fmt("Grouped %d brushes", worldSel);
+}
+
+void Editor::ungroupSelection() {
+    int n = 0;
+    for (const auto& r : selection_)
+        if (map::Solid* s = doc_.resolve(r); s && s->group > 0) { s->group = 0; ++n; }
+    if (n) { afterEdit("Ungroup"); status_ = "Ungrouped"; }
 }
 
 glm::vec3 Editor::selectionCenter() const {
@@ -3116,6 +3154,18 @@ void Editor::drawBrushInspector() {
     if (ImGui::Button(ICON_FA_CLONE "  Duplicate", ImVec2(-1, 0)))
         duplicateSelection();
     if (ImGui::Button(ICON_FA_TRASH "  Delete", ImVec2(-1, 0))) deleteSelection();
+
+    {
+        bool anyGrouped = false;
+        for (const auto& r : selection_)
+            if (const map::Solid* s = doc_.resolve(r); s && s->group > 0)
+                anyGrouped = true;
+        if (ImGui::Button(ICON_FA_OBJECT_GROUP "  Group", ImVec2(-1, 0)))
+            groupSelection();
+        if (anyGrouped &&
+            ImGui::Button(ICON_FA_OBJECT_UNGROUP "  Ungroup", ImVec2(-1, 0)))
+            ungroupSelection();
+    }
 
     // --- Hollow / Carve ------------------------------------------------------
     ImGui::Dummy(ImVec2(0, 6));
