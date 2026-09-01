@@ -180,6 +180,30 @@ void MapCompiler::run(std::string vmfPath, CompileOptions opts, GamePaths paths)
 
     int rc = 0;
 
+    // ---- studiomdl (imported models -> .mdl) -----------------------------
+    if (!opts.modelQc.empty()) {
+        const std::string studiomdl =
+            (fs::path(paths.binDir) / "studiomdl.exe").string();
+        if (!fs::exists(studiomdl, ec)) {
+            put("\n(no studiomdl.exe — skipping " +
+                std::to_string(opts.modelQc.size()) + " model bake(s))");
+        } else {
+            for (const auto& qc : opts.modelQc) {
+                if (cancel_.load()) break;
+                if (!fs::exists(qc, ec)) { put("  missing qc: " + qc); continue; }
+                stagePrefix("studiomdl");
+                put("  " + qc);
+                rc = runProcessStreaming(
+                    studiomdl,
+                    {"-game", paths.gameDir, "-nop4", "-verbose", qc},
+                    onLine, &cancel_);
+                if (rc != 0)
+                    put("  studiomdl returned " + std::to_string(rc) +
+                        " — the prop may be missing in-game.");
+            }
+        }
+    }
+
     // ---- vbsp -------------------------------------------------------------
     stagePrefix("vbsp");
     rc = runProcessStreaming(

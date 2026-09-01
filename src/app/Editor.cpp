@@ -18,6 +18,8 @@
 #include "core/Log.h"
 #include "gpu/Gl.h"
 #include "decompile/BspSource.h"
+#include "import/ModelImport.h"
+#include "import/ObjModel.h"
 #include "map/MapMesh.h"
 #include "map/Raycast.h"
 #include "platform/FileDialog.h"
@@ -276,6 +278,7 @@ void Editor::frame() {
     for (auto& v : views_) drawViewportPanel(v);
     drawStatusBar();
     drawCompileWindow();
+    drawModelImportDialog();
     drawWelcome();
 
     // Live preview while dragging the gizmo (history is recorded on release).
@@ -353,7 +356,12 @@ void Editor::drawTopBar() {
     if (toolButton(ICON_FA_FOLDER_OPEN "  Open", false, "Open a .bsp  (Ctrl+O)"))
         promptOpenMap();
     ImGui::SameLine(0, 2);
-    if (toolButton(ICON_FA_DOWNLOAD "  Import map")) promptOpenMap();
+    if (toolButton(ICON_FA_DOWNLOAD "  Import")) ImGui::OpenPopup("importMenu");
+    if (ImGui::BeginPopup("importMenu")) {
+        if (ImGui::MenuItem(ICON_FA_MAP "  Map  (.bsp / .vmf)")) promptOpenMap();
+        if (ImGui::MenuItem(ICON_FA_CUBE "  3D model  (.obj)")) openModelImport();
+        ImGui::EndPopup();
+    }
     ImGui::SameLine(0, 2);
     if (toolButton(ICON_FA_FLOPPY_DISK "  Save", false,
                    "Save the map to .vmf  (Ctrl+S,  Ctrl+Shift+S = Save As)")) {
@@ -1274,6 +1282,7 @@ void Editor::startCompile() {
     opts.runVvis = compileVvis_;
     opts.runVrad = compileVrad_;
     opts.launchGame = compileLaunch_;
+    opts.modelQc = pendingModelQc_;
     compileLogSeen_ = 0;
     compiler_.start(doc_.path(), opts, gamePaths_);
     status_ = "Compiling " + doc_.name() + " …";
@@ -1428,6 +1437,192 @@ void kitCards(const KitPiece* pieces, int count, std::string* placing,
 }
 
 }  // namespace
+
+void Editor::debugImportObj(const std::string& path) {
+    if (!doc_.active()) { doc_.newBlank("objtest"); history_.reset(doc_); }
+    modelImportPath_ = path;
+    modelPlaceOpts_.mode = import::ModelPlacement::DetailBrush;
+    reloadModelPreview();
+    doModelImport();
+    showWelcome_ = false;
+    frameAllViews();
+}
+
+void Editor::openModelImport() {
+    const std::string picked = openFileDialog(
+        "Import a 3D model",
+        "Wavefront OBJ (*.obj)\0*.obj\0All files\0*.*\0\0", nullptr);
+    if (picked.empty()) return;
+    modelImportPath_ = picked;
+    modelImportErr_.clear();
+    if (!selection_.empty())
+        modelPlaceOpts_.origin = snapVec(selectionCenter());
+    reloadModelPreview();
+    showModelImport_ = true;
+}
+
+void Editor::reloadModelPreview() {
+    if (modelImportPath_.empty()) return;
+    modelImportErr_.clear();
+    if (!import::loadObj(modelImportPath_, modelLoadOpts_, modelPreview_,
+                         &modelImportErr_))
+        modelPreview_ = import::ObjMesh{};
+}
+
+void Editor::doModelImport() {
+    if (modelPreview_.empty()) {
+        status_ = modelImportErr_.empty() ? "Load a model first." : modelImportErr_;
+        return;
+    }
+    if (!doc_.active()) doc_.newBlank("untitled");
+    std::string err;
+
+    if (modelPlaceOpts_.mode == import::ModelPlacement::DetailBrush) {
+        map::MapEntity ent;
+        if (!import::meshToDetailEntity(modelPreview_, modelPlaceOpts_, doc_, ent,
+                                        &err)) {
+            modelImportErr_ = err;
+            status_ = "Import failed: " + err;
+            return;
+        }
+        doc_.entities().push_back(std::move(ent));
+        const int ei = static_cast<int>(doc_.entities().size()) - 1;
+        selection_.clear();
+        for (size_t s = 0; s < doc_.entities()[ei].solids.size(); ++s)
+            selection_.push_back({ei, static_cast<int>(s)});
+        afterEdit("Import model (detail)");
+        status_ = "Imported " + modelPreview_.name + " as " +
+                  std::to_string(doc_.entities()[ei].solids.size()) +
+                  " detail brushes";
+    } else {
+        std::string stageDir = "PootisBuilder/models";
+        if (const char* la = std::getenv("LOCALAPPDATA"))
+            stageDir = std::string(la) + "/PootisBuilder/models/" +
+                       (doc_.name().empty() ? "untitled" : doc_.name());
+        std::string modelPath, qcPath;
+        if (!import::meshToPropStage(modelPreview_, modelPlaceOpts_, stageDir,
+                                     modelPath, qcPath, &err)) {
+            modelImportErr_ = err;
+            status_ = "Import failed: " + err;
+            return;
+        }
+        map::MapEntity e;
+        e.id = doc_.nextId();
+        e.classname = "prop_static";
+        e.origin = modelPlaceOpts_.origin;
+        e.kv.set("classname", "prop_static");
+        e.kv.set("origin", std::to_string((int)e.origin.x) + " " +
+                               std::to_string((int)e.origin.y) + " " +
+                               std::to_string((int)e.origin.z));
+        e.kv.set("model", modelPath);
+        e.kv.set("solidity", "2");
+        doc_.entities().push_back(std::move(e));
+        if (std::find(pendingModelQc_.begin(), pendingModelQc_.end(), qcPath) ==
+            pendingModelQc_.end())
+            pendingModelQc_.push_back(qcPath);
+        afterEdit("Import model (prop)");
+        status_ = "Staged prop " + modelPath + " — it bakes on the next Build.";
+    }
+    showModelImport_ = false;
+}
+
+void Editor::drawModelImportDialog() {
+    if (!showModelImport_) return;
+    using namespace pb::ui;
+
+    ImGui::SetNextWindowSize(ImVec2(460 * uiScale_, 0), ImGuiCond_Always);
+    if (!ImGui::Begin(ICON_FA_CUBE "  Import 3D model", &showModelImport_,
+                      ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoDocking)) {
+        ImGui::End();
+        return;
+    }
+
+    // File row
+    char buf[512];
+    std::snprintf(buf, sizeof(buf), "%s", modelImportPath_.c_str());
+    ImGui::SetNextItemWidth(-90 * uiScale_);
+    ImGui::InputText("##mpath", buf, sizeof(buf), ImGuiInputTextFlags_ReadOnly);
+    ImGui::SameLine();
+    if (ImGui::Button("Browse…", ImVec2(-1, 0))) {
+        const std::string p = openFileDialog(
+            "Import a 3D model", "Wavefront OBJ (*.obj)\0*.obj\0All files\0*.*\0\0",
+            nullptr);
+        if (!p.empty()) { modelImportPath_ = p; reloadModelPreview(); }
+    }
+
+    if (!modelImportErr_.empty()) {
+        ImGui::PushStyleColor(ImGuiCol_Text, col::warn);
+        ImGui::TextWrapped(ICON_FA_TRIANGLE_EXCLAMATION "  %s", modelImportErr_.c_str());
+        ImGui::PopStyleColor();
+    }
+    if (!modelPreview_.empty()) {
+        const glm::vec3 s = modelPreview_.size();
+        ImGui::PushStyleColor(ImGuiCol_Text, col::faint);
+        ImGui::Text("%zu triangles   ·   %.0f × %.0f × %.0f units",
+                    modelPreview_.tris.size(), s.x, s.y, s.z);
+        ImGui::PopStyleColor();
+    }
+
+    ImGui::Dummy(ImVec2(0, 4));
+    sectionLabel("ORIENTATION & SCALE");
+    bool reload = false;
+    reload |= ImGui::DragFloat("Scale", &modelLoadOpts_.scale, 0.01f, 0.001f,
+                               10000.0f, "%.3f×", ImGuiSliderFlags_Logarithmic);
+    reload |= ImGui::Checkbox("Model is Y-up (convert to Source Z-up)",
+                              &modelLoadOpts_.yUpToZUp);
+    reload |= ImGui::Checkbox("Flip face winding", &modelLoadOpts_.flipWinding);
+    reload |= ImGui::Checkbox("Recompute normals from faces",
+                              &modelLoadOpts_.recomputeNormals);
+    if (reload) reloadModelPreview();
+
+    ImGui::Dummy(ImVec2(0, 4));
+    sectionLabel("PLACE AS");
+    const int mode = static_cast<int>(modelPlaceOpts_.mode);
+    const char* const modes[] = {"Detail brushwork", "Prop model"};
+    const int mr = segmented("mimode", modes, 2, mode, 26 * uiScale_);
+    if (mr >= 0) modelPlaceOpts_.mode = static_cast<import::ModelPlacement>(mr);
+
+    if (modelPlaceOpts_.mode == import::ModelPlacement::DetailBrush) {
+        ImGui::PushStyleColor(ImGuiCol_Text, col::faint);
+        ImGui::TextWrapped(
+            "One convex brush per triangle, grouped as func_detail and written "
+            "straight into the .vmf. Best for low-poly / blocky meshes.");
+        ImGui::PopStyleColor();
+        char m[256];
+        std::snprintf(m, sizeof(m), "%s", modelPlaceOpts_.material.c_str());
+        ImGui::SetNextItemWidth(-1);
+        if (ImGui::InputText("Material", m, sizeof(m))) modelPlaceOpts_.material = m;
+        ImGui::DragFloat("Shell depth", &modelPlaceOpts_.shellThickness, 0.25f, 0.5f,
+                         64.0f, "%.1f u");
+        ImGui::DragInt("Max triangles", &modelPlaceOpts_.maxTris, 32, 64, 32768);
+        if ((int)modelPreview_.tris.size() > modelPlaceOpts_.maxTris) {
+            ImGui::PushStyleColor(ImGuiCol_Text, col::warn);
+            ImGui::TextWrapped(ICON_FA_TRIANGLE_EXCLAMATION
+                               "  Over the limit — simplify the mesh or raise it.");
+            ImGui::PopStyleColor();
+        }
+    } else {
+        ImGui::PushStyleColor(ImGuiCol_Text, col::faint);
+        ImGui::TextWrapped(
+            "Staged as an SMD + QC and baked to models/%s/<name>.mdl by "
+            "studiomdl on the next Build. Placed as prop_static.",
+            modelPlaceOpts_.propDir.c_str());
+        ImGui::PopStyleColor();
+    }
+
+    ImGui::Dummy(ImVec2(0, 4));
+    ImGui::DragFloat3("Origin", &modelPlaceOpts_.origin.x, 1.0f, 0, 0, "%.0f");
+
+    ImGui::Dummy(ImVec2(0, 8));
+    ImGui::BeginDisabled(modelPreview_.empty());
+    if (ImGui::Button(ICON_FA_CHECK "  Import", ImVec2(140 * uiScale_, 0)))
+        doModelImport();
+    ImGui::EndDisabled();
+    ImGui::SameLine();
+    if (ImGui::Button("Cancel", ImVec2(100 * uiScale_, 0))) showModelImport_ = false;
+
+    ImGui::End();
+}
 
 void Editor::drawBuildKit() {
     ImGui::Begin("Build Kit");

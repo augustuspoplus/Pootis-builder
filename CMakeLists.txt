@@ -12,6 +12,10 @@ endif()
 
 include(FetchContent)
 set(FETCHCONTENT_QUIET OFF)
+# Once the deps are cloned, never let a reconfigure hit the network again
+# (adding a source file re-runs CMake via CONFIGURE_DEPENDS, and a git stall
+# there would hang the whole build).
+set(FETCHCONTENT_UPDATES_DISCONNECTED ON)
 
 # ---------------------------------------------------------------------------
 # Dependencies
