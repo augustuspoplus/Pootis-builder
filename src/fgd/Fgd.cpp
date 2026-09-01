@@ -456,10 +456,16 @@ const EntityClass* Fgd::flattened(const std::string& name) const {
     out.inputs.clear();
     out.outputs.clear();
 
-    auto addVar = [&](const Var& v) {
+    auto addVar = [&](const Var& v, bool inherited) {
         for (auto& e : out.vars)
-            if (e.key == v.key) { e = v; return; }
+            if (e.key == v.key) {
+                Var merged = v;
+                merged.inherited = e.inherited && inherited;
+                e = merged;
+                return;
+            }
         out.vars.push_back(v);
+        out.vars.back().inherited = inherited;
     };
     auto addIO = [&](std::vector<IO>& dst, const IO& io) {
         for (auto& e : dst)
@@ -467,20 +473,21 @@ const EntityClass* Fgd::flattened(const std::string& name) const {
         dst.push_back(io);
     };
 
-    // Depth-first over bases (in declaration order), then this class.
+    // Depth-first over bases (in declaration order), then this class. Vars from
+    // `name` itself are "own"; anything reached through a base is "inherited".
     std::vector<std::string> stack;
-    auto expand = [&](const std::string& cn, auto&& self) -> void {
+    auto expand = [&](const std::string& cn, bool inherited, auto&& self) -> void {
         const EntityClass* c = find(cn);
         if (!c) return;
         if (std::find(stack.begin(), stack.end(), cn) != stack.end()) return;
         stack.push_back(cn);
-        for (const auto& b : c->bases) self(b, self);
-        for (const auto& v : c->vars) addVar(v);
+        for (const auto& b : c->bases) self(b, true, self);
+        for (const auto& v : c->vars) addVar(v, inherited);
         for (const auto& io : c->inputs) addIO(out.inputs, io);
         for (const auto& io : c->outputs) addIO(out.outputs, io);
         stack.pop_back();
     };
-    expand(name, expand);
+    expand(name, false, expand);
 
     // Inherit a model/color/size from a base if this class didn't set one.
     if (out.studioModel.empty() || !out.hasColor || !out.hasSize) {

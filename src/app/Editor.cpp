@@ -2593,15 +2593,35 @@ void Editor::drawEntityProperties() {
     ImGui::Dummy(ImVec2(0, 4));
     sectionLabel("PROPERTIES");
     const fgd::Var* spawnflags = nullptr;
+    int inheritedShown = 0;
     if (ec) {
+        // This class's own keys first (the ones you usually came here to set).
         for (const auto& v : ec->vars) {
             if (v.type == fgd::VarType::Flags || v.key == "spawnflags") {
                 spawnflags = &v;
                 continue;
             }
-            if (v.key == "targetname") continue;
+            if (v.key == "targetname" || v.inherited) continue;
             if (!match(v)) continue;
             if (pb::ui::fgdField(v, e.kv, names, &committed)) docMeshDirty_ = true;
+        }
+        for (const auto& v : ec->vars)
+            if (v.inherited && v.key != "targetname" &&
+                v.type != fgd::VarType::Flags && match(v))
+                ++inheritedShown;
+
+        if (inheritedShown > 0) {
+            ImGui::Dummy(ImVec2(0, 2));
+            if (ImGui::CollapsingHeader("Shared keys (angles, parent, render, …)",
+                                        filt.empty() ? 0
+                                                     : ImGuiTreeNodeFlags_DefaultOpen)) {
+                for (const auto& v : ec->vars) {
+                    if (v.inherited && v.key != "targetname" &&
+                        v.type != fgd::VarType::Flags && match(v))
+                        if (pb::ui::fgdField(v, e.kv, names, &committed))
+                            docMeshDirty_ = true;
+                }
+            }
         }
     }
 
