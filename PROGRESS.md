@@ -19,11 +19,15 @@ Q2 = Simple-mode kit builds new maps (prioritised). Also doing section G (QoL).
 ## 3D view / editing UX (done this pass)
 - Infinite ground grid in the 3D view (distance fade, red +X / green +Y axes)
   + a world-origin ring marker while the map is empty.
-- Hammer-style 8-handle bounding-box resize in the 2D views (corner = 2 axes,
-  edge = 1; snapshot + affine remap; one undo step).
+- Drag-to-resize: 8-handle bounding box in the 2D views (corner = 2 axes,
+  edge = 1) AND 6 face-centre handles in the 3D view (ray vs world-axis).
+  Snapshot + affine remap, grid-snapped, one "Resize" undo step.
 - Models browser — 16k+ game models, filterable thumbnail grid, click-to-drop
   as prop_static.
 - Build Kit cards size to their text (no more clipped hints).
+- New Shapes: **Hill** (faceted mound of jittered octagonal prisms, r/h/
+  roughness/layers sliders) and **Curvy road** (click points -> Catmull-Rom
+  spline -> ribbon of oriented road brushes). Both land as one func_detail.
 
 ## Now / next
 - **Milestones A–F, C, D done. Section G well underway** (see below).
