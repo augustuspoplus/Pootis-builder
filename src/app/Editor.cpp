@@ -962,6 +962,70 @@ void Editor::placePiece(const std::string& piece, const glm::vec3& atRaw) {
     status_ = "Placed " + piece;
 }
 
+void Editor::placeFgdEntity(const std::string& cls, const glm::vec3& atRaw) {
+    if (!doc_.active()) doc_.newBlank("untitled");
+    const glm::vec3 at = snapVec(atRaw);
+    const fgd::EntityClass* ec = fgd_.flattened(cls);
+
+    map::MapEntity e;
+    e.id = doc_.nextId();
+    e.classname = cls;
+    e.origin = at;
+    e.kv.set("classname", cls);
+    e.kv.set("origin", std::to_string((int)at.x) + " " + std::to_string((int)at.y) +
+                           " " + std::to_string((int)at.z));
+    // Seed non-empty FGD defaults so the entity is valid out of the box.
+    if (ec)
+        for (const auto& v : ec->vars)
+            if (!v.defaultValue.empty() && v.key != "origin" && v.key != "targetname")
+                e.kv.set(v.key, v.defaultValue);
+
+    const bool solid = ec && ec->isSolid();
+    if (solid) {
+        map::Solid s = map::Solid::makeBox(at - glm::vec3(64, 64, 0),
+                                           at + glm::vec3(64, 64, 128),
+                                           "tools/toolstrigger");
+        s.id = doc_.nextId();
+        e.solids.push_back(std::move(s));
+    }
+
+    doc_.entities().push_back(std::move(e));
+    selectedEntity_ = static_cast<int>(doc_.entities().size()) - 1;
+    selection_.clear();
+    afterEdit(("Add " + cls).c_str());
+    status_ = "Placed " + cls;
+}
+
+void Editor::tieSelectionToEntity(const std::string& cls) {
+    // Move the selected world solids into a new brush entity.
+    std::vector<int> idx;
+    for (const auto& r : selection_)
+        if (r.entity < 0 && r.solid >= 0) idx.push_back(r.solid);
+    if (idx.empty()) return;
+    std::sort(idx.rbegin(), idx.rend());
+
+    map::MapEntity e;
+    e.id = doc_.nextId();
+    e.classname = cls;
+    e.kv.set("classname", cls);
+    if (const fgd::EntityClass* ec = fgd_.flattened(cls))
+        for (const auto& v : ec->vars)
+            if (!v.defaultValue.empty() && v.key != "origin")
+                e.kv.set(v.key, v.defaultValue);
+    for (int i : idx) {
+        e.solids.push_back(doc_.worldSolids()[i]);
+        doc_.worldSolids().erase(doc_.worldSolids().begin() + i);
+    }
+    std::reverse(e.solids.begin(), e.solids.end());
+    e.origin = e.solids.empty() ? glm::vec3(0) : e.solids.front().center();
+
+    doc_.entities().push_back(std::move(e));
+    selection_.clear();
+    selectedEntity_ = static_cast<int>(doc_.entities().size()) - 1;
+    afterEdit(("Tie to " + cls).c_str());
+    status_ = "Tied " + std::to_string(idx.size()) + " brush(es) to " + cls;
+}
+
 void Editor::handleViewportInput(ViewPanel& p) {
     if (!p.hovered) return;
     ImGuiIO& io = ImGui::GetIO();
@@ -970,7 +1034,11 @@ void Editor::handleViewportInput(ViewPanel& p) {
     // Kit placement: click drops the pending piece.
     if (!placing_.empty() && ImGui::IsMouseReleased(ImGuiMouseButton_Left) &&
         !ImGui::IsMouseDragPastThreshold(ImGuiMouseButton_Left, 4.0f)) {
-        placePiece(placing_, viewPlanePoint(p, ImGui::GetMousePos()));
+        const glm::vec3 at = viewPlanePoint(p, ImGui::GetMousePos());
+        if (placing_.rfind("@ent:", 0) == 0)
+            placeFgdEntity(placing_.substr(5), at);
+        else
+            placePiece(placing_, at);
         if (!io.KeyShift) placing_.clear();  // hold Shift to place several
         return;
     }
@@ -1435,6 +1503,14 @@ void Editor::drawCompileWindow() {
     if (fontMono) ImGui::PopFont();
 
     ImGui::End();
+}
+
+void Editor::debugPlaceEntity(const std::string& cls) {
+    if (!doc_.active()) { doc_.newBlank("enttest"); history_.reset(doc_); }
+    placeFgdEntity(cls, glm::vec3(0, 0, 0));
+    showWelcome_ = false;
+    PB_INFO("placed %s -> entity %d, %zu keys", cls.c_str(), selectedEntity_,
+            selectedEntity_ >= 0 ? doc_.entities()[selectedEntity_].kv.pairs.size() : 0);
 }
 
 void Editor::debugSelectEntity(int i) {
@@ -2171,8 +2247,10 @@ void Editor::drawBrushInspector() {
 void Editor::drawSelectionPanel() {
     ImGui::Begin("Selection");
     if (!placing_.empty()) {
+        const char* pn = placing_.rfind("@ent:", 0) == 0 ? placing_.c_str() + 5
+                                                         : placing_.c_str();
         if (pb::ui::fontUiMed) ImGui::PushFont(pb::ui::fontUiMed);
-        ImGui::Text(ICON_FA_ARROW_POINTER "  Placing %s", placing_.c_str());
+        ImGui::Text(ICON_FA_ARROW_POINTER "  Placing %s", pn);
         if (pb::ui::fontUiMed) ImGui::PopFont();
         ImGui::PushStyleColor(ImGuiCol_Text, pb::ui::col::dim);
         ImGui::TextWrapped("Click in a viewport to drop it.");
@@ -2576,43 +2654,98 @@ void Editor::drawMaterialList() {
 }
 
 void Editor::drawEntityCatalog() {
+    using namespace pb::ui;
     ImGui::Begin("Entities");
-    if (!hasMap()) {
-        ImGui::TextDisabled("No map loaded.");
+
+    if (fgd_.empty()) {
+        ImGui::TextDisabled("No FGD loaded — entity catalogue unavailable.");
         ImGui::End();
         return;
     }
-    // Count classes.
-    std::vector<std::pair<std::string, int>> counts;
-    for (const auto& ent : bsp_.entities()) {
-        auto it = ent.find("classname");
-        if (it == ent.end()) continue;
-        auto f = std::find_if(counts.begin(), counts.end(),
-                              [&](auto& c) { return c.first == it->second; });
-        if (f == counts.end())
-            counts.emplace_back(it->second, 1);
-        else
-            f->second++;
+
+    ImGui::SetNextItemWidth(-1);
+    ImGui::InputTextWithHint("##entfilter", ICON_FA_MAGNIFYING_GLASS " search entities",
+                             materialFilter_, sizeof(materialFilter_));
+    const std::string filt = materialFilter_;
+    auto icontains = [](const std::string& h, const std::string& n) {
+        if (n.empty()) return true;
+        auto it = std::search(h.begin(), h.end(), n.begin(), n.end(),
+                              [](char a, char b) {
+                                  return std::tolower(a) == std::tolower(b);
+                              });
+        return it != h.end();
+    };
+
+    if (!placing_.empty() && placing_.rfind("@ent:", 0) == 0) {
+        ImGui::PushStyleColor(ImGuiCol_Text, col::acc);
+        ImGui::Text(ICON_FA_ARROW_POINTER "  Placing %s — click a viewport",
+                    placing_.c_str() + 5);
+        ImGui::PopStyleColor();
+        if (ImGui::SmallButton("Cancel##ent")) placing_.clear();
+        ImGui::Separator();
     }
-    std::sort(counts.begin(), counts.end(),
-              [](auto& a, auto& b) { return a.second > b.second; });
-    ImGui::Text("%zu entities, %zu classes", bsp_.entities().size(), counts.size());
-    ImGui::Separator();
-    if (ImGui::BeginTable("classes", 2,
-                          ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY |
-                              ImGuiTableFlags_Borders)) {
-        ImGui::TableSetupColumn("class");
-        ImGui::TableSetupColumn("count", ImGuiTableColumnFlags_WidthFixed, 60.0f);
-        ImGui::TableHeadersRow();
-        for (auto& c : counts) {
-            ImGui::TableNextRow();
-            ImGui::TableNextColumn();
-            ImGui::TextUnformatted(c.first.c_str());
-            ImGui::TableNextColumn();
-            ImGui::Text("%d", c.second);
+
+    const bool haveBrushSel =
+        !selection_.empty() &&
+        std::all_of(selection_.begin(), selection_.end(),
+                    [](const map::SolidRef& r) { return r.entity < 0; });
+
+    auto row = [&](const std::string& cls, bool solid) {
+        const fgd::EntityClass* ec = fgd_.find(cls);
+        if (!filt.empty() && !icontains(cls, filt) &&
+            !(ec && icontains(ec->description, filt)))
+            return;
+        ImGui::PushID(cls.c_str());
+        const bool sel = placing_ == "@ent:" + cls;
+        if (ImGui::Selectable("##r", sel, 0, ImVec2(0, 30))) {
+            if (solid && haveBrushSel) {
+                tieSelectionToEntity(cls);
+                placing_.clear();
+            } else {
+                placing_ = "@ent:" + cls;
+                status_ = "Placing " + cls + " — click in a viewport.";
+            }
         }
-        ImGui::EndTable();
+        ImGui::SameLine(6);
+        if (ec && ec->hasColor) {
+            ImGui::ColorButton(
+                "##c",
+                ImVec4(ec->color.r, ec->color.g, ec->color.b, 1.0f),
+                ImGuiColorEditFlags_NoTooltip | ImGuiColorEditFlags_NoBorder,
+                ImVec2(12, 12));
+            ImGui::SameLine(0, 6);
+        } else {
+            ImGui::PushStyleColor(ImGuiCol_Text, col::faint);
+            ImGui::TextUnformatted(solid ? ICON_FA_CUBE : ICON_FA_LIGHTBULB);
+            ImGui::PopStyleColor();
+            ImGui::SameLine(0, 6);
+        }
+        ImGui::TextUnformatted(cls.c_str());
+        if (ec && !ec->description.empty()) {
+            ImGui::SameLine(0, 8);
+            ImGui::PushStyleColor(ImGuiCol_Text, col::faint);
+            ImGui::TextUnformatted(ec->description.c_str());
+            ImGui::PopStyleColor();
+        }
+        ImGui::PopID();
+    };
+
+    if (haveBrushSel) {
+        ImGui::PushStyleColor(ImGuiCol_Text, col::faint);
+        ImGui::TextWrapped("%zu brush(es) selected — pick a brush entity to tie "
+                           "them to it.", selection_.size());
+        ImGui::PopStyleColor();
     }
+
+    if (ImGui::BeginChild("entlist", ImVec2(0, 0))) {
+        if (ImGui::CollapsingHeader("Point entities", ImGuiTreeNodeFlags_DefaultOpen)) {
+            for (const auto& c : fgd_.pointClasses()) row(c, false);
+        }
+        if (ImGui::CollapsingHeader("Brush entities", ImGuiTreeNodeFlags_DefaultOpen)) {
+            for (const auto& c : fgd_.solidClasses()) row(c, true);
+        }
+    }
+    ImGui::EndChild();
     ImGui::End();
 }
 

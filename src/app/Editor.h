@@ -43,6 +43,7 @@ public:
     void setProMode() { mode_ = Mode::Pro; layoutDirty_ = true; }
     void debugSelectWorldSolid(int i);  // test hook for headless screenshots
     void debugSelectEntity(int i);
+    void debugPlaceEntity(const std::string& cls);
     void debugBuildSampleMap();
     void debugStartCompile(bool fast);
     void debugShowWorkshop();
@@ -124,6 +125,8 @@ private:
     void drawGizmo(ViewPanel& p, float aspect);
     void handleBlockTool(ViewPanel& p);
     void placePiece(const std::string& piece, const glm::vec3& at);
+    void placeFgdEntity(const std::string& cls, const glm::vec3& at);
+    void tieSelectionToEntity(const std::string& cls);
     glm::vec3 viewPlanePoint(ViewPanel& p, const ImVec2& mouse) const;
     glm::vec3 snapVec(const glm::vec3& v) const;
     void nudgeSelection(const glm::vec3& worldDelta);
