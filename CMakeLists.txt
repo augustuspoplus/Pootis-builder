@@ -40,7 +40,19 @@ FetchContent_Declare(stb
     GIT_TAG master
     GIT_SHALLOW ON)
 
+FetchContent_Declare(imguizmo
+    GIT_REPOSITORY https://github.com/CedricGuillemet/ImGuizmo.git
+    GIT_TAG master
+    GIT_SHALLOW ON)
+
 FetchContent_MakeAvailable(glfw imgui glm stb)
+
+# ImGuizmo ships its own CMakeLists now; populate only (no add_subdirectory)
+# and compile the one file we need into the imgui lib.
+FetchContent_GetProperties(imguizmo)
+if(NOT imguizmo_POPULATED)
+    FetchContent_Populate(imguizmo)
+endif()
 
 # ---------------------------------------------------------------------------
 # glad GL loader — glfw's deps/ folder ships the glad2 loader as a single
@@ -68,9 +80,12 @@ add_library(imgui STATIC
     ${imgui_SOURCE_DIR}/imgui_demo.cpp
     ${imgui_SOURCE_DIR}/backends/imgui_impl_glfw.cpp
     ${imgui_SOURCE_DIR}/backends/imgui_impl_opengl3.cpp)
+target_sources(imgui PRIVATE ${imguizmo_SOURCE_DIR}/src/ImGuizmo.cpp)
 target_include_directories(imgui PUBLIC
     ${imgui_SOURCE_DIR}
-    ${imgui_SOURCE_DIR}/backends)
+    ${imgui_SOURCE_DIR}/backends
+    ${imguizmo_SOURCE_DIR}/src)
+target_compile_definitions(imgui PUBLIC IMGUI_DEFINE_MATH_OPERATORS)
 target_link_libraries(imgui PUBLIC glfw)
 
 # ---------------------------------------------------------------------------

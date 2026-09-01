@@ -6,6 +6,9 @@
 
 #include <imgui.h>
 #include <imgui_internal.h>
+#include <ImGuizmo.h>
+
+#include <glm/gtc/matrix_transform.hpp>
 
 #include "IconsFontAwesome6.h"
 #include "app/Ui.h"
@@ -222,6 +225,8 @@ void Editor::frameAllViews() {
 // ---------------------------------------------------------------------------
 void Editor::frame() {
     pollDecompile();
+    ImGuizmo::BeginFrame();
+    docMeshDirty_ = false;
     ImGuiViewport* vp = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(vp->WorkPos);
     ImGui::SetNextWindowSize(vp->WorkSize);
@@ -274,6 +279,12 @@ void Editor::frame() {
     for (auto& v : views_) drawViewportPanel(v);
     drawStatusBar();
     drawWelcome();
+
+    // Live preview while dragging the gizmo (history is recorded on release).
+    if (docMeshDirty_ && gizmoUsing_) {
+        buildAndUpload(meshOpts_);
+        rebuildSelectionWire();
+    }
 }
 
 void Editor::buildDockLayout(unsigned int dockId, const ImVec2& size) {
@@ -630,6 +641,8 @@ void Editor::drawViewportPanel(ViewPanel& p) {
                  ImVec2(static_cast<float>(w), static_cast<float>(h)), ImVec2(0, 1),
                  ImVec2(1, 0));
 
+    drawGizmo(p, h > 0 ? static_cast<float>(w) / h : 1.0f);
+
     // Corner label like Hammer.
     ImVec2 tl(p.contentMin.x, p.contentMin.y);
     ImDrawList* dl = ImGui::GetWindowDrawList();
@@ -645,10 +658,53 @@ void Editor::drawViewportPanel(ViewPanel& p) {
     ImGui::End();
 }
 
+void Editor::drawGizmo(ViewPanel& p, float aspect) {
+    if (!hasDoc() || selection_.empty() || tool_ != Tool::Select) return;
+
+    ImGuizmo::SetOrthographic(p.kind != ViewKind::Perspective);
+    ImGuizmo::SetDrawlist();
+    ImGuizmo::SetRect(p.contentMin.x, p.contentMin.y, p.contentSize.x, p.contentSize.y);
+    ImGuizmo::SetID(static_cast<int>(p.kind));
+
+    const glm::mat4 view = p.camera.view();
+    const glm::mat4 proj = p.camera.proj(aspect);
+
+    const ImGuizmo::OPERATION op = gizmoMode_ == 1   ? ImGuizmo::ROTATE
+                                   : gizmoMode_ == 2 ? ImGuizmo::SCALE
+                                                     : ImGuizmo::TRANSLATE;
+
+    glm::mat4 model = glm::translate(glm::mat4(1.0f), selectionCenter());
+    glm::mat4 delta(1.0f);
+    float snapv[3] = {float(gridSize_), float(gridSize_), float(gridSize_)};
+    if (gizmoMode_ == 1) snapv[0] = snapv[1] = snapv[2] = 5.0f;   // 5 deg
+    if (gizmoMode_ == 2) snapv[0] = snapv[1] = snapv[2] = 0.05f;  // 5%
+
+    const bool changed = ImGuizmo::Manipulate(&view[0][0], &proj[0][0], op,
+                                              ImGuizmo::WORLD, &model[0][0],
+                                              &delta[0][0], snap_ ? snapv : nullptr);
+    if (changed) {
+        for (const auto& r : selection_)
+            if (map::Solid* s = doc_.resolve(r)) s->transform(delta);
+        docMeshDirty_ = true;
+    }
+    if (ImGuizmo::IsUsing()) {
+        gizmoUsing_ = true;
+    } else if (gizmoUsing_) {
+        gizmoUsing_ = false;
+        afterEdit(gizmoMode_ == 1 ? "Rotate" : gizmoMode_ == 2 ? "Scale" : "Move");
+    }
+}
+
 void Editor::handleViewportInput(ViewPanel& p) {
     if (!p.hovered) return;
     ImGuiIO& io = ImGui::GetIO();
     const float dt = std::clamp(io.DeltaTime, 0.0f, 0.1f);
+
+    if (!io.KeyCtrl && !ImGui::IsMouseDown(ImGuiMouseButton_Right)) {
+        if (ImGui::IsKeyPressed(ImGuiKey_W)) gizmoMode_ = 0;
+        if (ImGui::IsKeyPressed(ImGuiKey_E)) gizmoMode_ = 1;
+        if (ImGui::IsKeyPressed(ImGuiKey_R)) gizmoMode_ = 2;
+    }
 
     if (p.kind == ViewKind::Perspective) {
         if (ImGui::IsMouseDragging(ImGuiMouseButton_Right, 0.0f)) {
