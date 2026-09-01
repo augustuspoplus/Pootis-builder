@@ -22,6 +22,12 @@ public:
     bool undo(MapDocument& doc);
     bool redo(MapDocument& doc);
 
+    // For the history panel: every step, and jump straight to one.
+    size_t count() const { return snaps_.size(); }
+    size_t current() const { return index_; }
+    const std::string& labelAt(size_t i) const;
+    bool jumpTo(MapDocument& doc, size_t i);
+
 private:
     struct Snap {
         std::string label;

@@ -53,6 +53,8 @@ public:
     void debugSubObjectDemo(int solidIdx, int mode);  // select brush, deform one handle
     void debugTextureDemo(int solidIdx);              // pick faces for the Texture tool
     void debugShapeOp(int op);                        // 0 hollow, 1 carve, 2 clip
+    void debugMapCheck() { runMapCheck(); }
+    void debugShowPalette() { showPalette_ = true; }
     void debugDumpFgd(const std::string& cls);
     void debugImportObj(const std::string& path);  // detail-brush import, headless
     bool saveVmf(const std::string& path);
@@ -124,6 +126,12 @@ private:
     void drawTextureBrowser();
     void drawEntityCatalog();
     void drawStatusBar();
+    void drawHistoryPanel();
+    void drawMapCheckPanel();
+    void runMapCheck();
+    void drawCommandPalette();
+    void autosaveTick();
+    void writeBackup(const std::string& vmfPath);
     void handleViewportInput(ViewPanel& p);
     void pickAt(ViewPanel& p, const glm::vec2& pxInViewport, bool additive);
     void rebuildSelectionWire();
@@ -171,6 +179,23 @@ private:
     std::string pendingOpen_;
     std::string focusPanel_;  // debug: focus this dock tab next frame
     int focusPanelFrames_ = 0;
+
+    // QoL: command palette, map-check, autosave.
+    bool showPalette_ = false;
+    char paletteQuery_[128] = {0};
+    int paletteSel_ = 0;
+    struct CheckHit {
+        std::string msg;
+        int severity = 0;   // 0 info, 1 warning, 2 error
+        int entity = -2;    // -2 = no jump, -1 = world solid, >=0 entity index
+        int solid = -1;
+        glm::vec3 pos{0};
+    };
+    std::vector<CheckHit> mapCheck_;
+    bool mapCheckRan_ = false;
+    double lastAutosave_ = 0.0;
+    bool autosaveOn_ = true;
+    float autosaveMins_ = 5.0f;
 
     char outlinerFilter_[128] = {0};
     char materialFilter_[128] = {0};

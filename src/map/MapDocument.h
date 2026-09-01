@@ -37,7 +37,10 @@ public:
     void clear();
     void newBlank(const std::string& name = "untitled");
     bool loadVmf(const std::string& path, std::string* err = nullptr);
-    bool saveVmf(const std::string& path, std::string* err = nullptr);
+    // updateState=false writes the file without touching path()/name()/dirty()
+    // — used for autosaves and backups.
+    bool saveVmf(const std::string& path, std::string* err = nullptr,
+                 bool updateState = true);
     bool empty() const { return worldSolids_.empty() && entities_.empty(); }
     bool active() const { return active_; }  // a document is open (may be empty)
 

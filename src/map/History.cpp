@@ -64,4 +64,15 @@ bool History::redo(MapDocument& doc) {
     return true;
 }
 
+const std::string& History::labelAt(size_t i) const {
+    return i < snaps_.size() ? snaps_[i].label : kNone;
+}
+
+bool History::jumpTo(MapDocument& doc, size_t i) {
+    if (i >= snaps_.size() || i == index_) return false;
+    index_ = i;
+    restore(doc, snaps_[index_]);
+    return true;
+}
+
 }  // namespace pb::map
