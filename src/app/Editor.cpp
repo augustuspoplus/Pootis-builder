@@ -1,6 +1,7 @@
 #include "app/Editor.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <initializer_list>
@@ -18,9 +19,12 @@
 #include "core/Log.h"
 #include "gpu/Gl.h"
 #include "decompile/BspSource.h"
+#include <stb_image_write.h>
+
 #include "import/ModelImport.h"
 #include "import/ObjModel.h"
 #include "map/MapMesh.h"
+#include "publish/Workshop.h"
 #include "map/Raycast.h"
 #include "platform/FileDialog.h"
 
@@ -279,6 +283,7 @@ void Editor::frame() {
     drawStatusBar();
     drawCompileWindow();
     drawModelImportDialog();
+    drawWorkshopWindow();
     drawWelcome();
 
     // Live preview while dragging the gizmo (history is recorded on release).
@@ -419,6 +424,14 @@ void Editor::drawTopBar() {
     ImGui::SameLine(0, 2);
     if (toolButton(ICON_FA_BARS)) ImGui::OpenPopup("##viewmenu");
     drawViewMenuPopup();
+
+    ImGui::SameLine(0, 8);
+    if (toolButton(ICON_FA_CLOUD_ARROW_UP "  Publish", showWorkshop_,
+                   "Publish the map to the Steam Workshop")) {
+        showWorkshop_ = !showWorkshop_;
+        if (showWorkshop_ && wsItem_.title.empty() && hasDoc())
+            wsItem_.title = doc_.name();
+    }
 
     ImGui::SameLine(0, 8);
     ImGui::PushStyleColor(ImGuiCol_Button, col::bg2);
@@ -1228,6 +1241,13 @@ void Editor::debugDumpFgd(const std::string& cls) {
                 v.defaultValue.c_str(), v.choices.size(), v.flags.size());
 }
 
+void Editor::debugShowWorkshop() {
+    showWorkshop_ = true;
+    showWelcome_ = false;
+    if (wsItem_.title.empty()) wsItem_.title = doc_.name();
+    wsItem_.description = "A Team Fortress 2 map built with Pootis Builder.";
+}
+
 void Editor::debugStartCompile(bool fast) {
     showCompile_ = true;
     compileProfile_ = fast ? 0 : 1;
@@ -1626,6 +1646,248 @@ void Editor::drawModelImportDialog() {
     ImGui::EndDisabled();
     ImGui::SameLine();
     if (ImGui::Button("Cancel", ImVec2(100 * uiScale_, 0))) showModelImport_ = false;
+
+    ImGui::End();
+}
+
+void Editor::captureWorkshopPreview() {
+    std::vector<uint8_t> rgba;
+    if (!renderToImage(ViewKind::Perspective, 1200, 900, rgba)) {
+        wsErr_ = "could not capture the 3D view";
+        return;
+    }
+    std::string dir = executableDir();
+    if (const char* la = std::getenv("LOCALAPPDATA"))
+        dir = std::string(la) + "/PootisBuilder/workshop";
+    std::error_code ec;
+    fs::create_directories(dir, ec);
+    const std::string path =
+        dir + "/" + (doc_.name().empty() ? "map" : doc_.name()) + "_preview.jpg";
+    if (!stbi_write_jpg(path.c_str(), 1200, 900, 4, rgba.data(), 90)) {
+        wsErr_ = "could not write " + path;
+        return;
+    }
+    wsItem_.previewImage = path;
+    wsErr_.clear();
+    status_ = "Captured Workshop preview";
+}
+
+void Editor::drawWorkshopWindow() {
+    if (!showWorkshop_) return;
+    using namespace pb::ui;
+
+    ImGui::SetNextWindowSize(ImVec2(560 * uiScale_, 640 * uiScale_),
+                             ImGuiCond_FirstUseEver);
+    if (!ImGui::Begin(ICON_FA_CLOUD_ARROW_UP "  Publish to Steam Workshop",
+                      &showWorkshop_, ImGuiWindowFlags_NoDocking)) {
+        ImGui::End();
+        return;
+    }
+
+    ImGui::PushStyleColor(ImGuiCol_Text, col::faint);
+    ImGui::TextWrapped(
+        "Prepares your compiled map as a Steam Workshop submission for Team "
+        "Fortress 2. Nothing is uploaded until you press the upload button and "
+        "confirm.");
+    ImGui::PopStyleColor();
+    ImGui::Dummy(ImVec2(0, 6));
+
+    // ---- content (.bsp) ------------------------------------------------
+    if (gamePaths_.gameDir.empty()) gamePaths_ = compile::GamePaths::detect();
+    const std::string mapName = doc_.name().empty() ? "untitled" : doc_.name();
+    std::string bsp = wsItem_.bspPath;
+    if (bsp.empty() && !gamePaths_.gameDir.empty())
+        bsp = gamePaths_.gameDir + "/maps/" + mapName + ".bsp";
+    const bool haveBsp = !bsp.empty() && fileExists(bsp);
+    wsItem_.bspPath = bsp;
+
+    sectionLabel("MAP CONTENT");
+    if (haveBsp) {
+        ImGui::PushStyleColor(ImGuiCol_Text, col::good);
+        ImGui::TextUnformatted(ICON_FA_CHECK);
+        ImGui::PopStyleColor();
+        ImGui::SameLine(0, 8);
+        ImGui::TextWrapped("%s", bsp.c_str());
+    } else {
+        ImGui::PushStyleColor(ImGuiCol_Text, col::warn);
+        ImGui::TextWrapped(ICON_FA_TRIANGLE_EXCLAMATION
+                           "  No compiled .bsp yet — run Build & play (final "
+                           "profile) first, then come back here.");
+        ImGui::PopStyleColor();
+    }
+
+    ImGui::Dummy(ImVec2(0, 6));
+    sectionLabel("PREVIEW IMAGE");
+    if (!wsItem_.previewImage.empty() && fileExists(wsItem_.previewImage)) {
+        ImGui::TextWrapped("%s", wsItem_.previewImage.c_str());
+    } else {
+        ImGui::PushStyleColor(ImGuiCol_Text, col::faint);
+        ImGui::TextUnformatted("none set");
+        ImGui::PopStyleColor();
+    }
+    if (ImGui::Button(ICON_FA_CAMERA "  Capture from 3D view")) captureWorkshopPreview();
+    ImGui::SameLine();
+    if (ImGui::Button("Browse…##wsprev")) {
+        const std::string p = openFileDialog(
+            "Preview image", "Images\0*.jpg;*.jpeg;*.png\0All files\0*.*\0\0", nullptr);
+        if (!p.empty()) wsItem_.previewImage = p;
+    }
+
+    ImGui::Dummy(ImVec2(0, 6));
+    sectionLabel("DETAILS");
+    char title[128];
+    std::snprintf(title, sizeof(title), "%s", wsItem_.title.c_str());
+    ImGui::SetNextItemWidth(-1);
+    if (ImGui::InputTextWithHint("##wstitle", "Title", title, sizeof(title)))
+        wsItem_.title = title;
+
+    static char descBuf[4096];
+    std::snprintf(descBuf, sizeof(descBuf), "%s", wsItem_.description.c_str());
+    ImGui::SetNextItemWidth(-1);
+    if (ImGui::InputTextMultiline("##wsdesc", descBuf, sizeof(descBuf),
+                                  ImVec2(-1, 90 * uiScale_)))
+        wsItem_.description = descBuf;
+    ImGui::PushStyleColor(ImGuiCol_Text, col::faint);
+    ImGui::TextUnformatted("Description");
+    ImGui::PopStyleColor();
+
+    char note[256];
+    std::snprintf(note, sizeof(note), "%s", wsItem_.changeNote.c_str());
+    ImGui::SetNextItemWidth(-1);
+    if (ImGui::InputTextWithHint("##wsnote", "Change note", note, sizeof(note)))
+        wsItem_.changeNote = note;
+
+    // ---- visibility --------------------------------------------------
+    const char* vis[] = {"Public", "Friends only", "Unlisted", "Private (hidden)"};
+    int v = static_cast<int>(wsItem_.visibility);
+    ImGui::SetNextItemWidth(220 * uiScale_);
+    if (ImGui::Combo("Visibility", &v, vis, IM_ARRAYSIZE(vis)))
+        wsItem_.visibility = static_cast<publish::Visibility>(v);
+
+    // ---- tags ------------------------------------------------------
+    sectionLabel("TAGS");
+    auto tagChk = [&](const char* t) {
+        bool on = std::find(wsItem_.tags.begin(), wsItem_.tags.end(), t) !=
+                  wsItem_.tags.end();
+        if (ImGui::Checkbox(t, &on)) {
+            auto it = std::find(wsItem_.tags.begin(), wsItem_.tags.end(), t);
+            if (on && it == wsItem_.tags.end()) wsItem_.tags.push_back(t);
+            if (!on && it != wsItem_.tags.end()) wsItem_.tags.erase(it);
+        }
+    };
+    tagChk("Map");
+    ImGui::SameLine(); tagChk("Capture the Flag");
+    ImGui::SameLine(); tagChk("Control Point");
+    tagChk("Payload");
+    ImGui::SameLine(); tagChk("King of the Hill");
+    ImGui::SameLine(); tagChk("Attack / Defense");
+
+    // ---- existing item id ----------------------------------------
+    sectionLabel("UPDATE AN EXISTING ITEM  (optional)");
+    ImGui::SetNextItemWidth(240 * uiScale_);
+    ImGui::InputTextWithHint("##wsid", "publishedfileid (leave blank = new)",
+                             wsIdBuf_, sizeof(wsIdBuf_));
+    wsItem_.publishedFileId = std::strtoull(wsIdBuf_, nullptr, 10);
+
+    ImGui::Dummy(ImVec2(0, 10));
+    ImGui::Separator();
+    ImGui::Dummy(ImVec2(0, 4));
+
+    // ---- stage + upload ----------------------------------------
+    ImGui::BeginDisabled(!haveBsp || wsItem_.title.empty());
+    if (ImGui::Button(ICON_FA_BOX_ARCHIVE "  Prepare submission",
+                      ImVec2(200 * uiScale_, 0))) {
+        std::string dir = executableDir();
+        if (const char* la = std::getenv("LOCALAPPDATA"))
+            dir = std::string(la) + "/PootisBuilder/workshop/" + mapName;
+        wsErr_.clear();
+        wsStagedOk_ = publish::stageItem(wsItem_, dir, wsStaged_, &wsErr_);
+        status_ = wsStagedOk_ ? "Workshop item staged" : ("Staging failed: " + wsErr_);
+    }
+    ImGui::EndDisabled();
+
+    if (!wsErr_.empty()) {
+        ImGui::PushStyleColor(ImGuiCol_Text, col::warn);
+        ImGui::TextWrapped(ICON_FA_TRIANGLE_EXCLAMATION "  %s", wsErr_.c_str());
+        ImGui::PopStyleColor();
+    }
+
+    if (wsStagedOk_) {
+        ImGui::Dummy(ImVec2(0, 4));
+        ImGui::PushStyleColor(ImGuiCol_Text, col::good);
+        ImGui::TextWrapped(ICON_FA_CHECK "  Staged at %s", wsStaged_.itemDir.c_str());
+        ImGui::PopStyleColor();
+
+        const std::string steamcmd = publish::findSteamcmd();
+        ImGui::Dummy(ImVec2(0, 4));
+        sectionLabel("OPTION A — steamcmd  (recommended)");
+        ImGui::PushStyleColor(ImGuiCol_Text, col::faint);
+        ImGui::TextWrapped(
+            steamcmd.empty()
+                ? "steamcmd not found. Install it, then run this from a terminal:"
+                : "Run this from a terminal (it will prompt for your Steam login):");
+        ImGui::PopStyleColor();
+        static char userBuf[64];
+        std::snprintf(userBuf, sizeof(userBuf), "%s", wsUserBuf_);
+        ImGui::SetNextItemWidth(200 * uiScale_);
+        if (ImGui::InputTextWithHint("Steam login", "account name", userBuf,
+                                     sizeof(userBuf)))
+            std::snprintf(wsUserBuf_, sizeof(wsUserBuf_), "%s", userBuf);
+        const std::string cmd =
+            publish::steamcmdCommand(steamcmd, wsStaged_.vdfPath, wsUserBuf_);
+        char cmdShow[1024];
+        std::snprintf(cmdShow, sizeof(cmdShow), "%s", cmd.c_str());
+        ImGui::SetNextItemWidth(-1);
+        ImGui::InputText("##wscmd", cmdShow, sizeof(cmdShow),
+                         ImGuiInputTextFlags_ReadOnly);
+        if (ImGui::Button(ICON_FA_COPY "  Copy command"))
+            ImGui::SetClipboardText(cmd.c_str());
+        ImGui::SameLine();
+        if (ImGui::Button(ICON_FA_FOLDER_OPEN "  Open item folder")) {
+            const std::string q = "\"" + wsStaged_.itemDir + "\"";
+            std::system(("explorer " + q).c_str());
+        }
+
+        ImGui::Dummy(ImVec2(0, 6));
+        sectionLabel("OPTION B — in-editor upload");
+        if (publish::haveInProcessUpload()) {
+            if (ImGui::Button(ICON_FA_CLOUD_ARROW_UP "  Upload now"))
+                ImGui::OpenPopup("confirmUpload");
+        } else {
+            ImGui::BeginDisabled(true);
+            ImGui::Button(ICON_FA_CLOUD_ARROW_UP "  Upload now");
+            ImGui::EndDisabled();
+            ImGui::PushStyleColor(ImGuiCol_Text, col::faint);
+            ImGui::TextWrapped(
+                "Needs the Steamworks SDK: drop steam_api64.dll + the SDK next to "
+                "the exe and rebuild with PB_HAVE_STEAMWORKS. Until then use "
+                "steamcmd above.");
+            ImGui::PopStyleColor();
+        }
+        if (ImGui::BeginPopupModal("confirmUpload", nullptr,
+                                   ImGuiWindowFlags_AlwaysAutoResize)) {
+            ImGui::Text("Upload \"%s\" to the PUBLIC Steam Workshop?",
+                        wsItem_.title.c_str());
+            ImGui::TextDisabled("Visibility: %s",
+                                publish::visibilityName(wsItem_.visibility));
+            ImGui::Dummy(ImVec2(0, 6));
+            if (ImGui::Button("Upload", ImVec2(120, 0))) {
+                float pr = 0;
+                std::string st;
+                wsErr_.clear();
+                publish::uploadInProcess(wsItem_, wsStaged_, &pr, &st, &wsErr_);
+                if (!wsErr_.empty()) status_ = wsErr_;
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Cancel", ImVec2(120, 0))) ImGui::CloseCurrentPopup();
+            ImGui::EndPopup();
+        }
+
+        ImGui::Dummy(ImVec2(0, 4));
+        if (ImGui::Button(ICON_FA_UP_RIGHT_FROM_SQUARE "  Open TF2 Workshop page"))
+            std::system("start https://steamcommunity.com/app/440/workshop/");
+    }
 
     ImGui::End();
 }

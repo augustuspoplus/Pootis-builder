@@ -34,6 +34,7 @@ struct Options {
     int selectSolid = -1;
     bool sampleMap = false;
     bool compile = false;
+    bool workshop = false;
     bool dumpFgd = false;
     std::string dumpFgdClass;
     std::string importObjPath;
@@ -63,6 +64,7 @@ Options parseArgs(int argc, char** argv) {
         else if (a == "--select") o.selectSolid = std::atoi(next("0").c_str());
         else if (a == "--sample-map") o.sampleMap = true;
         else if (a == "--compile") o.compile = true;
+        else if (a == "--workshop") o.workshop = true;
         else if (a == "--dump-fgd") { o.dumpFgd = true; o.dumpFgdClass = next(""); }
         else if (a == "--import-obj") o.importObjPath = next("");
         else if (a == "--save-vmf") o.saveVmfPath = next("");
@@ -90,6 +92,7 @@ int runHeadlessScreenshot(const Options& opt, GLFWwindow* window, float uiScale)
     if (opt.selectSolid >= 0) editor.debugSelectWorldSolid(opt.selectSolid);
     if (!opt.saveVmfPath.empty()) editor.saveVmf(opt.saveVmfPath);
     if (opt.compile) editor.debugStartCompile(true);
+    if (opt.workshop) editor.debugShowWorkshop();
 
     std::vector<uint8_t> rgba;
 
