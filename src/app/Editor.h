@@ -94,6 +94,7 @@ private:
     void rebuildSelectionWire();
     void clearSelection();
     void afterEdit(const char* label);   // re-mesh + record undo + refresh
+    void drawGizmo(ViewPanel& p, float aspect);
     void nudgeSelection(const glm::vec3& worldDelta);
     void deleteSelection();
     void duplicateSelection();
@@ -122,6 +123,9 @@ private:
 
     std::vector<map::SolidRef> selection_;
     map::History history_;
+    int gizmoMode_ = 0;          // 0 move, 1 rotate, 2 scale
+    bool gizmoUsing_ = false;
+    bool docMeshDirty_ = false;
 
     Mode mode_ = Mode::Simple;
     Tool tool_ = Tool::Select;
