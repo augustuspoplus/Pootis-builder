@@ -12,6 +12,8 @@
 #include "bsp/BspMesh.h"
 #include "compile/MapCompiler.h"
 #include "fgd/Fgd.h"
+#include "import/ModelImport.h"
+#include "import/ObjModel.h"
 #include "map/History.h"
 #include "map/MapDocument.h"
 #include "render/Camera.h"
@@ -42,6 +44,7 @@ public:
     void debugBuildSampleMap();
     void debugStartCompile(bool fast);
     void debugDumpFgd(const std::string& cls);
+    void debugImportObj(const std::string& path);  // detail-brush import, headless
     bool saveVmf(const std::string& path);
 
     // Persisted settings + UI scaling (the font atlas rebuild is done by the
@@ -90,6 +93,10 @@ private:
     void uiScaleMenu();
     void drawViewportPanel(ViewPanel& p);
     void drawBuildKit();
+    void openModelImport();
+    void reloadModelPreview();
+    void drawModelImportDialog();
+    void doModelImport();
     void drawSelectionPanel();
     void drawCompileWindow();
     bool saveMap(bool forceDialog);   // true if written
@@ -166,6 +173,15 @@ private:
     std::string decompileVmf_;
     std::string decompileErr_;
     void pollDecompile();
+
+    // 3D model import (.obj -> func_detail brushwork, or a baked prop_static)
+    bool showModelImport_ = false;
+    std::string modelImportPath_;
+    std::string modelImportErr_;
+    import::ObjMesh modelPreview_;
+    import::ObjLoadOptions modelLoadOpts_;
+    import::ModelImportOptions modelPlaceOpts_;
+    std::vector<std::string> pendingModelQc_;  // .qc files the next compile bakes
 
     Settings prefs_;
     float uiScale_ = 1.0f;

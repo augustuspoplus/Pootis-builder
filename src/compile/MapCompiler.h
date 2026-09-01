@@ -14,6 +14,9 @@ struct CompileOptions {
     bool runVvis = true;
     bool runVrad = true;
     bool launchGame = true;
+    // .qc files to bake into models/ with studiomdl before vbsp runs (from
+    // "import 3D model -> as prop"). Safe to leave empty.
+    std::vector<std::string> modelQc;
 };
 
 // Where TF2 and its compile tools live.
