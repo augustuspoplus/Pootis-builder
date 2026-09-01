@@ -83,8 +83,9 @@ target_include_directories(PootisBuilder PRIVATE
     src
     third_party
     ${stb_SOURCE_DIR})
+find_package(Threads REQUIRED)
 target_link_libraries(PootisBuilder PRIVATE
-    glad glfw imgui glm::glm lzma
+    glad glfw imgui glm::glm lzma Threads::Threads
     opengl32 gdi32 comdlg32)
 
 if(WIN32)
