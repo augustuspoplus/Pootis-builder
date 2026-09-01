@@ -22,6 +22,7 @@
 #include "render/Camera.h"
 #include "render/Framebuffer.h"
 #include "render/MaterialLibrary.h"
+#include "render/ModelThumbnailer.h"
 #include "render/SceneRenderer.h"
 #include "source/SourceFs.h"
 
@@ -261,8 +262,8 @@ private:
     char textureFilter_[128] = {0};
     char modelFilter_[128] = {0};
     std::vector<std::string> modelList_;             // every models/**.mdl, sorted
-    std::unordered_map<std::string, std::string> modelFirstMat_;  // path -> material
     bool modelListBuilt_ = false;
+    render::ModelThumbnailer modelThumbs_;
     float flySpeed_ = 900.0f;
 
     std::vector<map::SolidRef> selection_;
