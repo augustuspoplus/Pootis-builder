@@ -1441,7 +1441,13 @@ void kitCards(const KitPiece* pieces, int count, std::string* placing,
 void Editor::debugImportObj(const std::string& path) {
     if (!doc_.active()) { doc_.newBlank("objtest"); history_.reset(doc_); }
     modelImportPath_ = path;
-    modelPlaceOpts_.mode = import::ModelPlacement::DetailBrush;
+    // "path" may carry a ":prop" suffix to exercise the prop-staging path.
+    if (path.size() > 5 && path.substr(path.size() - 5) == ":prop") {
+        modelImportPath_ = path.substr(0, path.size() - 5);
+        modelPlaceOpts_.mode = import::ModelPlacement::Prop;
+    } else {
+        modelPlaceOpts_.mode = import::ModelPlacement::DetailBrush;
+    }
     reloadModelPreview();
     doModelImport();
     showWelcome_ = false;
