@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <cstring>
 #include <filesystem>
+#include <initializer_list>
+#include <utility>
 
 #include <imgui.h>
 #include <imgui_internal.h>
@@ -188,7 +190,7 @@ void Editor::pollDecompile() {
 }
 
 void Editor::buildAndUpload(const MeshBuildOptions& opts) {
-    if (!doc_.empty())
+    if (doc_.active())
         mesh_ = map::buildDocMesh(doc_, materials_);
     else
         mesh_ = buildWorldMesh(bsp_, opts);
@@ -533,9 +535,17 @@ void Editor::drawWelcome() {
     if (bigButton("##bNew", ICON_FA_FILE_CIRCLE_PLUS, "New map",
                   "Start from an empty grid")) {
         bsp_ = BspFile();
-        renderer_.clearWorld();
-        mesh_ = WorldMesh{};
-        status_ = "New map — place pieces from the Build Kit.";
+        doc_.newBlank("untitled");
+        history_.reset(doc_);
+        clearSelection();
+        mode_ = Mode::Simple;
+        layoutDirty_ = true;
+        buildAndUpload(meshOpts_);
+        for (auto& v : views_) {
+            v.camera = Camera{};
+            v.camera.kind = v.kind;
+        }
+        status_ = "New map — pick a piece from the Build Kit and click the grid.";
         showWelcome_ = false;
     }
     ImGui::SameLine(0, 10);
@@ -756,10 +766,189 @@ void Editor::handleBlockTool(ViewPanel& p) {
     }
 }
 
+glm::vec3 Editor::viewPlanePoint(ViewPanel& p, const ImVec2& m) const {
+    glm::vec3 ro, rd;
+    p.camera.pixelRay({m.x - p.contentMin.x, m.y - p.contentMin.y}, p.contentSize, ro,
+                      rd);
+    glm::vec3 n;
+    float d;
+    if (p.kind == ViewKind::Perspective) {
+        n = glm::vec3(0, 0, 1);
+        d = 0.0f;  // ground plane
+    } else {
+        n = p.camera.orthoForwardAxis();
+        d = glm::dot(n, p.camera.orthoCenter);
+    }
+    const float den = glm::dot(n, rd);
+    const float t = std::fabs(den) > 1e-6f ? (d - glm::dot(n, ro)) / den : 0.0f;
+    return ro + rd * t;
+}
+
+void Editor::placePiece(const std::string& piece, const glm::vec3& atRaw) {
+    if (!doc_.active()) doc_.newBlank("untitled");
+    const glm::vec3 at = snapVec(atRaw);
+    const std::string floorMat = "dev/dev_measuregeneric01b";
+    const std::string wallMat = "dev/dev_measurewall01a";
+
+    std::vector<map::Solid> made;
+    std::vector<map::MapEntity> madeEnts;
+
+    auto box = [&](glm::vec3 mn, glm::vec3 mx, const std::string& mat) {
+        made.push_back(map::Solid::makeBox(mn, mx, mat));
+    };
+    // Point entity at a world position with any number of extra key/values.
+    auto ent = [&](const char* cls, glm::vec3 pos,
+                   std::initializer_list<std::pair<const char*, const char*>> kvs)
+        -> map::MapEntity& {
+        map::MapEntity e;
+        e.id = doc_.nextId();
+        e.classname = cls;
+        e.origin = pos;
+        e.kv.set("classname", cls);
+        e.kv.set("origin", std::to_string((int)pos.x) + " " +
+                               std::to_string((int)pos.y) + " " +
+                               std::to_string((int)pos.z));
+        for (const auto& kv : kvs)
+            if (kv.second && kv.second[0]) e.kv.set(kv.first, kv.second);
+        madeEnts.push_back(std::move(e));
+        return madeEnts.back();
+    };
+    // Brush entity (a box solid tagged with a classname) at a world box.
+    auto brushEnt = [&](const char* cls, glm::vec3 mn, glm::vec3 mx,
+                        std::initializer_list<std::pair<const char*, const char*>> kvs)
+        -> map::MapEntity& {
+        map::MapEntity e;
+        e.id = doc_.nextId();
+        e.classname = cls;
+        e.origin = 0.5f * (mn + mx);
+        e.kv.set("classname", cls);
+        for (const auto& kv : kvs)
+            if (kv.second && kv.second[0]) e.kv.set(kv.first, kv.second);
+        map::Solid s = map::Solid::makeBox(mn, mx, "tools/toolstrigger");
+        s.id = doc_.nextId();
+        e.solids.push_back(std::move(s));
+        madeEnts.push_back(std::move(e));
+        return madeEnts.back();
+    };
+    auto room = [&](glm::vec3 c, glm::vec3 halfInterior, float th) {
+        const glm::vec3 mn = c - halfInterior, mx = c + halfInterior;
+        box({mn.x - th, mn.y - th, mn.z - th}, {mx.x + th, mx.y + th, mn.z}, floorMat);
+        box({mn.x - th, mn.y - th, mx.z}, {mx.x + th, mx.y + th, mx.z + th}, floorMat);
+        box({mn.x - th, mn.y - th, mn.z}, {mx.x + th, mn.y, mx.z}, wallMat);
+        box({mn.x - th, mx.y, mn.z}, {mx.x + th, mx.y + th, mx.z}, wallMat);
+        box({mn.x - th, mn.y, mn.z}, {mn.x, mx.y, mx.z}, wallMat);
+        box({mx.x, mn.y, mn.z}, {mx.x + th, mx.y, mx.z}, wallMat);
+    };
+
+    if (piece == "Floor" || piece == "Route") {
+        const float hw = piece == "Route" ? 256.0f : 128.0f;
+        const float hd = piece == "Route" ? 64.0f : 128.0f;
+        box({at.x - hw, at.y - hd, at.z - 16}, {at.x + hw, at.y + hd, at.z}, floorMat);
+    } else if (piece == "Wall") {
+        box({at.x - 128, at.y - 8, at.z}, {at.x + 128, at.y + 8, at.z + 128}, wallMat);
+    } else if (piece == "Ceiling") {
+        box({at.x - 128, at.y - 128, at.z}, {at.x + 128, at.y + 128, at.z + 16},
+            floorMat);
+    } else if (piece == "Pillar") {
+        box({at.x - 32, at.y - 32, at.z}, {at.x + 32, at.y + 32, at.z + 192}, wallMat);
+    } else if (piece == "Room") {
+        room(at + glm::vec3(0, 0, 96), glm::vec3(192, 192, 96), 16.0f);
+    } else if (piece == "Ramp") {
+        const float x0 = at.x - 128, x1 = at.x + 128, y0 = at.y - 64, y1 = at.y + 64;
+        const float z0 = at.z, z1 = at.z + 128;
+        glm::vec3 sn = glm::normalize(glm::vec3(-(z1 - z0), 0, (x1 - x0)));
+        made.push_back(map::Solid::fromPlanes(
+            {{{0, 0, -1}, -z0},
+             {{1, 0, 0}, x1},
+             {{0, 1, 0}, y1},
+             {{0, -1, 0}, -y0},
+             {sn, glm::dot(sn, glm::vec3(x0, at.y, z0))}},
+            floorMat));
+    } else if (piece == "RED spawn" || piece == "BLU spawn") {
+        const bool red = piece[0] == 'R';
+        const char* team = red ? "2" : "3";
+        room(at + glm::vec3(0, 0, 96), glm::vec3(192, 192, 96), 16.0f);
+        for (int i = 0; i < 4; ++i)
+            ent("info_player_teamspawn",
+                at + glm::vec3((i % 2) * 64 - 32, (i / 2) * 64 - 32, 8),
+                {{"TeamNum", team}, {"angles", "0 0 0"}});
+        // A resupply locker so the spawn actually refills players.
+        brushEnt("func_regenerate",
+                 {at.x - 32, at.y + 150, at.z}, {at.x + 32, at.y + 182, at.z + 96},
+                 {{"associatedmodel", ""}, {"TeamNum", team}});
+    } else if (piece == "Resupply") {
+        brushEnt("func_regenerate", {at.x - 32, at.y - 16, at.z},
+                 {at.x + 32, at.y + 16, at.z + 96}, {});
+    } else if (piece == "Health / ammo") {
+        ent("item_healthkit_medium", at + glm::vec3(-24, 0, 8), {});
+        ent("item_ammopack_medium", at + glm::vec3(24, 0, 8), {});
+    } else if (piece == "Capture point") {
+        // A control point + the trigger that captures it, wired together.
+        ent("team_control_point", at + glm::vec3(0, 0, 8),
+            {{"targetname", "control_point_1"},
+             {"point_default_owner", "0"},
+             {"point_printname", "Point A"},
+             {"point_group", "0"},
+             {"point_index", "0"}});
+        brushEnt("trigger_capture_area", {at.x - 96, at.y - 96, at.z},
+                 {at.x + 96, at.y + 96, at.z + 128},
+                 {{"area_cap_point", "control_point_1"},
+                  {"team_cap_2", "1"},
+                  {"team_cap_3", "1"},
+                  {"team_numcap_2", "1"},
+                  {"team_numcap_3", "1"}});
+        box({at.x - 128, at.y - 128, at.z - 16}, {at.x + 128, at.y + 128, at.z},
+            floorMat);
+    } else if (piece == "Payload track") {
+        // Three path_track nodes chained; the cart + watcher come later.
+        for (int i = 0; i < 3; ++i) {
+            const std::string nm = "cart_path_" + std::to_string(i + 1);
+            const std::string nxt = "cart_path_" + std::to_string(i + 2);
+            ent("path_track", at + glm::vec3(i * 256.0f, 0, 8),
+                {{"targetname", nm.c_str()},
+                 {"target", i < 2 ? nxt.c_str() : ""}});
+        }
+    } else if (piece == "Point light") {
+        ent("light", at + glm::vec3(0, 0, 128),
+            {{"_light", "255 255 224 200"}, {"_constant_attn", "0"},
+             {"_linear_attn", "0"}, {"_quadratic_attn", "1"}});
+    } else if (piece == "Spot light") {
+        ent("light_spot", at + glm::vec3(0, 0, 160),
+            {{"_light", "255 255 224 300"}, {"pitch", "-90"},
+             {"angles", "-90 0 0"}, {"_cone", "45"}, {"_inner_cone", "30"}});
+    } else if (piece == "Sun / sky") {
+        ent("light_environment", at + glm::vec3(0, 0, 160),
+            {{"pitch", "-45"}, {"angles", "0 220 0"},
+             {"_light", "247 233 200 350"}, {"_ambient", "180 190 210 60"},
+             {"_lightHDR", "-1 -1 -1 1"}, {"_ambientHDR", "-1 -1 -1 1"}});
+    } else {
+        box({at.x - 64, at.y - 64, at.z}, {at.x + 64, at.y + 64, at.z + 64}, floorMat);
+    }
+
+    selection_.clear();
+    for (auto& s : made) {
+        s.id = doc_.nextId();
+        doc_.worldSolids().push_back(std::move(s));
+        selection_.push_back({-1, static_cast<int>(doc_.worldSolids().size()) - 1});
+    }
+    for (auto& e : madeEnts) doc_.entities().push_back(std::move(e));
+
+    afterEdit(("Add " + piece).c_str());
+    status_ = "Placed " + piece;
+}
+
 void Editor::handleViewportInput(ViewPanel& p) {
     if (!p.hovered) return;
     ImGuiIO& io = ImGui::GetIO();
     const float dt = std::clamp(io.DeltaTime, 0.0f, 0.1f);
+
+    // Kit placement: click drops the pending piece.
+    if (!placing_.empty() && ImGui::IsMouseReleased(ImGuiMouseButton_Left) &&
+        !ImGui::IsMouseDragPastThreshold(ImGuiMouseButton_Left, 4.0f)) {
+        placePiece(placing_, viewPlanePoint(p, ImGui::GetMousePos()));
+        if (!io.KeyShift) placing_.clear();  // hold Shift to place several
+        return;
+    }
 
     handleBlockTool(p);
 
@@ -968,6 +1157,34 @@ void Editor::redo() {
     }
 }
 
+void Editor::debugBuildSampleMap() {
+    bsp_ = BspFile();
+    doc_.newBlank("sample");
+    history_.reset(doc_);
+    clearSelection();
+    placePiece("Room", glm::vec3(0, 0, 0));
+    placePiece("RED spawn", glm::vec3(768, 0, 0));
+    placePiece("BLU spawn", glm::vec3(-768, 0, 0));
+    placePiece("Floor", glm::vec3(0, 512, 0));
+    placePiece("Ramp", glm::vec3(0, 320, 0));
+    placePiece("Pillar", glm::vec3(200, 200, 0));
+    placePiece("Capture point", glm::vec3(0, 0, 0));
+    placePiece("Health / ammo", glm::vec3(0, 400, 0));
+    placePiece("Sun / sky", glm::vec3(0, 0, 0));
+    placing_.clear();
+    showWelcome_ = false;
+    frameAllViews();
+    PB_INFO("sample map: %zu world solids, %zu entities",
+            doc_.worldSolids().size(), doc_.entities().size());
+}
+
+bool Editor::saveVmf(const std::string& path) {
+    std::string err;
+    const bool ok = doc_.saveVmf(path, &err);
+    status_ = ok ? ("Saved " + path) : ("Save failed: " + err);
+    return ok;
+}
+
 void Editor::debugSelectWorldSolid(int i) {
     if (i >= 0 && i < static_cast<int>(doc_.worldSolids().size())) {
         selection_ = {{-1, i}};
@@ -1094,24 +1311,37 @@ void Editor::drawBuildKit() {
     ImGui::Separator();
     pb::ui::sectionLabel("MAP CHECKLIST");
 
+    const bool useDoc = hasDoc();
     auto countClass = [&](const char* cls) {
         int n = 0;
-        for (const auto& e : bsp_.entities()) {
-            auto it = e.find("classname");
-            if (it != e.end() && it->second == cls) ++n;
+        if (useDoc) {
+            for (const auto& e : doc_.entities())
+                if (e.classname == cls) ++n;
+        } else {
+            for (const auto& e : bsp_.entities()) {
+                auto it = e.find("classname");
+                if (it != e.end() && it->second == cls) ++n;
+            }
         }
         return n;
     };
     auto anyClassPrefix = [&](const char* pfx) {
         const size_t n = std::strlen(pfx);
-        for (const auto& e : bsp_.entities()) {
-            auto it = e.find("classname");
-            if (it != e.end() && it->second.compare(0, n, pfx) == 0) return true;
+        if (useDoc) {
+            for (const auto& e : doc_.entities())
+                if (e.classname.compare(0, n, pfx) == 0) return true;
+        } else {
+            for (const auto& e : bsp_.entities()) {
+                auto it = e.find("classname");
+                if (it != e.end() && it->second.compare(0, n, pfx) == 0) return true;
+            }
         }
         return false;
     };
     std::string skyname;
-    if (const auto* ws = bsp_.worldspawn()) {
+    if (useDoc) {
+        skyname = doc_.worldExtra().get("skyname");
+    } else if (const auto* ws = bsp_.worldspawn()) {
         auto it = ws->find("skyname");
         if (it != ws->end()) skyname = it->second;
     }

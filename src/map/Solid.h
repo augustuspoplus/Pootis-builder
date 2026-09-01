@@ -49,6 +49,10 @@ struct Solid {
     // Axis-aligned box brush from min/max with one material on all 6 sides.
     static Solid makeBox(const glm::vec3& mn, const glm::vec3& mx,
                          const std::string& material);
+
+    // Convex brush from a set of outward half-space planes (dot(n,p) <= d).
+    static Solid fromPlanes(const std::vector<std::pair<glm::vec3, float>>& planes,
+                            const std::string& material);
 };
 
 Solid solidFromKv(const KvNode& solidNode);

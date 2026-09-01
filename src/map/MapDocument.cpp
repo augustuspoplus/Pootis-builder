@@ -38,12 +38,24 @@ MapEntity entityFromKv(const KvNode& node) {
 
 void MapDocument::clear() {
     worldExtra_ = {};
+    active_ = false;
     worldSolids_.clear();
     entities_.clear();
     path_.clear();
     name_.clear();
     dirty_ = false;
     lastId_ = 0;
+}
+
+void MapDocument::newBlank(const std::string& name) {
+    clear();
+    name_ = name;
+    lastId_ = 1;
+    worldExtra_.set("skyname", "sky_day01_01");
+    worldExtra_.set("detailmaterial", "detail/detailsprites");
+    worldExtra_.set("detailvbsp", "detail.vbsp");
+    active_ = true;
+    dirty_ = true;
 }
 
 bool MapDocument::loadVmf(const std::string& path, std::string* err) {
@@ -75,6 +87,7 @@ bool MapDocument::loadVmf(const std::string& path, std::string* err) {
 
     path_ = path;
     name_ = fs::path(path).stem().string();
+    active_ = true;
     size_t validBrushes = 0;
     for (const auto& s : worldSolids_)
         if (s.valid) ++validBrushes;
