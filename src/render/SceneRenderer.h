@@ -54,10 +54,14 @@ private:
     void drawSolid(const glm::mat4& vp, const RenderSettings& s);
     void drawWire(const glm::mat4& vp, const glm::vec3& color, float alpha);
     void drawGrid(const Camera& cam, const glm::mat4& vp, float aspect);
+    void drawGroundGrid3D(const Camera& cam, float aspect);
+    void drawOriginMarker(const glm::mat4& vp);
     void drawMarkers(const glm::mat4& vp, const RenderSettings& s, bool ortho);
 
     Shader worldShader_;
     Shader lineShader_;
+    Shader grid3dShader_;
+    GLuint grid3dVao_ = 0;
 
     // World solid mesh.
     GLuint worldVao_ = 0, worldVbo_ = 0, worldEbo_ = 0;

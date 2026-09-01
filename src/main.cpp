@@ -48,6 +48,7 @@ struct Options {
     bool dumpProps = false;
     bool noDecompile = false;
     float cordon = -1.0f;
+    bool newBlank = false;
     bool dumpFgd = false;
     std::string dumpFgdClass;
     std::string importObjPath;
@@ -89,6 +90,7 @@ Options parseArgs(int argc, char** argv) {
         else if (a == "--place-prefab") o.placePrefabPath = next("");
         else if (a == "--dump-props") o.dumpProps = true;
         else if (a == "--no-decompile") o.noDecompile = true;
+        else if (a == "--new-map") o.newBlank = true;
         else if (a == "--cordon") o.cordon = static_cast<float>(std::atof(next("768").c_str()));
         else if (a == "--workshop") o.workshop = true;
         else if (a == "--dump-fgd") { o.dumpFgd = true; o.dumpFgdClass = next(""); }
@@ -121,6 +123,7 @@ int runHeadlessScreenshot(const Options& opt, GLFWwindow* window, float uiScale)
     if (!opt.placePrefabPath.empty()) editor.debugPlacePrefab(opt.placePrefabPath);
     if (opt.selectSolid >= 0) editor.debugSelectWorldSolid(opt.selectSolid);
     if (opt.selectEnt >= 0) editor.debugSelectEntity(opt.selectEnt);
+    if (opt.newBlank) editor.debugNewBlank();
     if (opt.cordon > 0.0f) editor.debugCordon(opt.cordon);
     if (opt.compile) editor.debugStartCompile(true);
     if (opt.subDemo) editor.debugSubObjectDemo(0, opt.subDemoMode);

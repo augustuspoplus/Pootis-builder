@@ -2675,24 +2675,31 @@ struct KitPiece {
 
 void kitCards(const KitPiece* pieces, int count, std::string* placing,
               std::string* status) {
+    using pb::ui::dp;
+    const float gap = dp(8.0f);
     const float avail = ImGui::GetContentRegionAvail().x;
-    const float cellW = (avail - 10.0f) * 0.5f;
+    const float cellW = (avail - gap) * 0.5f;
+    // Tall enough for the icon+name row plus two wrapped hint lines at any scale.
+    const float cellH = ImGui::GetTextLineHeight() * 3.4f + dp(16.0f);
     for (int i = 0; i < count; ++i) {
-        if (i % 2) ImGui::SameLine(0, 10);
+        if (i % 2) ImGui::SameLine(0, gap);
         ImGui::PushID(i);
         const bool on = *placing == pieces[i].name;
         ImGui::PushStyleColor(ImGuiCol_Button, on ? pb::ui::col::bg3 : pb::ui::col::bg2);
-        ImGui::PushStyleColor(ImGuiCol_Border,
-                              on ? pb::ui::col::acc : pb::ui::col::bd);
-        if (ImGui::BeginChild("card", ImVec2(cellW, 64),
+        ImGui::PushStyleColor(ImGuiCol_Border, on ? pb::ui::col::acc : pb::ui::col::bd);
+        if (ImGui::BeginChild("card", ImVec2(cellW, cellH),
                               ImGuiChildFlags_Borders | ImGuiChildFlags_FrameStyle)) {
             ImGui::PushStyleColor(ImGuiCol_Text, pb::ui::col::acc);
             ImGui::TextUnformatted(pieces[i].icon);
             ImGui::PopStyleColor();
-            ImGui::SameLine(0, 8);
+            ImGui::SameLine(0, dp(8.0f));
+            if (pb::ui::fontUiMed) ImGui::PushFont(pb::ui::fontUiMed);
             ImGui::TextUnformatted(pieces[i].name);
+            if (pb::ui::fontUiMed) ImGui::PopFont();
             ImGui::PushStyleColor(ImGuiCol_Text, pb::ui::col::faint);
-            ImGui::TextWrapped("%s", pieces[i].hint);
+            ImGui::PushTextWrapPos(0.0f);
+            ImGui::TextUnformatted(pieces[i].hint);
+            ImGui::PopTextWrapPos();
             ImGui::PopStyleColor();
         }
         ImGui::EndChild();
@@ -2701,6 +2708,8 @@ void kitCards(const KitPiece* pieces, int count, std::string* placing,
             *status = std::string("Placing ") + pieces[i].name +
                       " — click in a viewport to drop it.";
         }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("%s\n%s", pieces[i].name, pieces[i].hint);
         ImGui::PopStyleColor(2);
         ImGui::PopID();
     }

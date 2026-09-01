@@ -64,11 +64,71 @@ out vec4 fragColor;
 void main() { fragColor = uColor; }
 )";
 
+// Infinite ground grid for the 3D view: a fullscreen triangle whose fragments
+// are ray-cast onto the z=0 plane, then shaded as an anti-aliased grid that
+// fades with distance. Red = +X world axis, green = +Y (Hammer / Blender look).
+const char* kGrid3dVert = R"(#version 330 core
+uniform mat4 uInvVP;
+uniform vec3 uCamPos;
+out vec3 vNear;
+out vec3 vFar;
+vec3 unproject(vec2 ndc, float z) {
+    vec4 p = uInvVP * vec4(ndc, z, 1.0);
+    return p.xyz / p.w;
+}
+void main() {
+    vec2 p = vec2((gl_VertexID << 1) & 2, gl_VertexID & 2) * 2.0 - 1.0;
+    vNear = unproject(p, -1.0);
+    vFar  = unproject(p,  1.0);
+    gl_Position = vec4(p, 0.999999, 1.0);
+}
+)";
+
+const char* kGrid3dFrag = R"(#version 330 core
+in vec3 vNear;
+in vec3 vFar;
+uniform vec3 uCamPos;
+uniform mat4 uVP;
+out vec4 fragColor;
+
+float gridMask(vec2 c, float step) {
+    vec2 g = abs(fract(c / step - 0.5) - 0.5) / fwidth(c / step);
+    return 1.0 - min(min(g.x, g.y), 1.0);
+}
+void main() {
+    vec3 dir = vFar - vNear;
+    float t = -vNear.z / dir.z;
+    if (t <= 0.0) discard;                 // plane behind the eye
+    vec3 w = vNear + dir * t;              // world hit on z=0
+
+    float dist = length(w.xy - uCamPos.xy);
+    float fade = clamp(1.0 - dist / 8192.0, 0.0, 1.0);
+    fade *= fade;
+    if (fade < 0.003) discard;
+
+    float fine   = gridMask(w.xy, 64.0);   // 1 Hammer grid unit block
+    float coarse = gridMask(w.xy, 512.0);
+    vec3  col = mix(vec3(0.32), vec3(0.46), coarse);
+    float a = max(fine * 0.5, coarse * 0.9);
+
+    float axisW = fwidth(w.x) * 1.5;
+    if (abs(w.y) < axisW) { col = vec3(0.85, 0.24, 0.24); a = 1.0; }  // +X red
+    if (abs(w.x) < axisW) { col = vec3(0.36, 0.72, 0.30); a = 1.0; }  // +Y green
+
+    // Depth so the grid is occluded by geometry in front of it.
+    vec4 clip = uVP * vec4(w, 1.0);
+    gl_FragDepth = (clip.z / clip.w) * 0.5 + 0.5;
+    fragColor = vec4(col, a * fade);
+}
+)";
+
 }  // namespace
 
 bool SceneRenderer::init() {
     if (!worldShader_.compile(kWorldVert, kWorldFrag, "world")) return false;
     if (!lineShader_.compile(kLineVert, kLineFrag, "line")) return false;
+    if (!grid3dShader_.compile(kGrid3dVert, kGrid3dFrag, "grid3d")) return false;
+    glGenVertexArrays(1, &grid3dVao_);
     buildGrid();
     glGenVertexArrays(1, &markerVao_);
     glGenBuffers(1, &markerVbo_);
@@ -237,6 +297,53 @@ void SceneRenderer::drawWire(const glm::mat4& vp, const glm::vec3& color, float 
     lineShader_.set("uColor", glm::vec4(color, alpha));
     glBindVertexArray(wireVao_);
     glDrawArrays(GL_LINES, 0, wireCount_);
+    glBindVertexArray(0);
+}
+
+void SceneRenderer::drawGroundGrid3D(const Camera& cam, float aspect) {
+    const glm::mat4 vp = cam.proj(aspect) * cam.view();
+    grid3dShader_.use();
+    grid3dShader_.set("uInvVP", glm::inverse(vp));
+    grid3dShader_.set("uVP", vp);
+    grid3dShader_.set("uCamPos", cam.pos);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glEnable(GL_DEPTH_TEST);
+    glDepthMask(GL_FALSE);
+    glBindVertexArray(grid3dVao_);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
+    glBindVertexArray(0);
+    glDepthMask(GL_TRUE);
+    glDisable(GL_BLEND);
+}
+
+void SceneRenderer::drawOriginMarker(const glm::mat4& vp) {
+    // A small ring + XYZ axis ticks at the world origin — a "you are here"
+    // reference for an empty map.
+    std::vector<glm::vec3> lines;
+    const float r = 24.0f;
+    for (int i = 0; i < 48; ++i) {
+        const float a0 = (i / 48.0f) * 6.2831853f;
+        const float a1 = ((i + 1) / 48.0f) * 6.2831853f;
+        lines.push_back({std::cos(a0) * r, std::sin(a0) * r, 0.0f});
+        lines.push_back({std::cos(a1) * r, std::sin(a1) * r, 0.0f});
+    }
+    lineShader_.use();
+    lineShader_.set("uMVP", vp);
+    glBindVertexArray(markerVao_);
+    glBindBuffer(GL_ARRAY_BUFFER, markerVbo_);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(glm::vec3), nullptr);
+    auto blast = [&](const std::vector<glm::vec3>& v, const glm::vec4& c) {
+        glBufferData(GL_ARRAY_BUFFER, v.size() * sizeof(glm::vec3), v.data(),
+                     GL_DYNAMIC_DRAW);
+        lineShader_.set("uColor", c);
+        glDrawArrays(GL_LINES, 0, static_cast<GLsizei>(v.size()));
+    };
+    blast(lines, glm::vec4(0.9f, 0.9f, 0.95f, 0.9f));
+    blast({{-40, 0, 0}, {40, 0, 0}}, glm::vec4(0.85f, 0.24f, 0.24f, 1.0f));
+    blast({{0, -40, 0}, {0, 40, 0}}, glm::vec4(0.36f, 0.72f, 0.30f, 1.0f));
+    blast({{0, 0, 0}, {0, 0, 56}}, glm::vec4(0.36f, 0.55f, 0.95f, 1.0f));
     glBindVertexArray(0);
 }
 
@@ -412,11 +519,13 @@ void SceneRenderer::renderView(const Camera& cam, int pxW, int pxH,
     const glm::mat4 vp = cam.proj(aspect) * cam.view();
 
     if (s.showGrid && ortho) drawGrid(cam, vp, aspect);
+    if (s.showGrid && !ortho) drawGroundGrid3D(cam, aspect);
 
     if (ortho) {
         drawWire(vp, glm::vec3(0.82f, 0.85f, 0.90f), 0.95f);
         drawMarkers(vp, s, true);
     } else {
+        if (!hasWorld()) drawOriginMarker(vp);   // empty map: show where 0,0,0 is
         drawSolid(vp, s);
         if (s.wireOverlay) {
             glEnable(GL_BLEND);
