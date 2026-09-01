@@ -58,6 +58,13 @@ public:
     void debugPlacePrefab(const std::string& p) { placePrefab(p, glm::vec3(0)); }
     void debugDumpProps();
     void debugNoDecompile() { suppressAutoDecompile_ = true; }
+    void debugNewBlank() {
+        doc_.newBlank("untitled");
+        history_.reset(doc_);
+        showWelcome_ = false;
+        buildAndUpload(meshOpts_);
+        for (auto& v : views_) { v.camera = Camera{}; v.camera.kind = v.kind; }
+    }
     void debugCordon(float half) {
         cordonOn_ = true;
         cordonMin_ = glm::vec3(-half);
