@@ -32,6 +32,7 @@ struct Options {
     bool ui = false;  // capture the full docked UI, not just a viewport
     bool pro = false;
     int selectSolid = -1;
+    int selectEnt = -1;
     bool sampleMap = false;
     bool compile = false;
     bool workshop = false;
@@ -62,6 +63,7 @@ Options parseArgs(int argc, char** argv) {
         else if (a == "--ui") o.ui = true;
         else if (a == "--pro") o.pro = true;
         else if (a == "--select") o.selectSolid = std::atoi(next("0").c_str());
+        else if (a == "--select-ent") o.selectEnt = std::atoi(next("0").c_str());
         else if (a == "--sample-map") o.sampleMap = true;
         else if (a == "--compile") o.compile = true;
         else if (a == "--workshop") o.workshop = true;
@@ -90,6 +92,7 @@ int runHeadlessScreenshot(const Options& opt, GLFWwindow* window, float uiScale)
     if (opt.sampleMap) editor.debugBuildSampleMap();
     if (!opt.importObjPath.empty()) editor.debugImportObj(opt.importObjPath);
     if (opt.selectSolid >= 0) editor.debugSelectWorldSolid(opt.selectSolid);
+    if (opt.selectEnt >= 0) editor.debugSelectEntity(opt.selectEnt);
     if (!opt.saveVmfPath.empty()) editor.saveVmf(opt.saveVmfPath);
     if (opt.compile) editor.debugStartCompile(true);
     if (opt.workshop) editor.debugShowWorkshop();
