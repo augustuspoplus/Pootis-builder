@@ -198,6 +198,7 @@ private:
     void drawEntityTags(ViewPanel& p, float aspect, ImDrawList* dl);
     void handleBlockTool(ViewPanel& p);
     void handleSelectionResize(ViewPanel& p);    // Hammer-style bbox drag handles
+    void handleSelectionMove(ViewPanel& p);      // click the body + drag to move
     void rebuildHandles();                       // sub-object handles for selection_[0]
     void handleSubObjectInput(ViewPanel& p);
     void drawSubObjectOverlay(ViewPanel& p, float aspect, ImDrawList* dl);
@@ -295,6 +296,13 @@ private:
     glm::vec3 resizeStartMin_{0}, resizeStartMax_{0};
     std::vector<map::Solid> resizeSnap_;
     std::vector<map::SolidRef> resizeRefs_;
+
+    // Body-drag move (Select tool)
+    int moveDrag_ = 0;             // 0 none, 1 planar, 2 vertical
+    bool movePending_ = false;     // pressed on the body, waiting for a drag
+    glm::vec3 moveGrab_{0};        // world point under the cursor at grab
+    glm::vec3 moveEntStart_{0};    // point-entity origin at grab
+    bool moveIsEnt_ = false;
 
     std::vector<map::Solid> clipboard_;
     map::MapEntity clipboardEnt_;

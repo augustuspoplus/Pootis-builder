@@ -1129,6 +1129,16 @@ void Editor::drawGizmo(ViewPanel& p, float aspect) {
     ImGuizmo::SetDrawlist();
     ImGuizmo::SetRect(p.contentMin.x, p.contentMin.y, p.contentSize.x, p.contentSize.y);
     ImGuizmo::SetID(static_cast<int>(p.kind));
+    ImGuizmo::SetGizmoSizeClipSpace(0.17f * pb::ui::g_scale);  // bigger than the ~0.1 default
+    ImGuizmo::AllowAxisFlip(false);
+    {
+        ImGuizmo::Style& gs = ImGuizmo::GetStyle();
+        gs.TranslationLineThickness = 5.0f;
+        gs.TranslationLineArrowSize = 8.0f;
+        gs.RotationLineThickness = 4.0f;
+        gs.ScaleLineThickness = 5.0f;
+        gs.CenterCircleSize = 7.0f;
+    }
 
     const glm::mat4 view = p.camera.view();
     const glm::mat4 proj = p.camera.proj(aspect);
@@ -2201,6 +2211,7 @@ void Editor::handleViewportInput(ViewPanel& p) {
     handleTextureTool(p);
     handleClipTool(p);
     handleSelectionResize(p);
+    handleSelectionMove(p);
 
     if (!io.KeyCtrl && !ImGui::IsMouseDown(ImGuiMouseButton_Right)) {
         if (ImGui::IsKeyPressed(ImGuiKey_W)) gizmoMode_ = 0;
@@ -2254,7 +2265,7 @@ void Editor::handleViewportInput(ViewPanel& p) {
         tool_ == Tool::Vertex && !subDragging_ && subHot_ < 0 &&
         !(subActive && subSel_ >= 0);
     if (hasDoc() && (tool_ == Tool::Select || vtxPassthrough) &&
-        resizeHandle_ < 0 && resizeHot_ < 0 &&
+        resizeHandle_ < 0 && resizeHot_ < 0 && moveDrag_ == 0 &&
         ImGui::IsMouseReleased(ImGuiMouseButton_Left) &&
         !ImGui::IsMouseDragPastThreshold(ImGuiMouseButton_Left, 4.0f)) {
         const ImVec2 m = ImGui::GetMousePos();
@@ -2587,6 +2598,8 @@ void Editor::drawKeysOverlay() {
             {"Ctrl+A", "Select all brushes"},
             {"Delete / Backspace", "Delete selection"},
             {"[ / ]", "Rotate selection about Z  (Shift = other way)"},
+            {"drag the object", "Move it — 3D drags on the ground, Shift = up/down"},
+            {"drag a corner box", "Resize that side / corner"},
             {"W / E / R", "Move / rotate / scale gizmo  (Pro, with a selection)"},
             {"F", "Frame the map / selection"},
             {"Esc", "Cancel placement / clear selection"},
@@ -5579,7 +5592,7 @@ void Editor::handleSelectionResize(ViewPanel& p) {
     const ImVec2 m = ImGui::GetMousePos();
     resizeHot_ = -1;
     if (resizeHandle_ < 0) {
-        float best = persp ? 11.0f : 9.0f;
+        float best = pb::ui::dp(persp ? 17.0f : 14.0f);
         for (int h = 0; h < nHandles; ++h) {
             const ImVec2 s = project(handleWorld(h));
             const float d = std::hypot(s.x - m.x, s.y - m.y);
@@ -5665,6 +5678,153 @@ void Editor::handleSelectionResize(ViewPanel& p) {
     }
 }
 
+// Grab anywhere on the selected object and drag it. 3D view moves along the
+// ground (hold Shift for up/down); the 2D views move in the view plane.
+void Editor::handleSelectionMove(ViewPanel& p) {
+    if (tool_ != Tool::Select || gizmoUsing_ || resizeHandle_ >= 0 ||
+        resizeHot_ >= 0)
+        return;
+
+    const bool haveBrush = !selection_.empty();
+    const bool haveEnt = !haveBrush && selectedEntity_ >= 0 &&
+                         selectedEntity_ < (int)doc_.entities().size();
+    if (!haveBrush && !haveEnt) return;
+
+    glm::vec3 mn(1e30f), mx(-1e30f);
+    if (haveBrush) {
+        for (const auto& r : selection_)
+            if (const map::Solid* s = doc_.resolve(r)) {
+                mn = glm::min(mn, s->boundsMin);
+                mx = glm::max(mx, s->boundsMax);
+            }
+    } else {
+        mn = doc_.entities()[selectedEntity_].origin - glm::vec3(20);
+        mx = doc_.entities()[selectedEntity_].origin + glm::vec3(20);
+    }
+    if (mn.x > mx.x) return;
+    const glm::vec3 ctr = 0.5f * (mn + mx);
+    const ImVec2 m = ImGui::GetMousePos();
+    const bool persp = p.kind == ViewKind::Perspective;
+    glm::vec3 ro, rd;
+    p.camera.pixelRay({m.x - p.contentMin.x, m.y - p.contentMin.y}, p.contentSize,
+                      ro, rd);
+
+    auto planePt = [&](float planeZ, bool vertical) -> glm::vec3 {
+        if (vertical) {
+            // closest approach of the ray to the vertical line through ctr
+            const glm::vec3 u(0, 0, 1);
+            const glm::vec3 w0 = ctr - ro;
+            const float b = glm::dot(u, rd), c = glm::dot(rd, rd);
+            const float dd = glm::dot(u, w0), e = glm::dot(rd, w0);
+            const float den = c - b * b;
+            const float t = std::fabs(den) > 1e-5f ? (b * e - c * dd) / den : 0.0f;
+            return glm::vec3(ctr.x, ctr.y, ctr.z + t);
+        }
+        if (std::fabs(rd.z) < 1e-4f) return ctr;
+        const float t = (planeZ - ro.z) / rd.z;
+        return ro + rd * t;
+    };
+
+    // ---- arm on press over the body; only becomes a move once you drag ----
+    if (moveDrag_ == 0 && !movePending_ && p.hovered &&
+        ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+        bool over = false;
+        if (persp) {
+            float t;
+            if (haveBrush) {
+                for (const auto& r : selection_)
+                    if (const map::Solid* s = doc_.resolve(r))
+                        if (s->valid && map::raySolid(ro, rd, *s, t)) { over = true; break; }
+            }
+            if (!over) {  // fall back to the projected bbox
+                const glm::mat4 vp =
+                    p.camera.proj(p.contentSize.x / std::max(1.0f, p.contentSize.y)) *
+                    p.camera.view();
+                const glm::vec4 cc = vp * glm::vec4(ctr, 1.0f);
+                if (cc.w > 1e-4f) {
+                    const ImVec2 sp(
+                        p.contentMin.x + (cc.x / cc.w * 0.5f + 0.5f) * p.contentSize.x,
+                        p.contentMin.y +
+                            (1.0f - (cc.y / cc.w * 0.5f + 0.5f)) * p.contentSize.y);
+                    over = std::hypot(sp.x - m.x, sp.y - m.y) < pb::ui::dp(28.0f);
+                }
+            }
+        } else {
+            // inside the projected 2D box, inset so the edge handles still win
+            const glm::mat4 vp =
+                p.camera.proj(p.contentSize.x / std::max(1.0f, p.contentSize.y)) *
+                p.camera.view();
+            auto pr = [&](const glm::vec3& w) {
+                const glm::vec4 c = vp * glm::vec4(w, 1.0f);
+                return ImVec2(
+                    p.contentMin.x + (c.x / c.w * 0.5f + 0.5f) * p.contentSize.x,
+                    p.contentMin.y + (1.0f - (c.y / c.w * 0.5f + 0.5f)) * p.contentSize.y);
+            };
+            const ImVec2 a = pr(mn), b = pr(mx);
+            const float x0 = std::min(a.x, b.x) + 10, x1 = std::max(a.x, b.x) - 10;
+            const float y0 = std::min(a.y, b.y) + 10, y1 = std::max(a.y, b.y) - 10;
+            over = m.x > x0 && m.x < x1 && m.y > y0 && m.y < y1;
+        }
+        if (over) {
+            movePending_ = true;
+            moveIsEnt_ = haveEnt;
+            if (haveEnt) moveEntStart_ = doc_.entities()[selectedEntity_].origin;
+            resizeSnap_.clear();
+            resizeRefs_.clear();
+            if (haveBrush)
+                for (const auto& r : selection_)
+                    if (const map::Solid* s = doc_.resolve(r)) {
+                        resizeSnap_.push_back(*s);
+                        resizeRefs_.push_back(r);
+                    }
+        }
+    }
+
+    // Promote to an actual move once the cursor leaves the click point.
+    if (movePending_ && moveDrag_ == 0 &&
+        ImGui::IsMouseDragPastThreshold(ImGuiMouseButton_Left, 4.0f)) {
+        moveDrag_ = (persp && ImGui::GetIO().KeyShift) ? 2 : 1;
+        moveGrab_ = planePt(ctr.z, moveDrag_ == 2);
+    }
+
+    // ---- dragging ----
+    if (moveDrag_ != 0 && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+        const glm::vec3 now = planePt(moveGrab_.z, moveDrag_ == 2);
+        glm::vec3 d = now - moveGrab_;
+        if (moveDrag_ == 1) d.z = 0.0f;
+        else d = glm::vec3(0, 0, d.z);
+        d = snapVec(d);
+        if (d != glm::vec3(0)) {
+            if (moveIsEnt_) {
+                auto& e = doc_.entities()[selectedEntity_];
+                e.origin = moveEntStart_ + d;
+                e.kv.set("origin", std::to_string((int)e.origin.x) + " " +
+                                       std::to_string((int)e.origin.y) + " " +
+                                       std::to_string((int)e.origin.z));
+            } else {
+                for (size_t i = 0; i < resizeRefs_.size(); ++i)
+                    if (map::Solid* s = doc_.resolve(resizeRefs_[i])) {
+                        *s = resizeSnap_[i];
+                        s->translate(d);
+                    }
+            }
+            docMeshDirty_ = true;
+        }
+    }
+
+    if (ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
+        const bool didMove = moveDrag_ != 0;
+        moveDrag_ = 0;
+        movePending_ = false;
+        resizeSnap_.clear();
+        resizeRefs_.clear();
+        if (didMove) {
+            afterEdit("Move");
+            status_ = moveIsEnt_ ? "Moved entity" : "Moved selection";
+        }
+    }
+}
+
 void Editor::drawSelectionDims(ViewPanel& p, float aspect, ImDrawList* dl) {
     if (selection_.empty()) return;
     glm::vec3 mn(1e30f), mx(-1e30f);
@@ -5691,12 +5851,13 @@ void Editor::drawSelectionDims(ViewPanel& p, float aspect, ImDrawList* dl) {
             const ImVec2 s = pr(wp, ok);
             if (!ok) continue;
             const bool hot = (hnd == resizeHot_ || hnd == resizeHandle_);
-            const float r = hot ? 6.0f : 4.0f;
+            const float r = pb::ui::dp(hot ? 10.0f : 7.0f);
             const ImU32 hc = hot ? IM_COL32(255, 180, 90, 255)
-                                 : IM_COL32(255, 210, 140, 210);
-            dl->AddRectFilled(ImVec2(s.x - r, s.y - r), ImVec2(s.x + r, s.y + r), hc);
+                                 : IM_COL32(255, 214, 150, 235);
+            dl->AddRectFilled(ImVec2(s.x - r, s.y - r), ImVec2(s.x + r, s.y + r), hc,
+                              pb::ui::dp(2.0f));
             dl->AddRect(ImVec2(s.x - r, s.y - r), ImVec2(s.x + r, s.y + r),
-                        IM_COL32(20, 20, 25, 220));
+                        IM_COL32(15, 15, 18, 235), pb::ui::dp(2.0f), 0, 1.5f);
         }
         return;
     }
@@ -5726,13 +5887,14 @@ void Editor::drawSelectionDims(ViewPanel& p, float aspect, ImDrawList* dl) {
         {(x0 + x1) * 0.5f, y0}, {(x0 + x1) * 0.5f, y1}};
     for (int i = 0; i < 8; ++i) {
         const bool hot = (i == resizeHot_ || i == resizeHandle_);
-        const float r = hot ? 5.0f : 3.5f;
+        const float r = pb::ui::dp(hot ? 8.5f : 6.0f);
         const ImU32 hc = hot ? IM_COL32(255, 180, 90, 255)
-                             : IM_COL32(255, 210, 140, 200);
+                             : IM_COL32(255, 214, 150, 230);
         dl->AddRectFilled(ImVec2(pts[i].x - r, pts[i].y - r),
-                          ImVec2(pts[i].x + r, pts[i].y + r), hc);
+                          ImVec2(pts[i].x + r, pts[i].y + r), hc, pb::ui::dp(2.0f));
         dl->AddRect(ImVec2(pts[i].x - r, pts[i].y - r),
-                    ImVec2(pts[i].x + r, pts[i].y + r), IM_COL32(20, 20, 25, 220));
+                    ImVec2(pts[i].x + r, pts[i].y + r), IM_COL32(15, 15, 18, 235),
+                    pb::ui::dp(2.0f), 0, 1.5f);
     }
 }
 
