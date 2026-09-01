@@ -213,10 +213,10 @@ void Editor::buildAndUpload(const MeshBuildOptions& opts) {
             return ec ? ec->studioModel : std::string();
         };
         mesh_ = map::buildDocMesh(doc_, materials_, modelForClass);
-        if (meshOpts_.bakeProps) model::bakePropModels(mesh_, sourceFs_);
+        if (opts.bakeProps) model::bakePropModels(mesh_, sourceFs_);
     } else {
         mesh_ = buildWorldMesh(bsp_, opts);
-        if (meshOpts_.bakeProps) model::bakePropModels(mesh_, sourceFs_);
+        if (opts.bakeProps) model::bakePropModels(mesh_, sourceFs_);
     }
 
     // Baked prop geometry is appended after the mesh computes its bounds; grow
@@ -295,56 +295,54 @@ void Editor::frame() {
     ImGui::DockSpace(dockId, ImVec2(0, 0), ImGuiDockNodeFlags_PassthruCentralNode);
     ImGui::End();
 
-    // ---- global keyboard shortcuts (not while typing in a field) ----------
-    if (!ImGui::GetIO().WantTextInput) {
-        const bool ctrl = ImGui::GetIO().KeyCtrl;
-        const bool shift = ImGui::GetIO().KeyShift;
-        if (ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_O)) promptOpenMap();
-        if (ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_Z)) undo();
-        if (ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_Y) ||
-            ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_Z))
-            redo();
-        if (ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_S) && hasDoc())
-            saveMap(shift);  // Ctrl+Shift+S = Save As
-        if (ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_K)) showPalette_ = true;
-        if (ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_C)) copySelection();
-        if (ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_V)) pasteClipboard();
-        if (ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_X)) {
-            copySelection();
-            deleteSelection();
-        }
-        if (ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_D)) duplicateSelection();
-        if (ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_A) && hasDoc()) {
+    // ---- global keyboard shortcuts -------------------------------------------
+    // Raw key state (not ImGui's focus-routed chords) so they fire no matter
+    // which panel has focus. Suppressed only while typing in a text field.
+    {
+        ImGuiIO& io = ImGui::GetIO();
+        const bool ctrl = io.KeyCtrl;
+        const bool shift = io.KeyShift;
+        const bool typing = io.WantTextInput;
+        auto tap = [&](ImGuiKey k) { return ImGui::IsKeyPressed(k, false); };
+        auto ck = [&](ImGuiKey k) { return !typing && ctrl && tap(k); };
+        auto pk = [&](ImGuiKey k) { return !typing && !ctrl && tap(k); };
+
+        if (ck(ImGuiKey_O)) promptOpenMap();
+        if (ck(ImGuiKey_Z)) { shift ? redo() : undo(); }
+        if (ck(ImGuiKey_Y)) redo();
+        if (ck(ImGuiKey_S) && hasDoc()) saveMap(shift);  // Ctrl+Shift+S = Save As
+        if (ck(ImGuiKey_K)) showPalette_ = true;
+        if (ck(ImGuiKey_C)) copySelection();
+        if (ck(ImGuiKey_V)) pasteClipboard();
+        if (ck(ImGuiKey_X)) { copySelection(); deleteSelection(); }
+        if (ck(ImGuiKey_D)) duplicateSelection();
+        if (ck(ImGuiKey_A) && hasDoc()) {
             selection_.clear();
             for (int i = 0; i < (int)doc_.worldSolids().size(); ++i)
                 selection_.push_back({-1, i});
             rebuildSelectionWire();
             status_ = "Selected all brushes";
         }
-        if (ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_B) && hasDoc()) {
+        if (ck(ImGuiKey_B) && hasDoc()) {
             showCompile_ = true;
             if (!compiler_.running()) startCompile();
         }
-        if (!ctrl && ImGui::IsKeyPressed(ImGuiKey_Delete)) deleteSelection();
-        if (!ctrl && ImGui::IsKeyPressed(ImGuiKey_Backspace)) deleteSelection();
-        if (!ctrl && ImGui::IsKeyPressed(ImGuiKey_F) && hasMap()) frameAllViews();
-        if (!ctrl && ImGui::IsKeyPressed(ImGuiKey_F1)) showKeys_ = !showKeys_;
-        if (ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+        if (pk(ImGuiKey_Delete) || pk(ImGuiKey_Backspace)) deleteSelection();
+        if (pk(ImGuiKey_F) && hasMap()) frameAllViews();
+        if (pk(ImGuiKey_F1)) showKeys_ = !showKeys_;
+        if (!typing && tap(ImGuiKey_Escape)) {
             if (!placing_.empty()) { placing_.clear(); roadPts_.clear(); roadActive_ = false; }
             else clearSelection();
         }
-        // Rotate the selection 15 deg about Z (Shift = -15).
-        if (!ctrl && ImGui::IsKeyPressed(ImGuiKey_LeftBracket))
-            rotateSelection(2, shift ? 15.0f : -15.0f);
-        if (!ctrl && ImGui::IsKeyPressed(ImGuiKey_RightBracket))
-            rotateSelection(2, shift ? -15.0f : 15.0f);
+        if (pk(ImGuiKey_LeftBracket)) rotateSelection(2, shift ? 15.0f : -15.0f);
+        if (pk(ImGuiKey_RightBracket)) rotateSelection(2, shift ? -15.0f : 15.0f);
         // Pro gizmo mode: W move / E rotate / R scale — only with a selection
         // and not while RMB-flying (so WASD nav isn't hijacked).
-        if (mode_ == Mode::Pro && !ctrl && !selection_.empty() &&
+        if (mode_ == Mode::Pro && !typing && !ctrl && !selection_.empty() &&
             !ImGui::IsMouseDown(ImGuiMouseButton_Right)) {
-            if (ImGui::IsKeyPressed(ImGuiKey_W)) gizmoMode_ = 0;
-            if (ImGui::IsKeyPressed(ImGuiKey_E)) gizmoMode_ = 1;
-            if (ImGui::IsKeyPressed(ImGuiKey_R)) gizmoMode_ = 2;
+            if (tap(ImGuiKey_W)) gizmoMode_ = 0;
+            if (tap(ImGuiKey_E)) gizmoMode_ = 1;
+            if (tap(ImGuiKey_R)) gizmoMode_ = 2;
         }
     }
 
@@ -400,9 +398,15 @@ void Editor::frame() {
         --focusPanelFrames_;
     }
 
-    // Live preview while dragging the gizmo (history is recorded on release).
-    if (docMeshDirty_ && gizmoUsing_) {
-        buildAndUpload(meshOpts_);
+    // Live preview while dragging (gizmo, bbox handles, body-move, sub-object).
+    // History is recorded once on release.
+    if (docMeshDirty_ &&
+        (gizmoUsing_ || resizeHandle_ >= 0 || moveDrag_ != 0 || subDragging_)) {
+        // On big maps skip the prop re-bake each drag frame — the props snap
+        // back on release. Small maps rebuild everything (imperceptible).
+        MeshBuildOptions o = meshOpts_;
+        if (mesh_.props.size() > 40) o.bakeProps = false;
+        buildAndUpload(o);
         rebuildSelectionWire();
     }
 }
@@ -2212,6 +2216,7 @@ void Editor::handleViewportInput(ViewPanel& p) {
     handleClipTool(p);
     handleSelectionResize(p);
     handleSelectionMove(p);
+    updateHoverHighlight(p);
 
     if (!io.KeyCtrl && !ImGui::IsMouseDown(ImGuiMouseButton_Right)) {
         if (ImGui::IsKeyPressed(ImGuiKey_W)) gizmoMode_ = 0;
@@ -5676,6 +5681,78 @@ void Editor::handleSelectionResize(ViewPanel& p) {
         resizeRefs_.clear();
         afterEdit("Resize");
     }
+}
+
+// Soft outline of whatever the cursor is over, so you can see what a click or
+// drag will grab before you commit.
+void Editor::updateHoverHighlight(ViewPanel& p) {
+    const bool busy = gizmoUsing_ || resizeHandle_ >= 0 || moveDrag_ != 0 ||
+                      subDragging_ || movePending_;
+    if (!hasDoc() || tool_ != Tool::Select || !placing_.empty() || busy) {
+        if ((hoverRef_.valid() || hoverEnt_ >= 0)) {
+            hoverRef_ = {};
+            hoverEnt_ = -1;
+            renderer_.setHoverWire({});
+        }
+        return;
+    }
+    if (!p.hovered) return;  // another panel may own the hover this frame
+
+    glm::vec3 ro, rd;
+    const ImVec2 m = ImGui::GetMousePos();
+    p.camera.pixelRay({m.x - p.contentMin.x, m.y - p.contentMin.y}, p.contentSize,
+                      ro, rd);
+
+    float bestT = 1e30f;
+    map::SolidRef hit;
+    int hitEnt = -1;
+    auto test = [&](const map::Solid& s, int ent, int idx) {
+        float t;
+        if (s.valid && !s.hidden && map::raySolid(ro, rd, s, t) && t > 0 && t < bestT) {
+            bestT = t;
+            hit = {ent, idx};
+            hitEnt = -1;
+        }
+    };
+    for (int i = 0; i < (int)doc_.worldSolids().size(); ++i)
+        test(doc_.worldSolids()[i], -1, i);
+    for (int e = 0; e < (int)doc_.entities().size(); ++e) {
+        const auto& ent = doc_.entities()[e];
+        if (ent.hidden) continue;
+        for (int i = 0; i < (int)ent.solids.size(); ++i) test(ent.solids[i], e, i);
+        if (ent.solids.empty()) {  // point entity: small box
+            float t;
+            map::Solid box = map::Solid::makeBox(ent.origin - glm::vec3(18),
+                                                 ent.origin + glm::vec3(18), "");
+            if (map::raySolid(ro, rd, box, t) && t > 0 && t < bestT) {
+                bestT = t;
+                hit = {};
+                hitEnt = e;
+            }
+        }
+    }
+
+    // Don't highlight what's already selected.
+    bool selected = hitEnt >= 0 ? (hitEnt == selectedEntity_)
+                                : std::find(selection_.begin(), selection_.end(),
+                                            hit) != selection_.end();
+
+    if ((hit == hoverRef_ && hitEnt == hoverEnt_)) return;  // unchanged
+    hoverRef_ = hit;
+    hoverEnt_ = hitEnt;
+
+    std::vector<glm::vec3> wire;
+    if (!selected) {
+        if (hitEnt >= 0) {
+            const glm::vec3 o = doc_.entities()[hitEnt].origin;
+            map::Solid box = map::Solid::makeBox(o - glm::vec3(18), o + glm::vec3(18),
+                                                 "");
+            wire = map::solidWire(box);
+        } else if (const map::Solid* s = doc_.resolve(hit)) {
+            wire = map::solidWire(*s);
+        }
+    }
+    renderer_.setHoverWire(wire);
 }
 
 // Grab anywhere on the selected object and drag it. 3D view moves along the

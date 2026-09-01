@@ -134,6 +134,8 @@ bool SceneRenderer::init() {
     glGenBuffers(1, &markerVbo_);
     glGenVertexArrays(1, &selVao_);
     glGenBuffers(1, &selVbo_);
+    glGenVertexArrays(1, &hovVao_);
+    glGenBuffers(1, &hovVbo_);
     return true;
 }
 
@@ -482,7 +484,32 @@ void SceneRenderer::setSelectionWire(const std::vector<glm::vec3>& lines) {
     glBindVertexArray(0);
 }
 
+void SceneRenderer::setHoverWire(const std::vector<glm::vec3>& lines) {
+    hovCount_ = static_cast<GLsizei>(lines.size());
+    if (hovCount_ == 0) return;
+    glBindVertexArray(hovVao_);
+    glBindBuffer(GL_ARRAY_BUFFER, hovVbo_);
+    glBufferData(GL_ARRAY_BUFFER, lines.size() * sizeof(glm::vec3), lines.data(),
+                 GL_DYNAMIC_DRAW);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(glm::vec3), nullptr);
+    glBindVertexArray(0);
+}
+
 void SceneRenderer::drawSelectionWire(const glm::mat4& vp) {
+    if (hovCount_ > 0) {
+        lineShader_.use();
+        lineShader_.set("uMVP", vp);
+        lineShader_.set("uColor", glm::vec4(0.55f, 0.80f, 1.0f, 0.85f));  // soft blue
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        glDisable(GL_DEPTH_TEST);
+        glBindVertexArray(hovVao_);
+        glDrawArrays(GL_LINES, 0, hovCount_);
+        glBindVertexArray(0);
+        glEnable(GL_DEPTH_TEST);
+        glDisable(GL_BLEND);
+    }
     if (selCount_ == 0) return;
     lineShader_.use();
     lineShader_.set("uMVP", vp);
