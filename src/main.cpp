@@ -34,6 +34,8 @@ struct Options {
     int selectSolid = -1;
     bool sampleMap = false;
     bool compile = false;
+    bool dumpFgd = false;
+    std::string dumpFgdClass;
     std::string saveVmfPath;
     int width = 1600;
     int height = 950;
@@ -60,6 +62,7 @@ Options parseArgs(int argc, char** argv) {
         else if (a == "--select") o.selectSolid = std::atoi(next("0").c_str());
         else if (a == "--sample-map") o.sampleMap = true;
         else if (a == "--compile") o.compile = true;
+        else if (a == "--dump-fgd") { o.dumpFgd = true; o.dumpFgdClass = next(""); }
         else if (a == "--save-vmf") o.saveVmfPath = next("");
         else if (a == "--view") {
             const std::string v = next("persp");
@@ -162,7 +165,7 @@ int main(int argc, char** argv) {
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
-    if (headless) glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);
+    if (headless || opt.dumpFgd) glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);
 
     GLFWwindow* window = glfwCreateWindow(opt.width, opt.height, "Pootis Builder",
                                           nullptr, nullptr);
@@ -198,6 +201,22 @@ int main(int argc, char** argv) {
     pb::ui::applyStyle(uiScale);
     ImGui_ImplGlfw_InitForOpenGL(window, true);
     ImGui_ImplOpenGL3_Init("#version 330 core");
+
+    if (opt.dumpFgd) {
+        pb::Editor editor;
+        int rc = 2;
+        if (editor.init(window)) {
+            editor.debugDumpFgd(opt.dumpFgdClass);
+            editor.shutdown();
+            rc = 0;
+        }
+        ImGui_ImplOpenGL3_Shutdown();
+        ImGui_ImplGlfw_Shutdown();
+        ImGui::DestroyContext();
+        glfwDestroyWindow(window);
+        glfwTerminate();
+        return rc;
+    }
 
     if (headless) {
         const int rc = runHeadlessScreenshot(opt, window, uiScale);
