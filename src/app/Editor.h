@@ -285,6 +285,9 @@ private:
     char textureFilter_[128] = {0};
     char modelFilter_[128] = {0};
     std::vector<std::string> modelList_;             // every models/**.mdl, sorted
+    std::vector<std::pair<std::string, std::vector<int>>> modelCats_;  // group -> idx
+    int modelCat_ = 0;                               // 0 = All, 1 = Recent
+    std::vector<std::string> recentModels_;
     bool modelListBuilt_ = false;
     render::ModelThumbnailer modelThumbs_;
     float flySpeed_ = 900.0f;

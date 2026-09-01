@@ -2185,12 +2185,18 @@ void Editor::drawRoadOverlay(ViewPanel& p, float aspect, ImDrawList* dl) {
 
 void Editor::placeFromPayload(const std::string& payload, const glm::vec3& at) {
     if (payload.rfind("@model:", 0) == 0) {
+        const std::string mdl = payload.substr(7);
         if (!doc_.active()) { doc_.newBlank("untitled"); history_.reset(doc_); }
         placeFgdEntity("prop_static", at);
         if (!doc_.entities().empty())
-            doc_.entities().back().kv.set("model", payload.substr(7));
+            doc_.entities().back().kv.set("model", mdl);
         afterEdit("Place prop");
-        status_ = "Placed  " + payload.substr(payload.rfind('/') + 1);
+        status_ = "Placed  " + mdl.substr(mdl.rfind('/') + 1);
+        recentModels_.erase(
+            std::remove(recentModels_.begin(), recentModels_.end(), mdl),
+            recentModels_.end());
+        recentModels_.insert(recentModels_.begin(), mdl);
+        if (recentModels_.size() > 24) recentModels_.resize(24);
     } else if (payload.rfind("@ent:", 0) == 0) {
         placeFgdEntity(payload.substr(5), at);
     } else if (payload.rfind("@kit:", 0) == 0) {
@@ -2295,19 +2301,12 @@ void Editor::handleViewportInput(ViewPanel& p) {
     // Kit placement: click drops the pending piece.
     if (!placing_.empty() && ImGui::IsMouseReleased(ImGuiMouseButton_Left) &&
         !ImGui::IsMouseDragPastThreshold(ImGuiMouseButton_Left, 4.0f)) {
-        const glm::vec3 at = viewPlanePoint(p, ImGui::GetMousePos());
-        if (placing_.rfind("@ent:", 0) == 0)
-            placeFgdEntity(placing_.substr(5), at);
-        else if (placing_.rfind("@kit:", 0) == 0)
-            placePiece(placing_.substr(5), at);
-        else if (placing_.rfind("@prefab:", 0) == 0)
+        const glm::vec3 at = dropWorldPoint(p, ImGui::GetMousePos());
+        if (placing_.rfind("@prefab:", 0) == 0)
             placePrefab(placing_.substr(8), at);
-        else if (placing_.rfind("@model:", 0) == 0) {
-            placeFgdEntity("prop_static", at);
-            if (!doc_.entities().empty())
-                doc_.entities().back().kv.set("model", placing_.substr(7));
-            afterEdit("Place prop");
-        } else
+        else if (placing_[0] == '@')
+            placeFromPayload(placing_, at);
+        else
             placePiece(placing_, at);
         if (!io.KeyShift) placing_.clear();  // hold Shift to place several
         return;
@@ -4862,24 +4861,104 @@ void Editor::drawModelGrid() {
         modelList_ = sourceFs_.listFiles("models/", ".mdl");
         modelListBuilt_ = true;
         PB_INFO("model browser: %zu models", modelList_.size());
+
+        // Bucket models into plain-language groups by their top folder.
+        auto friendly = [](const std::string& seg) -> std::string {
+            static const std::unordered_map<std::string, std::string> M = {
+                {"props_2fort", "2Fort"}, {"props_farm", "Farm / Sawmill"},
+                {"props_gravel", "Gravel Pit"}, {"props_well", "Well"},
+                {"props_mining", "Mining"}, {"props_spytech", "Spytech"},
+                {"props_hydro", "Hydro"}, {"props_swamp", "Swamp"},
+                {"props_frontline", "Frontline"}, {"props_coldfront", "Coldfront"},
+                {"props_medieval", "Medieval"}, {"props_lakeside", "Lakeside"},
+                {"props_island", "Island"}, {"props_moonbase", "Moonbase"},
+                {"props_mvm", "Mann vs Machine"}, {"props_manor", "Manor"},
+                {"props_lights", "Lighting"}, {"lights", "Lighting"},
+                {"props_doors", "Doors & gates"}, {"doors", "Doors & gates"},
+                {"props_furniture", "Furniture & interiors"},
+                {"props_interiors", "Furniture & interiors"},
+                {"props_office", "Furniture & interiors"},
+                {"props_industrial", "Industrial"}, {"props_pipes", "Industrial"},
+                {"props_generic", "Industrial"}, {"props_urban", "Industrial"},
+                {"props_wasteland", "Industrial"},
+                {"props_nature", "Nature & terrain"}, {"nature", "Nature & terrain"},
+                {"props_foliage", "Nature & terrain"},
+                {"props_forest", "Nature & terrain"},
+                {"props_rocktile", "Nature & terrain"},
+                {"props_desert", "Nature & terrain"},
+                {"props_gameplay", "Gameplay markers"},
+                {"props_teamplay", "Gameplay markers"},
+                {"props_vehicles", "Vehicles"}, {"props_junk", "Junk & debris"},
+                {"props_debris", "Junk & debris"}, {"props_trashcan", "Junk & debris"},
+                {"props_signs", "Signs"}, {"props_skybox", "Skybox / 3D-sky"},
+                {"props_halloween", "Holiday / event"},
+                {"props_christmas", "Holiday / event"},
+                {"props_holiday", "Holiday / event"},
+                {"player", "Characters & items"}, {"bots", "Characters & items"},
+                {"weapons", "Characters & items"}, {"items", "Characters & items"},
+                {"class", "Characters & items"}, {"buildables", "Characters & items"},
+                {"effects", "Effects & decals"}, {"decals", "Effects & decals"},
+            };
+            auto it = M.find(seg);
+            if (it != M.end()) return it->second;
+            std::string s = seg;
+            if (s.rfind("props_", 0) == 0) s = s.substr(6);
+            if (!s.empty()) s[0] = (char)std::toupper((unsigned char)s[0]);
+            return s.empty() ? std::string("Other") : s;
+        };
+        std::map<std::string, std::vector<int>> cats;
+        for (int i = 0; i < (int)modelList_.size(); ++i) {
+            const std::string& m = modelList_[i];  // "models/<seg>/..."
+            const size_t a = m.find('/');
+            const size_t b = a == std::string::npos ? a : m.find('/', a + 1);
+            const std::string seg = (a != std::string::npos && b != std::string::npos)
+                                        ? m.substr(a + 1, b - a - 1)
+                                        : "other";
+            cats[friendly(seg)].push_back(i);
+        }
+        modelCats_.assign(cats.begin(), cats.end());
+        std::sort(modelCats_.begin(), modelCats_.end(),
+                  [](const auto& x, const auto& y) {
+                      return x.second.size() > y.second.size();
+                  });
     }
+
+    // Category picker + search. Search (when non-empty) spans every model.
+    std::vector<const char*> catNames = {"All models", ICON_FA_CLOCK " Recently used"};
+    std::vector<std::string> catLabels;
+    for (const auto& c : modelCats_) {
+        catLabels.push_back(c.first + "  (" + std::to_string(c.second.size()) + ")");
+    }
+    for (const auto& s : catLabels) catNames.push_back(s.c_str());
+    modelCat_ = std::clamp(modelCat_, 0, (int)catNames.size() - 1);
+    ImGui::SetNextItemWidth(-1);
+    ImGui::Combo("##mdlcat", &modelCat_, catNames.data(), (int)catNames.size());
 
     ImGui::SetNextItemWidth(-1);
     ImGui::InputTextWithHint("##mdlfilter",
-                             ICON_FA_MAGNIFYING_GLASS " filter models (e.g. props_2fort)",
+                             ICON_FA_MAGNIFYING_GLASS " search all models…",
                              modelFilter_, sizeof(modelFilter_));
     std::string needle = modelFilter_;
     std::transform(needle.begin(), needle.end(), needle.begin(), ::tolower);
 
     std::vector<const std::string*> shown;
     shown.reserve(256);
-    for (const auto& m : modelList_) {
-        if (!needle.empty() && m.find(needle) == std::string::npos) continue;
-        shown.push_back(&m);
-        if (shown.size() >= 4000) break;
+    if (!needle.empty()) {
+        for (const auto& m : modelList_) {
+            if (m.find(needle) == std::string::npos) continue;
+            shown.push_back(&m);
+            if (shown.size() >= 4000) break;
+        }
+    } else if (modelCat_ == 1) {
+        for (const auto& p : recentModels_) shown.push_back(&p);
+    } else if (modelCat_ == 0) {
+        for (const auto& m : modelList_) shown.push_back(&m);
+    } else {
+        for (int idx : modelCats_[modelCat_ - 2].second)
+            shown.push_back(&modelList_[idx]);
     }
-    ImGui::TextDisabled("%zu / %zu models   —   click one, then click a viewport",
-                        shown.size(), modelList_.size());
+    ImGui::TextDisabled("%zu models   —   click one, or drag it into a viewport",
+                        shown.size());
     if (!placing_.empty() && placing_.rfind("@model:", 0) == 0) {
         ImGui::SameLine();
         if (ImGui::SmallButton("cancel")) placing_.clear();
