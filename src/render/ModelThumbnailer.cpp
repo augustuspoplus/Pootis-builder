@@ -146,7 +146,9 @@ GLuint ModelThumbnailer::render(const model::StudioModel& model,
 
     for (const auto& m : model.meshes) {
         const auto& info = materials.get(m.material);
-        const bool hasTex = info.texture != 0;
+        // Only bind a texture that actually resolved — the checker fallback
+        // reads as purple/black noise on a thumbnail, so show flat grey instead.
+        const bool hasTex = info.texture != 0 && info.found;
         prog_.set("uHasTex", hasTex ? 1 : 0);
         if (hasTex) glBindTexture(GL_TEXTURE_2D, info.texture);
         glDrawElements(GL_TRIANGLES, (GLsizei)m.indexCount, GL_UNSIGNED_INT,

@@ -87,6 +87,7 @@ struct Options {
     bool newBlank = false;
     int shape = 0;  // 1=hill 2=road
     int kitTab = -1;
+    std::string mapName, outDir;
     bool dumpFgd = false;
     std::string dumpFgdClass;
     std::string importObjPath;
@@ -132,6 +133,8 @@ Options parseArgs(int argc, char** argv) {
         else if (a == "--hill") o.shape = 1;
         else if (a == "--road") o.shape = 2;
         else if (a == "--kit-tab") o.kitTab = std::atoi(next("0").c_str());
+        else if (a == "--map-name") o.mapName = next("");
+        else if (a == "--out-dir") o.outDir = next("");
         else if (a == "--cordon") o.cordon = static_cast<float>(std::atof(next("768").c_str()));
         else if (a == "--workshop") o.workshop = true;
         else if (a == "--dump-fgd") { o.dumpFgd = true; o.dumpFgdClass = next(""); }
@@ -169,6 +172,7 @@ int runHeadlessScreenshot(const Options& opt, GLFWwindow* window, float uiScale)
     if (opt.shape == 1) editor.debugHill();
     if (opt.shape == 2) editor.debugRoad();
     if (opt.cordon > 0.0f) editor.debugCordon(opt.cordon);
+    if (!opt.mapName.empty() || !opt.outDir.empty()) editor.debugCompileOut(opt.mapName, opt.outDir);
     if (opt.compile) editor.debugStartCompile(true);
     if (opt.subDemo) editor.debugSubObjectDemo(0, opt.subDemoMode);
     if (opt.texDemo) editor.debugTextureDemo(0);

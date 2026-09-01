@@ -49,6 +49,7 @@ public:
     void debugPlaceEntity(const std::string& cls);
     void debugBuildSampleMap();
     void debugStartCompile(bool fast);
+    void debugCompileOut(const std::string& name, const std::string& dir);
     void debugShowWorkshop();
     void debugFocusPanel(const std::string& name) { focusPanel_ = name; focusPanelFrames_ = 6; }
     void debugSubObjectDemo(int solidIdx, int mode);  // select brush, deform one handle
@@ -384,6 +385,8 @@ private:
     bool compilePack_ = false;
     std::vector<std::string> packFiles_;  // "<bsp/path>|<abs source>"
     char packAddPath_[512] = {0};
+    char compileMapName_[128] = {0};      // rename the output (blank = map name)
+    char compileOutDir_[512] = {0};       // extra copy target (blank = tf/maps only)
     size_t compileLogSeen_ = 0;
 };
 

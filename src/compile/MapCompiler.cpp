@@ -132,7 +132,13 @@ void MapCompiler::poll() {
 
 void MapCompiler::run(std::string vmfPath, CompileOptions opts, GamePaths paths) {
     std::error_code ec;
-    const std::string name = fs::path(vmfPath).stem().string();
+    std::string name = fs::path(vmfPath).stem().string();
+    if (!opts.mapName.empty()) {
+        std::string clean;
+        for (char c : opts.mapName)
+            if (std::isalnum((unsigned char)c) || c == '_' || c == '-') clean += c;
+        if (!clean.empty()) name = clean;
+    }
     const bool fast = opts.profile == Profile::Fast;
 
     auto onLine = [this](const std::string& l) { put(l); };
@@ -294,6 +300,14 @@ void MapCompiler::run(std::string vmfPath, CompileOptions opts, GamePaths paths)
         return;
     }
     put("copied -> " + dst.string());
+    if (!opts.extraOutDir.empty()) {
+        std::error_code ec2;
+        fs::create_directories(opts.extraOutDir, ec2);
+        const fs::path extra = fs::path(opts.extraOutDir) / (name + ".bsp");
+        fs::copy_file(bsp, extra, fs::copy_options::overwrite_existing, ec2);
+        put(ec2 ? "extra copy failed: " + ec2.message()
+                : "copied -> " + extra.string());
+    }
     success_ = true;
 
     // ---- launch ------------------------------------------------------

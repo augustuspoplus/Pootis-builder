@@ -2637,6 +2637,11 @@ void Editor::debugStartCompile(bool fast) {
     startCompile();
 }
 
+void Editor::debugCompileOut(const std::string& name, const std::string& dir) {
+    std::snprintf(compileMapName_, sizeof(compileMapName_), "%s", name.c_str());
+    std::snprintf(compileOutDir_, sizeof(compileOutDir_), "%s", dir.c_str());
+}
+
 // ---------------------------------------------------------------------------
 // Milestone E — save, compile, play
 // ---------------------------------------------------------------------------
@@ -2761,6 +2766,8 @@ void Editor::startCompile() {
     opts.launchGame = compileLaunch_;
     opts.modelQc = pendingModelQc_;
     if (compilePack_) opts.packFiles = packFiles_;
+    opts.mapName = compileMapName_;
+    opts.extraOutDir = compileOutDir_;
     compileLogSeen_ = 0;
     compiler_.start(compilePath, opts, gamePaths_);
     status_ = "Compiling " + doc_.name() + " …";
@@ -2780,6 +2787,31 @@ void Editor::drawCompileWindow() {
     const bool running = compiler_.running();
 
     ImGui::BeginDisabled(running);
+
+    sectionLabel("MAP NAME & OUTPUT");
+    if (compileMapName_[0] == 0 && hasDoc())
+        std::snprintf(compileMapName_, sizeof(compileMapName_), "%s",
+                      doc_.name().c_str());
+    ImGui::SetNextItemWidth(-1);
+    ImGui::InputTextWithHint("##mapname", "map file name (letters, digits, _)",
+                             compileMapName_, sizeof(compileMapName_));
+    ImGui::PushStyleColor(ImGuiCol_Text, col::faint);
+    ImGui::TextUnformatted("Always installed to the TF2 maps folder so you can "
+                           "play it right away.");
+    ImGui::PopStyleColor();
+    ImGui::SetNextItemWidth(-90);
+    ImGui::InputTextWithHint("##outdir", "also copy the .bsp to this folder…",
+                             compileOutDir_, sizeof(compileOutDir_));
+    ImGui::SameLine();
+    if (ImGui::Button("Browse…##outdir")) {
+        const std::string d = openFileDialog(
+            "Pick any file in the target folder", "All files\0*.*\0\0", nullptr);
+        if (!d.empty())
+            std::snprintf(compileOutDir_, sizeof(compileOutDir_), "%s",
+                          fs::path(d).parent_path().string().c_str());
+    }
+    ImGui::Dummy(ImVec2(0, 6));
+
     sectionLabel("PROFILE");
     ImGui::RadioButton("Fast  (quick, for iterating)", &compileProfile_, 0);
     ImGui::SameLine(0, 16);
@@ -3877,7 +3909,8 @@ void Editor::drawSimpleEntities() {
     ImGui::PopStyleColor();
     ImGui::Dummy(ImVec2(0, 4));
 
-    const float cell = dp(52.0f);
+    const float cell = dp(46.0f);
+    ImDrawList* dl = ImGui::GetWindowDrawList();
     for (const auto& it : items) {
         const bool isKit = std::strncmp(it.spec, "kit:", 4) == 0;
         const std::string cls = isKit ? "" : it.spec;
@@ -3889,40 +3922,15 @@ void Editor::drawSimpleEntities() {
         const fgd::EntityClass* ec = cls.empty() ? nullptr : fgd_.flattened(cls);
         if (ec && !ec->studioModel.empty()) {
             const std::string& mp = ec->studioModel;
-            if (modelThumbs_.has(mp))
-                tex = modelThumbs_.get(mp, model::loadStudioModel(sourceFs_, mp),
-                                       materials_);
-            else
-                tex = modelThumbs_.get(mp, model::loadStudioModel(sourceFs_, mp),
-                                       materials_);
+            tex = modelThumbs_.get(mp, model::loadStudioModel(sourceFs_, mp),
+                                   materials_);
         }
 
         ImGui::PushID(it.name);
-        ImGui::BeginGroup();
-        if (tex) {
-            ImGui::Image(static_cast<ImTextureID>((intptr_t)tex), ImVec2(cell, cell));
-        } else {
-            glm::vec3 rgb = ec && ec->hasColor ? ec->color : glm::vec3(0.62f);
-            ImGui::PushStyleColor(ImGuiCol_Button,
-                                  ImVec4(rgb.r, rgb.g, rgb.b, 0.28f));
-            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(rgb.r, rgb.g, rgb.b, 1.0f));
-            ImGui::Button(isKit ? ICON_FA_CUBES : ICON_FA_BOLT, ImVec2(cell, cell));
-            ImGui::PopStyleColor(2);
-        }
-        ImGui::SameLine();
-        ImGui::BeginGroup();
-        if (fontUiMed) ImGui::PushFont(fontUiMed);
-        ImGui::TextUnformatted(it.name);
-        if (fontUiMed) ImGui::PopFont();
-        ImGui::PushStyleColor(ImGuiCol_Text, col::faint);
-        ImGui::PushTextWrapPos(0.0f);
-        ImGui::TextUnformatted(it.hint[0] ? it.hint : it.spec);
-        ImGui::PopTextWrapPos();
-        ImGui::PopStyleColor();
-        ImGui::EndGroup();
-        ImGui::EndGroup();
-
-        if (ImGui::IsItemClicked()) {
+        // One full-width hit target for the whole row (icon + label).
+        const ImVec2 p0 = ImGui::GetCursorScreenPos();
+        const float rowW = ImGui::GetContentRegionAvail().x;
+        if (ImGui::Selectable("##row", on, 0, ImVec2(rowW, cell))) {
             placing_ = payload;
             status_ = std::string("Placing ") + it.name +
                       " — click a viewport, or drag it in.";
@@ -3936,12 +3944,37 @@ void Editor::drawSimpleEntities() {
             ImGui::TextUnformatted(it.name);
             ImGui::EndDragDropSource();
         }
+        if (ImGui::IsItemHovered() && cls.size())
+            ImGui::SetTooltip("%s  (%s)", it.name, cls.c_str());
+
+        // Draw the icon + text over the selectable's rect.
+        const float pad = dp(4.0f);
+        const ImVec2 icTL(p0.x + pad, p0.y + pad);
+        const float ic = cell - pad * 2.0f;
+        if (tex) {
+            dl->AddImage(static_cast<ImTextureID>((intptr_t)tex), icTL,
+                         ImVec2(icTL.x + ic, icTL.y + ic));
+        } else {
+            glm::vec3 rgb = ec && ec->hasColor ? ec->color : glm::vec3(0.55f);
+            dl->AddRectFilled(icTL, ImVec2(icTL.x + ic, icTL.y + ic),
+                              IM_COL32((int)(rgb.r * 255), (int)(rgb.g * 255),
+                                       (int)(rgb.b * 255), 60),
+                              3.0f);
+            dl->AddText(ImVec2(icTL.x + ic * 0.30f, icTL.y + ic * 0.22f),
+                        IM_COL32((int)(rgb.r * 255), (int)(rgb.g * 255),
+                                 (int)(rgb.b * 255), 255),
+                        isKit ? ICON_FA_CUBES : ICON_FA_BOLT);
+        }
+        const float tx = p0.x + cell + dp(4.0f);
+        dl->AddText(fontUiMed ? fontUiMed : nullptr, 0.0f, ImVec2(tx, p0.y + pad),
+                    u32(col::tx), it.name);
+        if (it.hint[0])
+            dl->AddText(ImVec2(tx, p0.y + pad + ImGui::GetTextLineHeight() + 1),
+                        u32(col::faint), it.hint);
         if (on)
-            ImGui::GetWindowDrawList()->AddRect(ImGui::GetItemRectMin(),
-                                                ImGui::GetItemRectMax(),
-                                                u32(col::acc), 3.0f, 0, 2.0f);
+            dl->AddRect(p0, ImVec2(p0.x + rowW, p0.y + cell), u32(col::acc), 3.0f, 0,
+                        2.0f);
         ImGui::PopID();
-        ImGui::Dummy(ImVec2(0, 3));
     }
 }
 

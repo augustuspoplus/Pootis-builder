@@ -20,6 +20,10 @@ struct CompileOptions {
     // Extra files to pack into the .bsp with bspzip after vrad. Each entry is
     // "<internal/bsp/path>|<absolute source path>". Empty = no packing.
     std::vector<std::string> packFiles;
+    // Rename the compiled map (default = the .vmf stem). Letters/digits/_ only.
+    std::string mapName;
+    // Copy the finished .bsp here as well as into <game>/maps. Empty = skip.
+    std::string extraOutDir;
 };
 
 // Where TF2 and its compile tools live.
