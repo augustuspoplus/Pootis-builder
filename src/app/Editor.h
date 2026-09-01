@@ -47,6 +47,10 @@ public:
     void debugSelectWorldSolid(int i);  // test hook for headless screenshots
     void debugSelectEntity(int i);
     void debugPlaceEntity(const std::string& cls);
+    void debugPlaceKit(const std::string& piece) {
+        if (!doc_.active()) { doc_.newBlank("kittest"); history_.reset(doc_); }
+        placePiece(piece, glm::vec3(0)); showWelcome_ = false; frameAllViews();
+    }
     void debugDropModel(const std::string& mdl) {
         if (!doc_.active()) { doc_.newBlank("mdltest"); history_.reset(doc_); }
         placeFgdEntity("prop_static", glm::vec3(0));
