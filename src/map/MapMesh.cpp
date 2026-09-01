@@ -128,6 +128,24 @@ WorldMesh buildDocMesh(const MapDocument& doc, MaterialLibrary& materials) {
     std::array<std::vector<float>, 3> ax;
     for (const auto& e : doc.entities()) {
         if (!e.solids.empty() || e.hidden) continue;
+
+        // A prop_* with a model becomes a PropInstance so the doc render can
+        // bake its real geometry (see Editor::buildAndUpload).
+        if (e.classname.rfind("prop_", 0) == 0) {
+            const std::string mdl = e.kv.get("model");
+            if (!mdl.empty()) {
+                bsp::PropInstance pi;
+                pi.model = mdl;
+                pi.pos = e.origin;
+                float p = 0, y = 0, r = 0;
+                std::sscanf(e.kv.get("angles").c_str(), "%f %f %f", &p, &y, &r);
+                pi.anglesPYR = {p, y, r};
+                pi.scale = e.kv.getFloat("modelscale");
+                if (pi.scale <= 0.01f) pi.scale = 1.0f;
+                mesh.props.push_back(std::move(pi));
+            }
+        }
+
         bsp::PointEntity pe;
         pe.classname = e.classname;
         pe.targetname = e.targetname();

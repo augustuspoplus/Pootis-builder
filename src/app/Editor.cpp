@@ -209,6 +209,7 @@ void Editor::pollDecompile() {
 void Editor::buildAndUpload(const MeshBuildOptions& opts) {
     if (doc_.active()) {
         mesh_ = map::buildDocMesh(doc_, materials_);
+        if (meshOpts_.bakeProps) model::bakePropModels(mesh_, sourceFs_);
     } else {
         mesh_ = buildWorldMesh(bsp_, opts);
         if (meshOpts_.bakeProps) model::bakePropModels(mesh_, sourceFs_);

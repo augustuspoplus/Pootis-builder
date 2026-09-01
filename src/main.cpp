@@ -87,7 +87,7 @@ struct Options {
     bool newBlank = false;
     int shape = 0;  // 1=hill 2=road
     int kitTab = -1;
-    std::string mapName, outDir;
+    std::string mapName, outDir, dropModel;
     bool dumpFgd = false;
     std::string dumpFgdClass;
     std::string importObjPath;
@@ -135,6 +135,7 @@ Options parseArgs(int argc, char** argv) {
         else if (a == "--kit-tab") o.kitTab = std::atoi(next("0").c_str());
         else if (a == "--map-name") o.mapName = next("");
         else if (a == "--out-dir") o.outDir = next("");
+        else if (a == "--drop-model") o.dropModel = next("");
         else if (a == "--cordon") o.cordon = static_cast<float>(std::atof(next("768").c_str()));
         else if (a == "--workshop") o.workshop = true;
         else if (a == "--dump-fgd") { o.dumpFgd = true; o.dumpFgdClass = next(""); }
@@ -168,6 +169,7 @@ int runHeadlessScreenshot(const Options& opt, GLFWwindow* window, float uiScale)
     if (opt.selectSolid >= 0) editor.debugSelectWorldSolid(opt.selectSolid);
     if (opt.selectEnt >= 0) editor.debugSelectEntity(opt.selectEnt);
     if (opt.newBlank) editor.debugNewBlank();
+    if (!opt.dropModel.empty()) editor.debugDropModel(opt.dropModel);
     if (opt.kitTab >= 0) editor.debugKitTab(opt.kitTab);
     if (opt.shape == 1) editor.debugHill();
     if (opt.shape == 2) editor.debugRoad();
