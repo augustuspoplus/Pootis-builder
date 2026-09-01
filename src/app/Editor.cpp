@@ -109,6 +109,7 @@ bool Editor::openMap(const std::string& path) {
             return false;
         }
         bsp_ = BspFile{};
+        history_.reset(doc_);
         buildAndUpload(meshOpts_);
         frameAllViews();
         status_ = doc_.name() + "  —  " + std::to_string(doc_.worldSolids().size()) +
@@ -171,6 +172,8 @@ void Editor::pollDecompile() {
     }
     std::string err;
     if (doc_.loadVmf(decompileVmf_, &err)) {
+        history_.reset(doc_);
+        clearSelection();
         buildAndUpload(meshOpts_);
         status_ = doc_.name() + " — editable: " +
                   std::to_string(doc_.worldSolids().size()) + " brushes, " +
@@ -244,6 +247,20 @@ void Editor::frame() {
     ImGui::End();
 
     if (ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_O)) promptOpenMap();
+    if (ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_Z)) undo();
+    if (ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_Y) ||
+        ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_Z))
+        redo();
+    if (ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_S) && hasDoc()) {
+        std::string err;
+        const std::string out = doc_.path().empty()
+                                    ? (executableDir() + "/" + doc_.name() + ".vmf")
+                                    : doc_.path();
+        if (doc_.saveVmf(out, &err))
+            status_ = "Saved " + out;
+        else
+            status_ = "Save failed: " + err;
+    }
 
     if (mode_ == Mode::Simple) {
         drawBuildKit();
@@ -680,19 +697,29 @@ void Editor::handleViewportInput(ViewPanel& p) {
         pickAt(p, {m.x - p.contentMin.x, m.y - p.contentMin.y}, io.KeyShift);
     }
     if (ImGui::IsKeyPressed(ImGuiKey_Escape) && !selection_.empty()) clearSelection();
-    if (ImGui::IsKeyPressed(ImGuiKey_Delete) && !selection_.empty()) {
-        // Delete world solids (highest index first). Entity-brush delete later.
-        std::vector<int> ws;
-        for (const auto& r : selection_)
-            if (r.entity < 0) ws.push_back(r.solid);
-        std::sort(ws.rbegin(), ws.rend());
-        for (int i : ws)
-            if (i < static_cast<int>(doc_.worldSolids().size()))
-                doc_.worldSolids().erase(doc_.worldSolids().begin() + i);
-        doc_.markDirty();
-        clearSelection();
-        buildAndUpload(meshOpts_);
-        status_ = "Deleted " + std::to_string(ws.size()) + " brush(es)";
+    if (ImGui::IsKeyPressed(ImGuiKey_Delete)) deleteSelection();
+    if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_D)) duplicateSelection();
+
+    // Arrow-key nudge along the view's axes, one grid step (Shift = 4).
+    if (!selection_.empty() && !io.KeyCtrl) {
+        const float step = float(gridSize_) * (io.KeyShift ? 4.0f : 1.0f);
+        glm::vec3 rt, up;
+        if (p.kind == ViewKind::Perspective) {
+            rt = glm::normalize(glm::vec3(p.camera.right().x, p.camera.right().y, 0));
+            up = glm::vec3(0, 0, 1);
+        } else {
+            rt = p.camera.orthoRightAxis();
+            up = p.camera.orthoUpAxis();
+        }
+        glm::vec3 d(0);
+        if (ImGui::IsKeyPressed(ImGuiKey_RightArrow)) d += rt * step;
+        if (ImGui::IsKeyPressed(ImGuiKey_LeftArrow)) d -= rt * step;
+        if (ImGui::IsKeyPressed(ImGuiKey_UpArrow)) d += up * step;
+        if (ImGui::IsKeyPressed(ImGuiKey_DownArrow)) d -= up * step;
+        if (ImGui::IsKeyPressed(ImGuiKey_PageUp)) d += glm::vec3(0, 0, step);
+        if (ImGui::IsKeyPressed(ImGuiKey_PageDown)) d -= glm::vec3(0, 0, step);
+        if (d != glm::vec3(0))
+            nudgeSelection(glm::round(d / step) * step);  // keep on grid
     }
 }
 
@@ -746,6 +773,80 @@ void Editor::rebuildSelectionWire() {
 void Editor::clearSelection() {
     selection_.clear();
     renderer_.setSelectionWire({});
+}
+
+glm::vec3 Editor::selectionCenter() const {
+    glm::vec3 sum(0);
+    int n = 0;
+    for (const auto& r : selection_)
+        if (const map::Solid* s = doc_.resolve(r)) {
+            sum += s->center();
+            ++n;
+        }
+    return n ? sum / float(n) : glm::vec3(0);
+}
+
+void Editor::afterEdit(const char* label) {
+    doc_.markDirty();
+    history_.record(doc_, label);
+    buildAndUpload(meshOpts_);
+    rebuildSelectionWire();
+}
+
+void Editor::nudgeSelection(const glm::vec3& d) {
+    if (selection_.empty() || d == glm::vec3(0)) return;
+    for (const auto& r : selection_)
+        if (map::Solid* s = doc_.resolve(r)) s->translate(d);
+    afterEdit("Move");
+    status_ = "Moved selection";
+}
+
+void Editor::deleteSelection() {
+    if (selection_.empty()) return;
+    std::vector<int> ws;
+    for (const auto& r : selection_)
+        if (r.entity < 0) ws.push_back(r.solid);
+    std::sort(ws.rbegin(), ws.rend());
+    for (int i : ws)
+        if (i < static_cast<int>(doc_.worldSolids().size()))
+            doc_.worldSolids().erase(doc_.worldSolids().begin() + i);
+    const size_t n = ws.size();
+    clearSelection();
+    afterEdit("Delete");
+    status_ = "Deleted " + std::to_string(n) + " brush(es)";
+}
+
+void Editor::duplicateSelection() {
+    if (selection_.empty()) return;
+    std::vector<map::SolidRef> newSel;
+    for (const auto& r : selection_) {
+        const map::Solid* s = doc_.resolve(r);
+        if (!s || r.entity >= 0) continue;
+        map::Solid copy = *s;
+        copy.id = doc_.nextId();
+        copy.translate(glm::vec3(float(gridSize_), float(gridSize_), 0.0f));
+        doc_.worldSolids().push_back(std::move(copy));
+        newSel.push_back({-1, static_cast<int>(doc_.worldSolids().size()) - 1});
+    }
+    selection_ = newSel;
+    afterEdit("Duplicate");
+    status_ = "Duplicated " + std::to_string(newSel.size()) + " brush(es)";
+}
+
+void Editor::undo() {
+    if (history_.undo(doc_)) {
+        clearSelection();
+        buildAndUpload(meshOpts_);
+        status_ = "Undo";
+    }
+}
+
+void Editor::redo() {
+    if (history_.redo(doc_)) {
+        clearSelection();
+        buildAndUpload(meshOpts_);
+        status_ = "Redo";
+    }
 }
 
 void Editor::debugSelectWorldSolid(int i) {

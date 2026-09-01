@@ -10,6 +10,7 @@
 #include "app/Settings.h"
 #include "bsp/BspFile.h"
 #include "bsp/BspMesh.h"
+#include "map/History.h"
 #include "map/MapDocument.h"
 #include "render/Camera.h"
 #include "render/Framebuffer.h"
@@ -92,6 +93,13 @@ private:
     void pickAt(ViewPanel& p, const glm::vec2& pxInViewport, bool additive);
     void rebuildSelectionWire();
     void clearSelection();
+    void afterEdit(const char* label);   // re-mesh + record undo + refresh
+    void nudgeSelection(const glm::vec3& worldDelta);
+    void deleteSelection();
+    void duplicateSelection();
+    void undo();
+    void redo();
+    glm::vec3 selectionCenter() const;
 
     GLFWwindow* window_ = nullptr;
     BspFile bsp_;
@@ -113,6 +121,7 @@ private:
     float flySpeed_ = 900.0f;
 
     std::vector<map::SolidRef> selection_;
+    map::History history_;
 
     Mode mode_ = Mode::Simple;
     Tool tool_ = Tool::Select;
