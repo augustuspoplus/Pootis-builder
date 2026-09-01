@@ -16,6 +16,20 @@ Q2 = Simple-mode kit builds new maps (prioritised). Also doing section G (QoL).
   perspective now respects `showPointEntities`; connection lines past 60
   entities only draw for the selection.
 
+## Editing feel (latest)
+- Drag the object body to move it (3D = ground plane, Shift = vertical; 2D =
+  view plane). Bigger, DPI-scaled resize handles + a bigger ImGuizmo.
+- Live preview during handle-resize / body-move (was gizmo-only) so geometry
+  follows the cursor; prop re-bake skipped mid-drag on >40-prop maps.
+- Hover outline: soft blue wireframe on whatever the cursor is over.
+- Shortcuts made global (raw key state, not focus-routed) — Ctrl+Z etc. work
+  from any panel.
+- Options window (gear button / View menu): interface, editing, viewport,
+  advanced; persisted to pootis.ini via applyPrefs().
+- prop_static + FGD studio() models (health kits, ammo, flags) render in the
+  editable doc, not just the raw BSP view. cdmaterials leading-slash fixed.
+- Manual menu->viewport drag placement; drop lands under the cursor.
+
 ## Simple-mode polish (latest)
 - **Things tab**: curated plain-language entity list (spawn rooms, capture
   point, payload path, resupply, health/ammo, intel, hurt/push triggers,
