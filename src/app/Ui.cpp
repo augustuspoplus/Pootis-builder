@@ -1,6 +1,7 @@
 #include "app/Ui.h"
 
 #include <algorithm>
+#include <cmath>
 #include <string>
 
 #include "core/File.h"
@@ -13,6 +14,7 @@ ImFont* fontUi = nullptr;
 ImFont* fontUiMed = nullptr;
 ImFont* fontBig = nullptr;
 ImFont* fontMono = nullptr;
+float g_scale = 1.0f;
 
 void loadFonts(const char* exeDir, float scale) {
     ImGuiIO& io = ImGui::GetIO();
@@ -30,28 +32,34 @@ void loadFonts(const char* exeDir, float scale) {
     static const ImWchar faRange[] = {ICON_MIN_FA, ICON_MAX_16_FA, 0};
 
     ImFontConfig text;
-    text.OversampleH = 2;
-    text.OversampleV = 2;
+    text.OversampleH = 3;
+    text.OversampleV = 1;
     text.PixelSnapH = true;
+    text.RasterizerMultiply = 1.06f;  // Plex is a touch light on a dark UI
 
-    auto addWithIcons = [&](const char* file, float size, float iconScale = 0.84f) {
-        size *= scale;
+    // Font Awesome merged inline: sized just under the cap height, nudged onto
+    // the text baseline, and given an advance close to its real glyph width so
+    // "ICON  text" labels don't get a wide gap.
+    auto addWithIcons = [&](const char* file, float size, float iconScale = 0.88f) {
+        size = std::round(size * scale);
         ImFont* f = io.Fonts->AddFontFromFileTTF((dir + file).c_str(), size, &text);
         ImFontConfig fa;
         fa.MergeMode = true;
         fa.PixelSnapH = true;
-        fa.GlyphMinAdvanceX = size;
-        fa.GlyphOffset.y = size * 0.11f;
+        fa.OversampleH = 2;
+        fa.OversampleV = 1;
+        fa.GlyphMinAdvanceX = std::round(size * 0.90f);
+        fa.GlyphOffset.y = std::round(size * 0.045f) + 1.0f;
         io.Fonts->AddFontFromFileTTF((dir + "fa-solid-900.ttf").c_str(),
-                                     size * iconScale, &fa, faRange);
+                                     std::round(size * iconScale), &fa, faRange);
         return f;
     };
 
     fontUi = addWithIcons("IBMPlexSans-Regular.ttf", 16.0f);
     fontUiMed = addWithIcons("IBMPlexSans-Medium.ttf", 16.0f);
-    fontBig = addWithIcons("IBMPlexSans-SemiBold.ttf", 21.0f);
+    fontBig = addWithIcons("IBMPlexSans-SemiBold.ttf", 20.0f);
     fontMono = io.Fonts->AddFontFromFileTTF((dir + "IBMPlexMono-Regular.ttf").c_str(),
-                                            14.5f * scale, &text);
+                                            std::round(14.5f * scale), &text);
     io.FontDefault = fontUi;
     PB_INFO("UI fonts loaded from %s (scale %.2f)", dir.c_str(), scale);
 }
@@ -65,6 +73,7 @@ void rebuildFonts(const char* exeDir, float scale) {
 }
 
 void applyStyle(float scale) {
+    g_scale = std::clamp(scale, 0.6f, 3.0f);
     ImGuiStyle& s = ImGui::GetStyle();
     ImGui::StyleColorsDark(&s);
 
@@ -158,6 +167,7 @@ void applyStyle(float scale) {
 
 int segmented(const char* id, const char* const labels[], int count, int current,
               float height) {
+    if (height <= 0.0f) height = ImGui::GetFrameHeight();
     int picked = -1;
     ImGui::PushID(id);
     ImGuiStyle& st = ImGui::GetStyle();
@@ -178,11 +188,12 @@ int segmented(const char* id, const char* const labels[], int count, int current
     return picked;
 }
 
-bool toolButton(const char* label, bool active, const char* tooltip) {
+bool toolButton(const char* label, bool active, const char* tooltip, float height) {
+    if (height <= 0.0f) height = ImGui::GetFrameHeight();
     ImGui::PushStyleColor(ImGuiCol_Button, active ? col::bg3 : ImVec4(0, 0, 0, 0));
     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, col::bg3);
     ImGui::PushStyleColor(ImGuiCol_Text, active ? col::acc : col::dim);
-    const bool hit = ImGui::Button(label, ImVec2(0, 30));
+    const bool hit = ImGui::Button(label, ImVec2(0, height));
     ImGui::PopStyleColor(3);
     if (tooltip && ImGui::IsItemHovered())
         ImGui::SetTooltip("%s", tooltip);

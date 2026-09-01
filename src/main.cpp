@@ -39,6 +39,7 @@ struct Options {
     bool subDemo = false;
     bool texDemo = false;
     int shapeOp = -1;
+    float scaleOverride = -1.0f;
     int subDemoMode = 0;
     bool workshop = false;
     bool dumpFgd = false;
@@ -76,6 +77,7 @@ Options parseArgs(int argc, char** argv) {
         else if (a == "--sub-demo") { o.subDemo = true; o.subDemoMode = std::atoi(next("0").c_str()); }
         else if (a == "--tex-demo") o.texDemo = true;
         else if (a == "--shape-op") o.shapeOp = std::atoi(next("0").c_str());
+        else if (a == "--scale") o.scaleOverride = static_cast<float>(std::atof(next("1").c_str()));
         else if (a == "--workshop") o.workshop = true;
         else if (a == "--dump-fgd") { o.dumpFgd = true; o.dumpFgdClass = next(""); }
         else if (a == "--import-obj") o.importObjPath = next("");
@@ -217,6 +219,7 @@ int main(int argc, char** argv) {
         glfwGetWindowContentScale(window, &sx, &sy);
         uiScale = sx > 0.0f ? sx : 1.0f;
     }
+    if (opt.scaleOverride > 0.0f) uiScale = opt.scaleOverride;  // --scale (debug)
     uiScale = std::clamp(uiScale, 0.8f, 2.5f);
 
     IMGUI_CHECKVERSION();

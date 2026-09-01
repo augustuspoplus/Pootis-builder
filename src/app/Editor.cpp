@@ -340,14 +340,14 @@ void Editor::buildDockLayout(unsigned int dockId, const ImVec2& size) {
 // ---------------------------------------------------------------------------
 void Editor::drawTopBar() {
     using namespace pb::ui;
-    const float barH = 50.0f;
+    const float row = ImGui::GetFrameHeight();
+    const float barH = std::round(row + dp(18.0f));
     ImGui::PushStyleColor(ImGuiCol_ChildBg, col::bg1);
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12, 0));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(dp(12.0f), 0));
     ImGui::BeginChild("##topbar", ImVec2(0, barH), ImGuiChildFlags_None,
                       ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
     ImGui::PopStyleVar();
 
-    const float row = 30.0f;
     ImGui::SetCursorPosY((barH - row) * 0.5f);
 
     // Brand
@@ -356,24 +356,24 @@ void Editor::drawTopBar() {
     ImGui::TextUnformatted(ICON_FA_CUBES);
     if (fontBig) ImGui::PopFont();
     ImGui::PopStyleColor();
-    ImGui::SameLine(0, 8);
+    ImGui::SameLine(0, dp(8.0f));
     if (fontUiMed) ImGui::PushFont(fontUiMed);
     ImGui::SetCursorPosY((barH - ImGui::GetTextLineHeight()) * 0.5f);
     ImGui::TextUnformatted("Pootis Builder");
     if (fontUiMed) ImGui::PopFont();
 
-    ImGui::SameLine(0, 16);
+    ImGui::SameLine(0, dp(18.0f));
     ImGui::SetCursorPosY((barH - row) * 0.5f);
     if (toolButton(ICON_FA_FOLDER_OPEN "  Open", false, "Open a .bsp  (Ctrl+O)"))
         promptOpenMap();
-    ImGui::SameLine(0, 2);
+    ImGui::SameLine(0, dp(2.0f));
     if (toolButton(ICON_FA_DOWNLOAD "  Import")) ImGui::OpenPopup("importMenu");
     if (ImGui::BeginPopup("importMenu")) {
         if (ImGui::MenuItem(ICON_FA_MAP "  Map  (.bsp / .vmf)")) promptOpenMap();
         if (ImGui::MenuItem(ICON_FA_CUBE "  3D model  (.obj)")) openModelImport();
         ImGui::EndPopup();
     }
-    ImGui::SameLine(0, 2);
+    ImGui::SameLine(0, dp(2.0f));
     if (toolButton(ICON_FA_FLOPPY_DISK "  Save", false,
                    "Save the map to .vmf  (Ctrl+S,  Ctrl+Shift+S = Save As)")) {
         if (hasDoc())
@@ -383,7 +383,7 @@ void Editor::drawTopBar() {
     }
 
     // Simple / Pro
-    ImGui::SameLine(0, 16);
+    ImGui::SameLine(0, dp(18.0f));
     ImGui::SetCursorPosY((barH - row) * 0.5f);
     {
         const char* const modes[] = {ICON_FA_TABLE_CELLS_LARGE "  Simple",
@@ -397,7 +397,7 @@ void Editor::drawTopBar() {
 
     // Tool modes (Pro only)
     if (mode_ == Mode::Pro) {
-        ImGui::SameLine(0, 12);
+        ImGui::SameLine(0, dp(14.0f));
         ImGui::SetCursorPosY((barH - row) * 0.5f);
         const char* const tools[] = {ICON_FA_ARROW_POINTER, ICON_FA_CUBE,
                                      ICON_FA_BEZIER_CURVE,   ICON_FA_SCISSORS,
@@ -412,7 +412,7 @@ void Editor::drawTopBar() {
             ImGui::SetTooltip("Select / Block / Vertex / Clip / Texture / Entity");
 
         if (tool_ == Tool::Vertex) {
-            ImGui::SameLine(0, 10);
+            ImGui::SameLine(0, dp(10.0f));
             ImGui::SetCursorPosY((barH - row) * 0.5f);
             const char* const subs[] = {ICON_FA_CIRCLE_DOT "  Vertex",
                                         ICON_FA_GRIP_LINES "  Edge",
@@ -426,14 +426,24 @@ void Editor::drawTopBar() {
         }
     }
 
-    // Right cluster
-    const float rightW = 480.0f * uiScale_;
-    ImGui::SameLine();
-    ImGui::SetCursorPosX(ImGui::GetWindowWidth() - rightW);
-    ImGui::SetCursorPosY((barH - row) * 0.5f);
-
+    // Right cluster — measure the buttons so it never overlaps the left side.
     char gridLabel[48];
     std::snprintf(gridLabel, sizeof(gridLabel), ICON_FA_TABLE_CELLS "  Grid %d", gridSize_);
+    const char* snapLabel = snap_ ? ICON_FA_CHECK "  Snap" : ICON_FA_XMARK "  Snap";
+    auto bw = [&](const char* s) {
+        return ImGui::CalcTextSize(s, nullptr, true).x +
+               ImGui::GetStyle().FramePadding.x * 2.0f;
+    };
+    const float gap = dp(2.0f), gap2 = dp(8.0f);
+    const float rightW = bw(gridLabel) + gap + bw(snapLabel) + gap + bw(ICON_FA_BARS) +
+                         gap2 + bw(ICON_FA_CLOUD_ARROW_UP "  Publish") + gap2 +
+                         bw(ICON_FA_PLAY "  Build & play") + dp(6.0f);
+    ImGui::SameLine();
+    const float curX = ImGui::GetCursorPosX();
+    ImGui::SetCursorPosX(std::max(curX + dp(12.0f),
+                                  ImGui::GetWindowWidth() - rightW));
+    ImGui::SetCursorPosY((barH - row) * 0.5f);
+
     if (toolButton(gridLabel)) ImGui::OpenPopup("##gridpop");
     if (ImGui::BeginPopup("##gridpop")) {
         for (int g : {1, 2, 4, 8, 16, 32, 64, 128, 256, 512}) {
@@ -443,14 +453,14 @@ void Editor::drawTopBar() {
         }
         ImGui::EndPopup();
     }
-    ImGui::SameLine(0, 2);
-    if (toolButton(snap_ ? ICON_FA_CHECK "  Snap" : "Snap", snap_)) snap_ = !snap_;
+    ImGui::SameLine(0, gap);
+    if (toolButton(snapLabel, snap_)) snap_ = !snap_;
 
-    ImGui::SameLine(0, 2);
+    ImGui::SameLine(0, gap);
     if (toolButton(ICON_FA_BARS)) ImGui::OpenPopup("##viewmenu");
     drawViewMenuPopup();
 
-    ImGui::SameLine(0, 8);
+    ImGui::SameLine(0, gap2);
     if (toolButton(ICON_FA_CLOUD_ARROW_UP "  Publish", showWorkshop_,
                    "Publish the map to the Steam Workshop")) {
         showWorkshop_ = !showWorkshop_;
@@ -458,7 +468,7 @@ void Editor::drawTopBar() {
             wsItem_.title = doc_.name();
     }
 
-    ImGui::SameLine(0, 8);
+    ImGui::SameLine(0, gap2);
     ImGui::PushStyleColor(ImGuiCol_Button, col::bg2);
     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, col::bg3);
     ImGui::PushStyleColor(ImGuiCol_Text, col::acc);

@@ -33,6 +33,12 @@ extern ImFont* fontUiMed;   // 16px medium   — labels, headers
 extern ImFont* fontBig;     // 21px semibold — titles
 extern ImFont* fontMono;    // 14.5px mono   — coordinates, keycaps
 
+// The UI scale currently in effect (set by applyStyle). 1.0 = 100%.
+extern float g_scale;
+
+// `px` device-independent pixels scaled to the active UI scale.
+inline float dp(float px) { return px * g_scale; }
+
 // Loads IBM Plex + Font Awesome from <exeDir>/assets/fonts at the given scale
 // (1.0 = default). Falls back to the built-in font if the files are missing.
 void loadFonts(const char* exeDir, float scale = 1.0f);
@@ -48,11 +54,14 @@ void rebuildFonts(const char* exeDir, float scale);
 
 // A segmented control. `labels` are icon+text strings; returns the newly
 // picked index, or -1 if unchanged. `count` items, `current` is in/out.
+// height <= 0 uses the current frame height (font-derived, already scaled).
 int segmented(const char* id, const char* const labels[], int count, int current,
-              float height = 30.0f);
+              float height = 0.0f);
 
 // A flat toolbar button (icon + optional text). Returns true on click.
-bool toolButton(const char* label, bool active = false, const char* tooltip = nullptr);
+// height <= 0 uses the current frame height.
+bool toolButton(const char* label, bool active = false, const char* tooltip = nullptr,
+                float height = 0.0f);
 
 // Section label in the muted uppercase style used across panels.
 void sectionLabel(const char* text);
