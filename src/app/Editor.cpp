@@ -712,6 +712,7 @@ void Editor::drawViewportPanel(ViewPanel& p) {
     drawEntityTags(p, aspect, dl);
     drawSubObjectOverlay(p, aspect, dl);
     drawFaceOverlay(p, aspect, dl);
+    drawClipOverlay(p, aspect, dl);
 
     if (!hasMap() && p.kind == ViewKind::Perspective) {
         const char* msg = "Open a .bsp  —  File > Open BSP  (Ctrl+O)  or drag one in";
@@ -1337,6 +1338,109 @@ void Editor::drawFaceEditPanel() {
     }
 }
 
+// --------------------------------------------------------------------------
+// Clip tool  (draw a cut line in a 2D view; Tab cycles keep-front / back /
+// both; Enter applies to the selected brushes)
+// --------------------------------------------------------------------------
+void Editor::handleClipTool(ViewPanel& p) {
+    if (tool_ != Tool::Clip || !hasDoc() || p.kind == ViewKind::Perspective) return;
+    if (selection_.empty()) return;
+    ImGuiIO& io = ImGui::GetIO();
+
+    if (ImGui::IsKeyPressed(ImGuiKey_Tab)) clipMode_ = (clipMode_ + 1) % 3;
+
+    if (p.hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+        clipDragging_ = true;
+        clipArmed_ = false;
+        clipView_ = p.kind;
+        clipA_ = clipB_ = snapVec(viewPlanePoint(p, ImGui::GetMousePos()));
+    }
+    if (clipDragging_ && clipView_ == p.kind) {
+        clipB_ = snapVec(viewPlanePoint(p, ImGui::GetMousePos()));
+        if (ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
+            clipDragging_ = false;
+            clipArmed_ = glm::distance(clipA_, clipB_) > 1.0f;
+        }
+    }
+
+    if (clipArmed_ && (ImGui::IsKeyPressed(ImGuiKey_Enter) ||
+                       ImGui::IsKeyPressed(ImGuiKey_KeypadEnter))) {
+        applyClip();
+        clipArmed_ = false;
+    }
+    if (ImGui::IsKeyPressed(ImGuiKey_Escape)) { clipArmed_ = false; clipDragging_ = false; }
+}
+
+void Editor::applyClip() {
+    if (!clipArmed_ || selection_.empty()) return;
+    // Clip plane: contains the drawn line, perpendicular to the view.
+    glm::vec3 fwd;
+    switch (clipView_) {
+        case ViewKind::Top:   fwd = glm::vec3(0, 0, 1); break;
+        case ViewKind::Front: fwd = glm::vec3(0, 1, 0); break;
+        case ViewKind::Side:  fwd = glm::vec3(1, 0, 0); break;
+        default:              fwd = glm::vec3(0, 0, 1); break;
+    }
+    const glm::vec3 dir = clipB_ - clipA_;
+    glm::vec3 n = glm::cross(glm::normalize(dir), fwd);
+    if (glm::length(n) < 1e-4f) return;
+    n = glm::normalize(n);
+    const float d = glm::dot(n, clipA_);
+    const std::string mat = blockMaterial_;
+
+    std::vector<map::Solid> added;
+    for (const auto& r : selection_) {
+        map::Solid* s = doc_.resolve(r);
+        if (!s) continue;
+        if (clipMode_ == 2) {
+            map::Solid back = *s;
+            if (back.clip(-n, -d, mat)) { back.id = doc_.nextId(); added.push_back(std::move(back)); }
+            if (!s->clip(n, d, mat)) *s = map::Solid();  // front gone
+        } else if (clipMode_ == 0) {
+            s->clip(n, d, mat);
+        } else {
+            s->clip(-n, -d, mat);
+        }
+    }
+    // Drop any solids the cut removed entirely; append the "both" back-halves.
+    auto& ws = doc_.worldSolids();
+    ws.erase(std::remove_if(ws.begin(), ws.end(),
+                            [](const map::Solid& s) { return s.faces.empty(); }),
+             ws.end());
+    for (auto& s : added) ws.push_back(std::move(s));
+
+    selection_.clear();
+    clearSelection();
+    afterEdit("Clip");
+    status_ = "Clipped";
+}
+
+void Editor::drawClipOverlay(ViewPanel& p, float aspect, ImDrawList* dl) {
+    if (tool_ != Tool::Clip || p.kind == ViewKind::Perspective) return;
+    if (!(clipDragging_ || clipArmed_) || clipView_ != p.kind) return;
+    const glm::mat4 vp = p.camera.proj(aspect) * p.camera.view();
+    bool a, b;
+    const ImVec2 pa = projectPt(p.kind, vp, p.contentMin, p.contentSize, clipA_, a);
+    const ImVec2 pb = projectPt(p.kind, vp, p.contentMin, p.contentSize, clipB_, b);
+    if (!a || !b) return;
+    dl->AddLine(pa, pb, IM_COL32(255, 90, 90, 240), 2.0f);
+    // extend the line across the viewport
+    ImVec2 d(pb.x - pa.x, pb.y - pa.y);
+    const float L = std::sqrt(d.x * d.x + d.y * d.y);
+    if (L > 1.0f) {
+        d.x /= L; d.y /= L;
+        dl->AddLine(ImVec2(pa.x - d.x * 4000, pa.y - d.y * 4000),
+                    ImVec2(pb.x + d.x * 4000, pb.y + d.y * 4000),
+                    IM_COL32(255, 90, 90, 90), 1.0f);
+    }
+    const char* mode = clipMode_ == 0 ? "keep FRONT" : clipMode_ == 1 ? "keep BACK"
+                                                                      : "keep BOTH";
+    char msg[64];
+    std::snprintf(msg, sizeof(msg), "Clip: %s   (Tab mode / Enter apply)", mode);
+    dl->AddText(ImVec2(p.contentMin.x + 8, p.contentMin.y + 24),
+                IM_COL32(255, 150, 150, 255), msg);
+}
+
 void Editor::handleBlockTool(ViewPanel& p) {
     if (tool_ != Tool::Block || !hasDoc() || p.kind == ViewKind::Perspective) return;
     ImGuiIO& io = ImGui::GetIO();
@@ -1648,6 +1752,7 @@ void Editor::handleViewportInput(ViewPanel& p) {
     const bool subActive = tool_ == Tool::Vertex && selection_.size() == 1;
     if (subActive) handleSubObjectInput(p);
     handleTextureTool(p);
+    handleClipTool(p);
 
     if (!io.KeyCtrl && !ImGui::IsMouseDown(ImGuiMouseButton_Right)) {
         if (ImGui::IsKeyPressed(ImGuiKey_W)) gizmoMode_ = 0;
@@ -2152,6 +2257,52 @@ void Editor::debugSelectWorldSolid(int i) {
                 }
             }
     }
+}
+
+void Editor::debugShapeOp(int op) {
+    // Build a fresh 2-brush scene so the result is easy to read.
+    bsp_ = BspFile();
+    doc_.newBlank("shapeop");
+    history_.reset(doc_);
+    clearSelection();
+    doc_.worldSolids().push_back(
+        map::Solid::makeBox({-256, -256, 0}, {256, 256, 256},
+                            "dev/dev_measuregeneric01b"));
+    doc_.worldSolids().back().id = doc_.nextId();
+    if (op == 1) {  // carve needs a second (cutter) brush overlapping the first
+        doc_.worldSolids().push_back(
+            map::Solid::makeBox({-64, -64, 64}, {64, 64, 400},
+                                "dev/dev_measurewall01a"));
+        doc_.worldSolids().back().id = doc_.nextId();
+    }
+    mode_ = Mode::Pro;
+    showWelcome_ = false;
+    buildAndUpload(meshOpts_);
+
+    if (op == 0) {
+        for (auto& w : map::hollow(doc_.worldSolids()[0], 24.0f)) {
+            w.id = doc_.nextId();
+            doc_.worldSolids().push_back(std::move(w));
+        }
+        doc_.worldSolids().erase(doc_.worldSolids().begin());
+    } else if (op == 1) {
+        map::Solid cutter = doc_.worldSolids()[1];
+        std::vector<map::Solid> rebuilt;
+        auto pieces = map::carve(doc_.worldSolids()[0], cutter);
+        for (auto& pc : pieces) {
+            pc.id = doc_.nextId();
+            rebuilt.push_back(std::move(pc));
+        }
+        doc_.worldSolids() = std::move(rebuilt);
+    } else {
+        doc_.worldSolids()[0].clip(glm::normalize(glm::vec3(1, 1, 0)), 0.0f,
+                                   "dev/dev_measurewall01a");
+    }
+    int valid = 0;
+    for (const auto& s : doc_.worldSolids()) valid += s.valid ? 1 : 0;
+    afterEdit("shape op demo");
+    frameAllViews();
+    PB_INFO("shape-op %d: %zu solids, %d valid", op, doc_.worldSolids().size(), valid);
 }
 
 void Editor::debugTextureDemo(int solidIdx) {
@@ -2893,6 +3044,65 @@ void Editor::drawBrushInspector() {
     if (ImGui::Button(ICON_FA_CLONE "  Duplicate", ImVec2(-1, 0)))
         duplicateSelection();
     if (ImGui::Button(ICON_FA_TRASH "  Delete", ImVec2(-1, 0))) deleteSelection();
+
+    // --- Hollow / Carve ------------------------------------------------------
+    ImGui::Dummy(ImVec2(0, 6));
+    pb::ui::sectionLabel("SHAPE OPS");
+    static float hollowWall = 16.0f;
+    ImGui::SetNextItemWidth(90);
+    ImGui::DragFloat("wall", &hollowWall, 1.0f, 1.0f, 256.0f, "%.0f");
+    ImGui::SameLine();
+    if (ImGui::Button("Hollow", ImVec2(-1, 0)) && worldCount > 0) {
+        std::vector<map::Solid> add;
+        for (const auto& r : selection_) {
+            if (r.entity >= 0) continue;
+            const map::Solid* s = doc_.resolve(r);
+            if (!s) continue;
+            for (auto& w : map::hollow(*s, hollowWall)) {
+                w.id = doc_.nextId();
+                add.push_back(std::move(w));
+            }
+        }
+        if (!add.empty()) {
+            // remove the originals (world solids only), then add the shells
+            std::vector<int> del;
+            for (const auto& r : selection_)
+                if (r.entity < 0) del.push_back(r.solid);
+            std::sort(del.rbegin(), del.rend());
+            for (int idx : del)
+                if (idx < (int)doc_.worldSolids().size())
+                    doc_.worldSolids().erase(doc_.worldSolids().begin() + idx);
+            for (auto& w : add) doc_.worldSolids().push_back(std::move(w));
+            clearSelection();
+            afterEdit("Hollow");
+            status_ = "Hollowed";
+        }
+    }
+    if (selection_.size() == 1 && selection_[0].entity < 0) {
+        if (ImGui::Button(ICON_FA_SCISSORS "  Carve (subtract from others)",
+                          ImVec2(-1, 0))) {
+            const int cutIdx = selection_[0].solid;
+            map::Solid cutter = doc_.worldSolids()[cutIdx];
+            std::vector<map::Solid> rebuilt;
+            for (int i = 0; i < (int)doc_.worldSolids().size(); ++i) {
+                if (i == cutIdx) continue;
+                auto pieces = map::carve(doc_.worldSolids()[i], cutter);
+                for (auto& pc : pieces) {
+                    if (!pc.valid) continue;
+                    pc.id = doc_.nextId();
+                    rebuilt.push_back(std::move(pc));
+                }
+            }
+            doc_.worldSolids() = std::move(rebuilt);
+            clearSelection();
+            afterEdit("Carve");
+            status_ = "Carved";
+        }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Subtracts this brush from every other world brush "
+                              "it overlaps (the carve brush itself is removed).");
+    }
+
     if (worldCount != static_cast<int>(selection_.size())) {
         ImGui::PushStyleColor(ImGuiCol_Text, pb::ui::col::faint);
         ImGui::TextWrapped("(some selected brushes belong to entities — brush-entity "
