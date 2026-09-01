@@ -33,6 +33,7 @@ struct Options {
     bool pro = false;
     int selectSolid = -1;
     bool sampleMap = false;
+    bool compile = false;
     std::string saveVmfPath;
     int width = 1600;
     int height = 950;
@@ -58,6 +59,7 @@ Options parseArgs(int argc, char** argv) {
         else if (a == "--pro") o.pro = true;
         else if (a == "--select") o.selectSolid = std::atoi(next("0").c_str());
         else if (a == "--sample-map") o.sampleMap = true;
+        else if (a == "--compile") o.compile = true;
         else if (a == "--save-vmf") o.saveVmfPath = next("");
         else if (a == "--view") {
             const std::string v = next("persp");
@@ -81,6 +83,7 @@ int runHeadlessScreenshot(const Options& opt, GLFWwindow* window, float uiScale)
     if (opt.sampleMap) editor.debugBuildSampleMap();
     if (opt.selectSolid >= 0) editor.debugSelectWorldSolid(opt.selectSolid);
     if (!opt.saveVmfPath.empty()) editor.saveVmf(opt.saveVmfPath);
+    if (opt.compile) editor.debugStartCompile(true);
 
     std::vector<uint8_t> rgba;
 

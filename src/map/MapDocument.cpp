@@ -140,6 +140,9 @@ bool MapDocument::saveVmf(const std::string& path, std::string* err) {
     const std::string out = writeKv(root);
     std::string ok;
     {
+        std::error_code ec;
+        const fs::path parent = fs::path(path).parent_path();
+        if (!parent.empty()) fs::create_directories(parent, ec);
         FILE* f = std::fopen(path.c_str(), "wb");
         if (!f) {
             if (err) *err = "cannot write " + path;

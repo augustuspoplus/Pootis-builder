@@ -10,6 +10,7 @@
 #include "app/Settings.h"
 #include "bsp/BspFile.h"
 #include "bsp/BspMesh.h"
+#include "compile/MapCompiler.h"
 #include "map/History.h"
 #include "map/MapDocument.h"
 #include "render/Camera.h"
@@ -38,6 +39,7 @@ public:
     void setProMode() { mode_ = Mode::Pro; layoutDirty_ = true; }
     void debugSelectWorldSolid(int i);  // test hook for headless screenshots
     void debugBuildSampleMap();
+    void debugStartCompile(bool fast);
     bool saveVmf(const std::string& path);
 
     // Persisted settings + UI scaling (the font atlas rebuild is done by the
@@ -59,7 +61,7 @@ public:
 
     bool hasMap() const { return bsp_.loaded() || doc_.active(); }
     bool hasDoc() const { return doc_.active(); }
-    bool busy() const { return decompileRunning_.load(); }
+    bool busy() const { return decompileRunning_.load() || compiler_.running(); }
     const std::string& status() const { return status_; }
 
 private:
@@ -86,6 +88,9 @@ private:
     void drawViewportPanel(ViewPanel& p);
     void drawBuildKit();
     void drawSelectionPanel();
+    void drawCompileWindow();
+    bool saveMap(bool forceDialog);   // true if written
+    void startCompile();
     void drawProperties();
     void drawBrushInspector();
     void drawOutliner();
@@ -162,6 +167,17 @@ private:
     float uiScale_ = 1.0f;
     bool scaleDirty_ = false;
     bool showWelcome_ = true;
+
+    // Compile + playtest (Milestone E).
+    compile::MapCompiler compiler_;
+    compile::GamePaths gamePaths_;
+    bool showCompile_ = false;
+    int compileProfile_ = 0;   // 0 fast, 1 final
+    bool compileVvis_ = true;
+    bool compileVrad_ = true;
+    bool compileLaunch_ = true;
+    bool compileAutoScroll_ = true;
+    size_t compileLogSeen_ = 0;
 };
 
 }  // namespace pb
