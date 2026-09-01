@@ -347,6 +347,26 @@ void Editor::frame() {
         drawVisgroupsPanel();
     }
     for (auto& v : views_) drawViewportPanel(v);
+
+    // Manual drag-and-drop: a menu card set dragPlace_ while being dragged;
+    // when the mouse is released over a viewport, drop it there. (ImGui's own
+    // drag-drop target proved unreliable across docked windows here.)
+    if (!dragPlace_.empty() && !ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+        const ImVec2 m = ImGui::GetMousePos();
+        for (auto& v : views_) {
+            const glm::vec2 mn = v.contentMin, sz = v.contentSize;
+            if (sz.x > 1 && m.x >= mn.x && m.x < mn.x + sz.x && m.y >= mn.y &&
+                m.y < mn.y + sz.y) {
+                const glm::vec3 at = dropWorldPoint(v, m);
+                PB_INFO("drop '%s' @ (%.0f %.0f %.0f)", dragPlace_.c_str(), at.x, at.y,
+                        at.z);
+                placeFromPayload(dragPlace_, at);
+                break;
+            }
+        }
+        dragPlace_.clear();
+    }
+
     drawStatusBar();
     drawCompileWindow();
     drawModelImportDialog();
@@ -871,37 +891,7 @@ void Editor::drawViewportPanel(ViewPanel& p) {
                  ImVec2(static_cast<float>(w), static_cast<float>(h)), ImVec2(0, 1),
                  ImVec2(1, 0));
 
-    // Drop target: drag a model / entity / prefab card straight onto a viewport.
-    // Only exists while a drag is in progress, so it never affects normal
-    // viewport input. Image() has no ID, hence the InvisibleButton overlay.
-    if (ImGui::GetDragDropPayload() != nullptr) {
-        ImGui::SetCursorScreenPos(imgTL);
-        ImGui::InvisibleButton("##vpdroptarget", ImVec2((float)w, (float)h),
-                               ImGuiButtonFlags_MouseButtonLeft);
-        if (ImGui::BeginDragDropTarget()) {
-            auto dropAt = [&] {
-                const glm::vec3 at = dropWorldPoint(p, ImGui::GetMousePos());
-                PB_INFO("drop @ (%.0f %.0f %.0f)", at.x, at.y, at.z);
-                return at;
-            };
-            if (const ImGuiPayload* pl = ImGui::AcceptDragDropPayload("PB_MODEL")) {
-                const std::string tag(static_cast<const char*>(pl->Data));
-                if (!doc_.active()) { doc_.newBlank("untitled"); history_.reset(doc_); }
-                placeFgdEntity("prop_static", dropAt());
-                if (!doc_.entities().empty() && tag.rfind("@model:", 0) == 0)
-                    doc_.entities().back().kv.set("model", tag.substr(7));
-                afterEdit("Place prop");
-                status_ = "Dropped  " + tag.substr(tag.rfind('/') + 1);
-            } else if (const ImGuiPayload* pe =
-                           ImGui::AcceptDragDropPayload("PB_ENTITY")) {
-                placeFgdEntity(static_cast<const char*>(pe->Data), dropAt());
-            } else if (const ImGuiPayload* pk =
-                           ImGui::AcceptDragDropPayload("PB_KIT")) {
-                placePiece(static_cast<const char*>(pk->Data), dropAt());
-            }
-            ImGui::EndDragDropTarget();
-        }
-    }
+    (void)imgTL;  // drop handling is done manually in frame() via dragPlace_
 
     drawGizmo(p, aspect);
 
@@ -2052,6 +2042,25 @@ void Editor::drawRoadOverlay(ViewPanel& p, float aspect, ImDrawList* dl) {
                 "ROAD — click to add points, Enter to build");
 }
 
+void Editor::placeFromPayload(const std::string& payload, const glm::vec3& at) {
+    if (payload.rfind("@model:", 0) == 0) {
+        if (!doc_.active()) { doc_.newBlank("untitled"); history_.reset(doc_); }
+        placeFgdEntity("prop_static", at);
+        if (!doc_.entities().empty())
+            doc_.entities().back().kv.set("model", payload.substr(7));
+        afterEdit("Place prop");
+        status_ = "Placed  " + payload.substr(payload.rfind('/') + 1);
+    } else if (payload.rfind("@ent:", 0) == 0) {
+        placeFgdEntity(payload.substr(5), at);
+    } else if (payload.rfind("@kit:", 0) == 0) {
+        placePiece(payload.substr(5), at);
+    } else if (payload.rfind("@prefab:", 0) == 0) {
+        placePrefab(payload.substr(8), at);
+    } else {
+        placePiece(payload, at);
+    }
+}
+
 void Editor::placeFgdEntity(const std::string& cls, const glm::vec3& atRaw) {
     if (!doc_.active()) doc_.newBlank("untitled");
     const glm::vec3 at = snapVec(atRaw);
@@ -3116,7 +3125,7 @@ struct KitPiece {
 };
 
 void kitCards(const KitPiece* pieces, int count, std::string* placing,
-              std::string* status) {
+              std::string* status, std::string* dragOut = nullptr) {
     using pb::ui::dp;
     const float gap = dp(8.0f);
     const float avail = ImGui::GetContentRegionAvail().x;
@@ -3150,6 +3159,7 @@ void kitCards(const KitPiece* pieces, int count, std::string* placing,
                                      std::strlen(pieces[i].name) + 1);
             ImGui::Text("%s  %s", pieces[i].icon, pieces[i].name);
             ImGui::EndDragDropSource();
+            if (dragOut) *dragOut = std::string("@kit:") + pieces[i].name;
         }
         if (ImGui::IsItemClicked()) {
             *placing = pieces[i].name;
@@ -3623,7 +3633,7 @@ void Editor::drawBuildKit() {
                 {ICON_FA_ROAD, "Curvy road", "Click points, get a smooth road ribbon"},
             };
             ImGui::Dummy(ImVec2(0, 4));
-            kitCards(shapes, IM_ARRAYSIZE(shapes), &placing_, &status_);
+            kitCards(shapes, IM_ARRAYSIZE(shapes), &placing_, &status_, &dragPlace_);
             ImGui::EndTabItem();
         }
         if (ImGui::BeginTabItem(ICON_FA_ARROW_POINTER " Play")) {
@@ -3636,7 +3646,7 @@ void Editor::drawBuildKit() {
                 {ICON_FA_LIGHTBULB, "Health / ammo", "Pickup near a route"},
             };
             ImGui::Dummy(ImVec2(0, 4));
-            kitCards(play, IM_ARRAYSIZE(play), &placing_, &status_);
+            kitCards(play, IM_ARRAYSIZE(play), &placing_, &status_, &dragPlace_);
             ImGui::EndTabItem();
         }
         const ImGuiTabItemFlags tf =
@@ -3659,7 +3669,7 @@ void Editor::drawBuildKit() {
                 {ICON_FA_LIGHTBULB, "Sun / sky", "light_environment"},
             };
             ImGui::Dummy(ImVec2(0, 4));
-            kitCards(lights, IM_ARRAYSIZE(lights), &placing_, &status_);
+            kitCards(lights, IM_ARRAYSIZE(lights), &placing_, &status_, &dragPlace_);
             ImGui::EndTabItem();
         }
         ImGui::EndTabBar();
@@ -3980,6 +3990,7 @@ void Editor::drawSimpleEntities() {
                 ImGui::SetDragDropPayload("PB_ENTITY", cls.c_str(), cls.size() + 1);
             ImGui::TextUnformatted(it.name);
             ImGui::EndDragDropSource();
+            dragPlace_ = payload;
         }
         if (ImGui::IsItemHovered() && cls.size())
             ImGui::SetTooltip("%s  (%s)", it.name, cls.c_str());
@@ -4649,6 +4660,7 @@ void Editor::drawModelGrid() {
                                          ImVec2(64, 64));
                         ImGui::TextUnformatted(label.c_str());
                         ImGui::EndDragDropSource();
+                        dragPlace_ = payload;
                     }
                     if (on)
                         ImGui::GetWindowDrawList()->AddRect(
@@ -4763,6 +4775,7 @@ void Editor::drawEntityCatalog() {
             ImGui::SetDragDropPayload("PB_ENTITY", cls.c_str(), cls.size() + 1);
             ImGui::TextUnformatted(cls.c_str());
             ImGui::EndDragDropSource();
+            dragPlace_ = "@ent:" + cls;
         }
         ImGui::SameLine(6);
         if (ec && ec->hasColor) {

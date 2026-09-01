@@ -342,6 +342,8 @@ private:
     bool snap_ = true;
     int kitTab_ = 0;
     std::string placing_;
+    std::string dragPlace_;   // payload of an in-progress menu->viewport drag
+    void placeFromPayload(const std::string& payload, const glm::vec3& at);
     float hillRadius_ = 384.0f, hillHeight_ = 320.0f, hillRough_ = 0.32f;
     int hillLayers_ = 7;
     // Curvy-road spline tool
