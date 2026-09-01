@@ -43,6 +43,7 @@ struct Solid {
     void recomputeBounds();
     void translate(const glm::vec3& d);
     void transform(const glm::mat4& m);  // rebuilds planes from moved geometry
+    void resizeTo(const glm::vec3& newMin, const glm::vec3& newMax);  // affine bounds fit
     glm::vec3 center() const { return 0.5f * (boundsMin + boundsMax); }
 
     // Axis-aligned box brush from min/max with one material on all 6 sides.

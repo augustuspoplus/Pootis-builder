@@ -84,6 +84,8 @@ private:
     void drawViewportPanel(ViewPanel& p);
     void drawBuildKit();
     void drawSelectionPanel();
+    void drawProperties();
+    void drawBrushInspector();
     void drawOutliner();
     void drawMaterialList();
     void drawTextureBrowser();
@@ -95,6 +97,8 @@ private:
     void clearSelection();
     void afterEdit(const char* label);   // re-mesh + record undo + refresh
     void drawGizmo(ViewPanel& p, float aspect);
+    void handleBlockTool(ViewPanel& p);
+    glm::vec3 snapVec(const glm::vec3& v) const;
     void nudgeSelection(const glm::vec3& worldDelta);
     void deleteSelection();
     void duplicateSelection();
@@ -126,6 +130,13 @@ private:
     int gizmoMode_ = 0;          // 0 move, 1 rotate, 2 scale
     bool gizmoUsing_ = false;
     bool docMeshDirty_ = false;
+
+    // Block tool
+    bool blockDragging_ = false;
+    ViewKind blockView_ = ViewKind::Top;
+    glm::vec3 blockA_{0}, blockB_{0};
+    float newBrushDepth_ = 128.0f;
+    std::string blockMaterial_ = "dev/dev_measuregeneric01b";
 
     Mode mode_ = Mode::Simple;
     Tool tool_ = Tool::Select;

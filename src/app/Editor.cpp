@@ -271,6 +271,7 @@ void Editor::frame() {
         drawBuildKit();
         drawSelectionPanel();
     } else {
+        drawProperties();
         drawOutliner();
         drawTextureBrowser();
         drawMaterialList();
@@ -310,6 +311,7 @@ void Editor::buildDockLayout(unsigned int dockId, const ImVec2& size) {
         ImGuiID tl, tr, bl, br;
         tl = ImGui::DockBuilderSplitNode(top, ImGuiDir_Left, 0.5f, nullptr, &tr);
         bl = ImGui::DockBuilderSplitNode(bottom, ImGuiDir_Left, 0.5f, nullptr, &br);
+        ImGui::DockBuilderDockWindow("Properties", left);
         ImGui::DockBuilderDockWindow("Contents", left);
         ImGui::DockBuilderDockWindow("Textures", left);
         ImGui::DockBuilderDockWindow("Materials", left);
@@ -695,10 +697,71 @@ void Editor::drawGizmo(ViewPanel& p, float aspect) {
     }
 }
 
+glm::vec3 Editor::snapVec(const glm::vec3& v) const {
+    if (!snap_ || gridSize_ <= 0) return v;
+    const float g = float(gridSize_);
+    return glm::round(v / g) * g;
+}
+
+void Editor::handleBlockTool(ViewPanel& p) {
+    if (tool_ != Tool::Block || !hasDoc() || p.kind == ViewKind::Perspective) return;
+    ImGuiIO& io = ImGui::GetIO();
+
+    const glm::vec3 fwd = p.camera.orthoForwardAxis();
+    const glm::vec3 planePt = p.camera.orthoCenter;
+    const float planeD = glm::dot(fwd, planePt);
+    auto worldAt = [&](const ImVec2& m) {
+        glm::vec3 ro, rd;
+        p.camera.pixelRay({m.x - p.contentMin.x, m.y - p.contentMin.y}, p.contentSize,
+                          ro, rd);
+        const float denom = glm::dot(fwd, rd);
+        const float t = std::fabs(denom) > 1e-6f ? (planeD - glm::dot(fwd, ro)) / denom
+                                                 : 0.0f;
+        return ro + rd * t;
+    };
+
+    if (ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !io.KeyShift) {
+        blockDragging_ = true;
+        blockView_ = p.kind;
+        blockA_ = blockB_ = worldAt(ImGui::GetMousePos());
+    }
+    if (blockDragging_ && p.kind == blockView_) {
+        blockB_ = worldAt(ImGui::GetMousePos());
+
+        // Preview: the box from A..B, third axis extruded by newBrushDepth_.
+        glm::vec3 a = snapVec(blockA_), b = snapVec(blockB_);
+        const glm::vec3 up = glm::abs(fwd);  // the missing axis
+        glm::vec3 mn = glm::min(a, b), mx = glm::max(a, b);
+        for (int i = 0; i < 3; ++i)
+            if (up[i] > 0.5f) {
+                mn[i] = snapVec(glm::vec3(planeD))[i];
+                mx[i] = mn[i] + newBrushDepth_;
+            }
+        map::Solid preview = map::Solid::makeBox(mn, mx, blockMaterial_);
+        renderer_.setSelectionWire(map::solidWire(preview));
+
+        if (ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
+            blockDragging_ = false;
+            if (glm::length(mx - mn) > 1.0f &&
+                (mx.x - mn.x) > 0.5f && (mx.y - mn.y) > 0.5f && (mx.z - mn.z) > 0.5f) {
+                preview.id = doc_.nextId();
+                doc_.worldSolids().push_back(std::move(preview));
+                selection_ = {{-1, static_cast<int>(doc_.worldSolids().size()) - 1}};
+                afterEdit("Create brush");
+                status_ = "Created brush";
+            } else {
+                clearSelection();
+            }
+        }
+    }
+}
+
 void Editor::handleViewportInput(ViewPanel& p) {
     if (!p.hovered) return;
     ImGuiIO& io = ImGui::GetIO();
     const float dt = std::clamp(io.DeltaTime, 0.0f, 0.1f);
+
+    handleBlockTool(p);
 
     if (!io.KeyCtrl && !ImGui::IsMouseDown(ImGuiMouseButton_Right)) {
         if (ImGui::IsKeyPressed(ImGuiKey_W)) gizmoMode_ = 0;
@@ -1097,6 +1160,87 @@ void Editor::drawBuildKit() {
     ImGui::End();
 }
 
+void Editor::drawBrushInspector() {
+    if (selection_.empty()) {
+        ImGui::PushStyleColor(ImGuiCol_Text, pb::ui::col::faint);
+        ImGui::TextWrapped(hasDoc()
+                               ? "Click a brush to select it. Drag the gizmo to move "
+                                 "it (W move / E rotate / R scale), or type exact "
+                                 "sizes below."
+                               : "Decompiling… the editable brushes appear here.");
+        ImGui::PopStyleColor();
+        return;
+    }
+
+    // Combined bounds of the selection.
+    glm::vec3 mn(1e30f), mx(-1e30f);
+    int worldCount = 0;
+    for (const auto& r : selection_)
+        if (const map::Solid* s = doc_.resolve(r)) {
+            mn = glm::min(mn, s->boundsMin);
+            mx = glm::max(mx, s->boundsMax);
+            if (r.entity < 0) ++worldCount;
+        }
+    glm::vec3 ctr = 0.5f * (mn + mx);
+    glm::vec3 size = mx - mn;
+
+    if (pb::ui::fontUiMed) ImGui::PushFont(pb::ui::fontUiMed);
+    ImGui::Text("%zu brush%s selected", selection_.size(),
+                selection_.size() == 1 ? "" : "es");
+    if (pb::ui::fontUiMed) ImGui::PopFont();
+
+    pb::ui::sectionLabel("POSITION  (centre)");
+    glm::vec3 newCtr = ctr;
+    ImGui::SetNextItemWidth(-1);
+    bool posEdited = ImGui::DragFloat3("##pos", &newCtr.x, 1.0f, 0, 0, "%.0f");
+    bool posCommit = ImGui::IsItemDeactivatedAfterEdit();
+
+    pb::ui::sectionLabel("SIZE  (w  d  h)");
+    glm::vec3 newSize = size;
+    ImGui::SetNextItemWidth(-1);
+    bool sizeEdited =
+        ImGui::DragFloat3("##size", &newSize.x, 1.0f, 1.0f, 1e6f, "%.0f");
+    bool sizeCommit = ImGui::IsItemDeactivatedAfterEdit();
+
+    if (posEdited && newCtr != ctr) {
+        const glm::vec3 d = newCtr - ctr;
+        for (const auto& r : selection_)
+            if (map::Solid* s = doc_.resolve(r)) s->translate(d);
+        docMeshDirty_ = true;
+    }
+    if (sizeEdited && selection_.size() == 1 && newSize != size) {
+        newSize = glm::max(newSize, glm::vec3(1.0f));
+        if (map::Solid* s = doc_.resolve(selection_[0])) {
+            const glm::vec3 c = s->center();
+            s->resizeTo(c - newSize * 0.5f, c + newSize * 0.5f);
+            docMeshDirty_ = true;
+        }
+    }
+    if (posCommit || sizeCommit) afterEdit("Edit brush");
+
+    ImGui::Dummy(ImVec2(0, 6));
+    pb::ui::sectionLabel("MATERIAL");
+    if (const map::Solid* s = doc_.resolve(selection_[0])) {
+        const std::string m = s->faces.empty() ? "" : s->faces.front().material;
+        const auto& info = materials_.get(m);
+        ImGui::Image(static_cast<ImTextureID>(static_cast<intptr_t>(info.texture)),
+                     ImVec2(48, 48));
+        ImGui::SameLine();
+        ImGui::TextWrapped("%s", m.c_str());
+    }
+
+    ImGui::Dummy(ImVec2(0, 8));
+    if (ImGui::Button(ICON_FA_CLONE "  Duplicate", ImVec2(-1, 0)))
+        duplicateSelection();
+    if (ImGui::Button(ICON_FA_TRASH "  Delete", ImVec2(-1, 0))) deleteSelection();
+    if (worldCount != static_cast<int>(selection_.size())) {
+        ImGui::PushStyleColor(ImGuiCol_Text, pb::ui::col::faint);
+        ImGui::TextWrapped("(some selected brushes belong to entities — brush-entity "
+                           "editing is limited for now)");
+        ImGui::PopStyleColor();
+    }
+}
+
 void Editor::drawSelectionPanel() {
     ImGui::Begin("Selection");
     if (!placing_.empty()) {
@@ -1104,29 +1248,34 @@ void Editor::drawSelectionPanel() {
         ImGui::Text(ICON_FA_ARROW_POINTER "  Placing %s", placing_.c_str());
         if (pb::ui::fontUiMed) ImGui::PopFont();
         ImGui::PushStyleColor(ImGuiCol_Text, pb::ui::col::dim);
-        ImGui::TextWrapped("Click in a viewport to drop it. Brush placement is coming "
-                           "with the editing tools.");
+        ImGui::TextWrapped("Click in a viewport to drop it.");
         ImGui::PopStyleColor();
         ImGui::Dummy(ImVec2(0, 6));
         if (ImGui::Button("Cancel", ImVec2(-1, 0))) placing_.clear();
+    } else if (hasDoc()) {
+        drawBrushInspector();
     } else if (hasMap()) {
         pb::ui::sectionLabel("THIS MAP");
         ImGui::Dummy(ImVec2(0, 4));
         const glm::vec3 span = mesh_.playBoundsMax - mesh_.playBoundsMin;
-        ImGui::BulletText("%zu entities, %zu props", bsp_.entities().size(),
+        ImGui::BulletText("%zu point ents, %zu props", mesh_.pointEntities.size(),
                           mesh_.props.size());
         ImGui::BulletText("play area  %.0f x %.0f x %.0f", span.x, span.y, span.z);
-        ImGui::Dummy(ImVec2(0, 10));
-        ImGui::PushStyleColor(ImGuiCol_Text, pb::ui::col::faint);
-        ImGui::TextWrapped("Click something in the map to edit it. Selection and the "
-                           "transform gizmo are the next milestone.");
-        ImGui::PopStyleColor();
     } else {
         ImGui::PushStyleColor(ImGuiCol_Text, pb::ui::col::faint);
         ImGui::TextWrapped("Open a .bsp (Ctrl+O) or drag one onto the window to get "
                            "started.");
         ImGui::PopStyleColor();
     }
+    ImGui::End();
+}
+
+void Editor::drawProperties() {
+    ImGui::Begin("Properties");
+    if (hasDoc())
+        drawBrushInspector();
+    else
+        ImGui::TextDisabled("Load a map to edit brushes.");
     ImGui::End();
 }
 
