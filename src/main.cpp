@@ -35,6 +35,7 @@ struct Options {
     int selectEnt = -1;
     bool sampleMap = false;
     bool compile = false;
+    std::string panel;
     bool workshop = false;
     bool dumpFgd = false;
     std::string dumpFgdClass;
@@ -67,6 +68,7 @@ Options parseArgs(int argc, char** argv) {
         else if (a == "--select-ent") o.selectEnt = std::atoi(next("0").c_str());
         else if (a == "--sample-map") o.sampleMap = true;
         else if (a == "--compile") o.compile = true;
+        else if (a == "--panel") o.panel = next("");
         else if (a == "--workshop") o.workshop = true;
         else if (a == "--dump-fgd") { o.dumpFgd = true; o.dumpFgdClass = next(""); }
         else if (a == "--import-obj") o.importObjPath = next("");
@@ -98,6 +100,7 @@ int runHeadlessScreenshot(const Options& opt, GLFWwindow* window, float uiScale)
     if (opt.selectEnt >= 0) editor.debugSelectEntity(opt.selectEnt);
     if (!opt.saveVmfPath.empty()) editor.saveVmf(opt.saveVmfPath);
     if (opt.compile) editor.debugStartCompile(true);
+    if (!opt.panel.empty()) editor.debugFocusPanel(opt.panel);
     if (opt.workshop) editor.debugShowWorkshop();
 
     std::vector<uint8_t> rgba;

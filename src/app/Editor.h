@@ -47,6 +47,7 @@ public:
     void debugBuildSampleMap();
     void debugStartCompile(bool fast);
     void debugShowWorkshop();
+    void debugFocusPanel(const std::string& name) { focusPanel_ = name; focusPanelFrames_ = 6; }
     void debugDumpFgd(const std::string& cls);
     void debugImportObj(const std::string& path);  // detail-brush import, headless
     bool saveVmf(const std::string& path);
@@ -151,6 +152,8 @@ private:
     std::array<ViewPanel, 4> views_;
     std::string status_ = "No map loaded";
     std::string pendingOpen_;
+    std::string focusPanel_;  // debug: focus this dock tab next frame
+    int focusPanelFrames_ = 0;
 
     char outlinerFilter_[128] = {0};
     char materialFilter_[128] = {0};
