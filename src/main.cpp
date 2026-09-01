@@ -3,7 +3,11 @@
 #include <imgui.h>
 #include <backends/imgui_impl_glfw.h>
 #include <backends/imgui_impl_opengl3.h>
+#include <stb_image.h>
 #include <stb_image_write.h>
+
+#include <cstdint>
+#include <fstream>
 
 #include <algorithm>
 #include <cstdlib>
@@ -22,6 +26,38 @@ namespace {
 
 void glfwErrorCallback(int code, const char* desc) {
     PB_ERROR("GLFW error %d: %s", code, desc ? desc : "?");
+}
+
+// Set the window / taskbar icon from a .ico whose frames are PNG-encoded
+// (all modern .ico files are). Picks the largest frame.
+void setWindowIconFromIco(GLFWwindow* win, const std::string& path) {
+    std::ifstream f(path, std::ios::binary);
+    if (!f) return;
+    std::vector<uint8_t> buf((std::istreambuf_iterator<char>(f)),
+                             std::istreambuf_iterator<char>());
+    if (buf.size() < 6 || buf[2] != 1) return;
+    const int count = buf[4] | (buf[5] << 8);
+    int bestOfs = 0, bestLen = 0, bestArea = -1;
+    for (int i = 0; i < count; ++i) {
+        const size_t e = 6 + static_cast<size_t>(i) * 16;
+        if (e + 16 > buf.size()) break;
+        int w = buf[e] ? buf[e] : 256;
+        int h = buf[e + 1] ? buf[e + 1] : 256;
+        const uint32_t len = buf[e + 8] | (buf[e + 9] << 8) | (buf[e + 10] << 16) |
+                             (buf[e + 11] << 24);
+        const uint32_t ofs = buf[e + 12] | (buf[e + 13] << 8) | (buf[e + 14] << 16) |
+                             (buf[e + 15] << 24);
+        if (ofs + len > buf.size()) continue;
+        if (w * h > bestArea) { bestArea = w * h; bestOfs = ofs; bestLen = len; }
+    }
+    if (bestLen < 8 || buf[bestOfs] != 0x89 || buf[bestOfs + 1] != 'P') return;
+    int w = 0, h = 0, ch = 0;
+    unsigned char* px = stbi_load_from_memory(buf.data() + bestOfs, bestLen, &w, &h,
+                                              &ch, 4);
+    if (!px) return;
+    GLFWimage img{w, h, px};
+    glfwSetWindowIcon(win, 1, &img);
+    stbi_image_free(px);
 }
 
 struct Options {
@@ -229,6 +265,8 @@ int main(int argc, char** argv) {
     }
     glfwMakeContextCurrent(window);
     glfwSwapInterval(headless ? 0 : 1);
+    if (!headless)
+        setWindowIconFromIco(window, pb::executableDir() + "/assets/PootisBuilder.ico");
 
     const int glv = gladLoadGL(glfwGetProcAddress);
     if (glv == 0) {

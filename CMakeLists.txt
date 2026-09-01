@@ -97,6 +97,39 @@ target_link_libraries(imgui PUBLIC glfw)
 # ---------------------------------------------------------------------------
 file(GLOB_RECURSE POOTIS_SOURCES CONFIGURE_DEPENDS src/*.cpp)
 
+# Windows resource (app icon + version info). Compiled with an explicit,
+# clean windres invocation — letting CMake's RC language forward the C
+# include dirs breaks windres when the source path contains a space or '#'.
+if(WIN32 AND MINGW)
+    find_program(WINDRES_EXE NAMES windres x86_64-w64-mingw32-windres)
+    if(WINDRES_EXE)
+        # windres shells out to gcc -E and mangles any -I path containing a
+        # space or '#', so stage the .rc + .ico in a space-free temp dir first.
+        file(TO_CMAKE_PATH "$ENV{TEMP}" _pb_tmp_root)
+        if(NOT _pb_tmp_root)
+            file(TO_CMAKE_PATH "$ENV{TMP}" _pb_tmp_root)
+        endif()
+        set(RC_STAGE "${_pb_tmp_root}/pootisbuilder_rc")
+        set(APP_RES ${CMAKE_BINARY_DIR}/pootis_app_res.o)
+        add_custom_command(
+            OUTPUT ${APP_RES}
+            COMMAND ${CMAKE_COMMAND} -E make_directory "${RC_STAGE}"
+            COMMAND ${CMAKE_COMMAND} -E copy
+                    "${CMAKE_SOURCE_DIR}/src/win/app.rc" "${RC_STAGE}/app.rc"
+            COMMAND ${CMAKE_COMMAND} -E copy
+                    "${CMAKE_SOURCE_DIR}/src/win/PootisBuilder.ico"
+                    "${RC_STAGE}/PootisBuilder.ico"
+            COMMAND ${WINDRES_EXE} -I "${RC_STAGE}" -i "${RC_STAGE}/app.rc"
+                    -o "${RC_STAGE}/pootis_app_res.o" -O coff
+            COMMAND ${CMAKE_COMMAND} -E copy
+                    "${RC_STAGE}/pootis_app_res.o" "${APP_RES}"
+            DEPENDS ${CMAKE_SOURCE_DIR}/src/win/app.rc
+                    ${CMAKE_SOURCE_DIR}/src/win/PootisBuilder.ico
+            VERBATIM)
+        list(APPEND POOTIS_SOURCES ${APP_RES})
+    endif()
+endif()
+
 add_executable(PootisBuilder ${POOTIS_SOURCES})
 target_include_directories(PootisBuilder PRIVATE
     src

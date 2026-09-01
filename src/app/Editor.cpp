@@ -820,23 +820,34 @@ void Editor::drawViewportPanel(ViewPanel& p) {
     renderer_.renderView(p.camera, w, h, settings_);
     Framebuffer::unbind();
 
+    const ImVec2 imgTL = ImGui::GetCursorScreenPos();
     ImGui::Image(static_cast<ImTextureID>(static_cast<intptr_t>(p.fb.colorTexture())),
                  ImVec2(static_cast<float>(w), static_cast<float>(h)), ImVec2(0, 1),
                  ImVec2(1, 0));
 
-    // Drop target: drag a model card straight onto a viewport.
-    if (ImGui::BeginDragDropTarget()) {
-        if (const ImGuiPayload* pl = ImGui::AcceptDragDropPayload("PB_MODEL")) {
-            const std::string tag(static_cast<const char*>(pl->Data));
-            const glm::vec3 at = viewPlanePoint(p, ImGui::GetMousePos());
-            if (!doc_.active()) { doc_.newBlank("untitled"); history_.reset(doc_); }
-            placeFgdEntity("prop_static", at);
-            if (!doc_.entities().empty() && tag.rfind("@model:", 0) == 0)
-                doc_.entities().back().kv.set("model", tag.substr(7));
-            afterEdit("Place prop");
-            status_ = "Dropped  " + tag.substr(tag.rfind('/') + 1);
+    // Drop target: drag a model / entity / prefab card straight onto a viewport.
+    // Image() has no ID, so use a rect-based custom target over the viewport.
+    {
+        const ImRect bb(imgTL, ImVec2(imgTL.x + w, imgTL.y + h));
+        if (ImGui::BeginDragDropTargetCustom(bb, ImGui::GetID("##vpdrop"))) {
+            auto dropAt = [&] { return viewPlanePoint(p, ImGui::GetMousePos()); };
+            if (const ImGuiPayload* pl = ImGui::AcceptDragDropPayload("PB_MODEL")) {
+                const std::string tag(static_cast<const char*>(pl->Data));
+                if (!doc_.active()) { doc_.newBlank("untitled"); history_.reset(doc_); }
+                placeFgdEntity("prop_static", dropAt());
+                if (!doc_.entities().empty() && tag.rfind("@model:", 0) == 0)
+                    doc_.entities().back().kv.set("model", tag.substr(7));
+                afterEdit("Place prop");
+                status_ = "Dropped  " + tag.substr(tag.rfind('/') + 1);
+            } else if (const ImGuiPayload* pe =
+                           ImGui::AcceptDragDropPayload("PB_ENTITY")) {
+                placeFgdEntity(static_cast<const char*>(pe->Data), dropAt());
+            } else if (const ImGuiPayload* pk =
+                           ImGui::AcceptDragDropPayload("PB_KIT")) {
+                placePiece(static_cast<const char*>(pk->Data), dropAt());
+            }
+            ImGui::EndDragDropTarget();
         }
-        ImGui::EndDragDropTarget();
     }
 
     drawGizmo(p, aspect);
@@ -2887,10 +2898,16 @@ void kitCards(const KitPiece* pieces, int count, std::string* placing,
             ImGui::PopStyleColor();
         }
         ImGui::EndChild();
+        if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID)) {
+            ImGui::SetDragDropPayload("PB_KIT", pieces[i].name,
+                                     std::strlen(pieces[i].name) + 1);
+            ImGui::Text("%s  %s", pieces[i].icon, pieces[i].name);
+            ImGui::EndDragDropSource();
+        }
         if (ImGui::IsItemClicked()) {
             *placing = pieces[i].name;
             *status = std::string("Placing ") + pieces[i].name +
-                      " — click in a viewport to drop it.";
+                      " — click a viewport, or drag me there.";
         }
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("%s\n%s", pieces[i].name, pieces[i].hint);
@@ -4369,8 +4386,13 @@ void Editor::drawEntityCatalog() {
                 placing_.clear();
             } else {
                 placing_ = "@ent:" + cls;
-                status_ = "Placing " + cls + " — click in a viewport.";
+                status_ = "Placing " + cls + " — click a viewport, or drag me there.";
             }
+        }
+        if (!solid && ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID)) {
+            ImGui::SetDragDropPayload("PB_ENTITY", cls.c_str(), cls.size() + 1);
+            ImGui::TextUnformatted(cls.c_str());
+            ImGui::EndDragDropSource();
         }
         ImGui::SameLine(6);
         if (ec && ec->hasColor) {
