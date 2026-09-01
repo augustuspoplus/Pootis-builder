@@ -253,6 +253,79 @@ Solid solidFromKv(const KvNode& node) {
     return s;
 }
 
+// --- Texture / UV tool helpers -------------------------------------------
+void faceAlignWorld(BrushFace& f) {
+    const glm::vec3 an = glm::abs(f.planeN);
+    if (an.z >= an.x && an.z >= an.y) {
+        f.uAxis = {1, 0, 0, f.uAxis.w};
+        f.vAxis = {0, -1, 0, f.vAxis.w};
+    } else if (an.x >= an.y) {
+        f.uAxis = {0, 1, 0, f.uAxis.w};
+        f.vAxis = {0, 0, -1, f.vAxis.w};
+    } else {
+        f.uAxis = {1, 0, 0, f.uAxis.w};
+        f.vAxis = {0, 0, -1, f.vAxis.w};
+    }
+    f.rotation = 0.0f;
+}
+
+void faceAlignToFace(BrushFace& f) {
+    glm::vec3 up = std::fabs(f.planeN.z) < 0.99f ? glm::vec3(0, 0, 1)
+                                                 : glm::vec3(1, 0, 0);
+    glm::vec3 u = glm::normalize(glm::cross(up, f.planeN));
+    glm::vec3 v = glm::normalize(glm::cross(f.planeN, u));
+    f.uAxis = glm::vec4(u, f.uAxis.w);
+    f.vAxis = glm::vec4(-v, f.vAxis.w);
+    f.rotation = 0.0f;
+}
+
+void faceRotateUV(BrushFace& f, float deltaDeg) {
+    const float r = deltaDeg * 3.14159265358979323846f / 180.0f;
+    const float c = std::cos(r), s = std::sin(r);
+    const glm::vec3 u(f.uAxis), v(f.vAxis);
+    const glm::vec3 nu = u * c + v * s;
+    const glm::vec3 nv = -u * s + v * c;
+    f.uAxis = glm::vec4(nu, f.uAxis.w);
+    f.vAxis = glm::vec4(nv, f.vAxis.w);
+    f.rotation += deltaDeg;
+}
+
+void faceJustifyUV(BrushFace& f, int texW, int texH, int mode) {
+    if (f.verts.size() < 3) return;
+    const float tw = texW > 0 ? float(texW) : 128.0f;
+    const float th = texH > 0 ? float(texH) : 128.0f;
+    const glm::vec3 u(f.uAxis), v(f.vAxis);
+    float uMin = 1e30f, uMax = -1e30f, vMin = 1e30f, vMax = -1e30f;
+    for (const auto& p : f.verts) {
+        const float pu = glm::dot(p, u);
+        const float pv = glm::dot(p, v);
+        uMin = std::min(uMin, pu); uMax = std::max(uMax, pu);
+        vMin = std::min(vMin, pv); vMax = std::max(vMax, pv);
+    }
+    const float du = std::max(uMax - uMin, 1e-3f);
+    const float dv = std::max(vMax - vMin, 1e-3f);
+    if (mode == 0) {  // fit: one tile across the whole face
+        f.uScale = du / tw;
+        f.vScale = dv / th;
+        f.uAxis.w = -uMin / f.uScale;
+        f.vAxis.w = -vMin / f.vScale;
+        return;
+    }
+    // Keep current scale; shift so the texture edge lands on a face edge.
+    const float spanU = f.uScale * tw, spanV = f.vScale * th;
+    switch (mode) {
+        case 3: f.uAxis.w = -uMin / f.uScale; break;                 // left
+        case 4: f.uAxis.w = -(uMax - spanU) / f.uScale; break;       // right
+        case 1: f.vAxis.w = -vMin / f.vScale; break;                 // top
+        case 2: f.vAxis.w = -(vMax - spanV) / f.vScale; break;       // bottom
+        case 5:                                                      // center
+            f.uAxis.w = -((uMin + uMax) * 0.5f - spanU * 0.5f) / f.uScale;
+            f.vAxis.w = -((vMin + vMax) * 0.5f - spanV * 0.5f) / f.vScale;
+            break;
+        default: break;
+    }
+}
+
 KvNode solidToKv(const Solid& s) {
     KvNode n;
     n.name = "solid";

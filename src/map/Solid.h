@@ -58,4 +58,17 @@ struct Solid {
 Solid solidFromKv(const KvNode& solidNode);
 KvNode solidToKv(const Solid& s);
 
+// --- Texture / UV tool helpers (operate on one polygonised face) -----------
+// Reset the U/V axes to world-axis alignment for the face's dominant normal
+// (Hammer's default projection). Clears rotation; keeps scale + offset.
+void faceAlignWorld(BrushFace& f);
+// Project the U/V axes into the face plane (u along an in-plane tangent,
+// v = n x u). Clears rotation; keeps scale + offset.
+void faceAlignToFace(BrushFace& f);
+// Rotate the current U/V axes by `deltaDeg` about the face normal.
+void faceRotateUV(BrushFace& f, float deltaDeg);
+// Justify the texture across the face's extent. mode: 0 fit, 1 top, 2 bottom,
+// 3 left, 4 right, 5 center. texW/texH are the material's pixel size.
+void faceJustifyUV(BrushFace& f, int texW, int texH, int mode);
+
 }  // namespace pb::map

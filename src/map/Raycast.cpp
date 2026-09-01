@@ -67,4 +67,28 @@ bool raySolid(const glm::vec3& ro, const glm::vec3& rd, const Solid& s, float& t
     return hit;
 }
 
+bool raySolidFace(const glm::vec3& ro, const glm::vec3& rd, const Solid& s,
+                  float& tHit, int& faceHit) {
+    float box;
+    if (!rayAabb(ro, rd, s.boundsMin - glm::vec3(0.5f), s.boundsMax + glm::vec3(0.5f),
+                 box))
+        return false;
+
+    bool hit = false;
+    float best = 1e30f;
+    for (int fi = 0; fi < static_cast<int>(s.faces.size()); ++fi) {
+        const auto& f = s.faces[fi];
+        for (size_t k = 1; k + 1 < f.verts.size(); ++k) {
+            float t;
+            if (rayTri(ro, rd, f.verts[0], f.verts[k], f.verts[k + 1], t) && t < best) {
+                best = t;
+                faceHit = fi;
+                hit = true;
+            }
+        }
+    }
+    if (hit) tHit = best;
+    return hit;
+}
+
 }  // namespace pb::map
