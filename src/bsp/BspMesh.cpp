@@ -171,6 +171,18 @@ WorldMesh buildWorldMesh(const BspFile& bsp, const MeshBuildOptions& opts) {
     const auto texinfos = bsp.lumpArray<TexInfo_t>(LUMP_TEXINFO);
     const auto planes = bsp.lumpArray<Plane_t>(LUMP_PLANES);
     const auto models = bsp.lumpArray<Model_t>(LUMP_MODELS);
+    const auto dispVerts = bsp.lumpArray<DispVert_t>(LUMP_DISP_VERTS);
+    const uint8_t* dispInfoRaw = nullptr;
+    size_t dispInfoBytes = 0;
+    bsp.lumpBytes(LUMP_DISPINFO, dispInfoRaw, dispInfoBytes);
+    const int dispInfoCount =
+        dispInfoRaw ? static_cast<int>(dispInfoBytes / kDispInfoSize) : 0;
+    auto dispInfoAt = [&](int idx, DispInfoHead_t& out) -> bool {
+        if (idx < 0 || idx >= dispInfoCount) return false;
+        std::memcpy(&out, dispInfoRaw + static_cast<size_t>(idx) * kDispInfoSize,
+                    sizeof(DispInfoHead_t));
+        return true;
+    };
 
     if (verts.empty() || edges.empty() || surfedges.empty() || faces.empty() ||
         texinfos.empty()) {
@@ -336,6 +348,7 @@ WorldMesh buildWorldMesh(const BspFile& bsp, const MeshBuildOptions& opts) {
     };
 
     glm::vec3 bmin(1e30f), bmax(-1e30f);
+    int dispFacesEmitted = 0;
 
     for (const auto& ef : emit) {
         const Face_t& face = faces[ef.faceIndex];
@@ -375,6 +388,70 @@ WorldMesh buildWorldMesh(const BspFile& bsp, const MeshBuildOptions& opts) {
         if (!bsp.texdataDims(ti.texdata, tw, th)) {
             tw = 256;
             th = 256;
+        }
+
+        // ---- displacement surface -------------------------------------
+        DispInfoHead_t di{};
+        if (face.dispinfo >= 0 && poly.size() >= 4 && !dispVerts.empty() &&
+            dispInfoAt(face.dispinfo, di) && di.power >= 2 && di.power <= 4) {
+            const int gn = (1 << di.power) + 1;           // verts per side
+            const int total = gn * gn;
+            if (di.dispVertStart < 0 ||
+                di.dispVertStart + total > static_cast<int>(dispVerts.size())) {
+                mesh.skippedFaces++;
+                continue;
+            }
+            // Rotate the base quad so corner 0 is nearest startPosition.
+            const glm::vec3 start(di.startPosition.x, di.startPosition.y,
+                                  di.startPosition.z);
+            int c0 = 0;
+            float bestD = 1e30f;
+            for (int k = 0; k < 4; ++k) {
+                const float d = glm::distance(poly[k], start + ef.offset);
+                if (d < bestD) { bestD = d; c0 = k; }
+            }
+            // Surfedge polys wind clockwise-from-front; Valve's displacement
+            // base quad is CCW, so walk the corners the other way from c0.
+            const glm::vec3 A = poly[c0];              // start
+            const glm::vec3 B = poly[(c0 + 3) % 4];
+            const glm::vec3 C = poly[(c0 + 2) % 4];    // diagonal
+            const glm::vec3 D = poly[(c0 + 1) % 4];
+
+            std::vector<uint32_t> gridIdx(total);
+            for (int row = 0; row < gn; ++row) {
+                const float tb = static_cast<float>(row) / (gn - 1);  // A->D axis
+                const glm::vec3 e0 = A + (D - A) * tb;
+                const glm::vec3 e1 = B + (C - B) * tb;
+                for (int col = 0; col < gn; ++col) {
+                    const float ta = static_cast<float>(col) / (gn - 1);  // A->B
+                    glm::vec3 p = e0 + (e1 - e0) * ta;
+                    const DispVert_t& dv =
+                        dispVerts[di.dispVertStart + row * gn + col];
+                    p += glm::vec3(dv.vec.x, dv.vec.y, dv.vec.z) * dv.dist;
+                    gridIdx[row * gn + col] =
+                        addPolyVertex(face, ti, p, n, ef, static_cast<float>(tw),
+                                      static_cast<float>(th));
+                    bmin = glm::min(bmin, p);
+                    bmax = glm::max(bmax, p);
+                }
+            }
+            for (int row = 0; row + 1 < gn; ++row)
+                for (int col = 0; col + 1 < gn; ++col) {
+                    const uint32_t a = gridIdx[row * gn + col];
+                    const uint32_t b = gridIdx[row * gn + col + 1];
+                    const uint32_t c = gridIdx[(row + 1) * gn + col + 1];
+                    const uint32_t d = gridIdx[(row + 1) * gn + col];
+                    if ((row + col) & 1) {
+                        bucket.insert(bucket.end(), {a, b, c, a, c, d});
+                    } else {
+                        bucket.insert(bucket.end(), {a, b, d, b, c, d});
+                    }
+                }
+            // Ortho wireframe: just the base quad outline keeps 2D views tidy.
+            for (int k = 0; k < 4; ++k) addWire(poly[k], poly[(k + 1) % 4]);
+            mesh.drawnFaces++;
+            ++dispFacesEmitted;
+            continue;
         }
 
         std::vector<uint32_t> ring;
@@ -482,10 +559,10 @@ WorldMesh buildWorldMesh(const BspFile& bsp, const MeshBuildOptions& opts) {
     }
 
     PB_INFO("World mesh: %zu verts, %zu tris, %zu batches, %zu drawn / %zu skipped faces, "
-            "lightmap %dx%d, %zu props, %zu point ents",
+            "%d displacements, lightmap %dx%d, %zu props, %zu point ents",
             mesh.vertices.size(), mesh.indices.size() / 3, mesh.batches.size(),
-            mesh.drawnFaces, mesh.skippedFaces, mesh.lightmapWidth, mesh.lightmapHeight,
-            mesh.props.size(), mesh.pointEntities.size());
+            mesh.drawnFaces, mesh.skippedFaces, dispFacesEmitted, mesh.lightmapWidth,
+            mesh.lightmapHeight, mesh.props.size(), mesh.pointEntities.size());
     PB_INFO("  geom bounds  %.0f %.0f %.0f -> %.0f %.0f %.0f", mesh.boundsMin.x,
             mesh.boundsMin.y, mesh.boundsMin.z, mesh.boundsMax.x, mesh.boundsMax.y,
             mesh.boundsMax.z);

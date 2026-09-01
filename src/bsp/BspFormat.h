@@ -27,6 +27,7 @@ enum Lump {
     LUMP_BRUSHSIDES = 20,
     LUMP_DISPINFO = 26,
     LUMP_ORIGINALFACES = 27,
+    LUMP_DISP_VERTS = 33,
     LUMP_GAME_LUMP = 35,
     LUMP_PAKFILE = 40,
     LUMP_TEXDATA_STRING_DATA = 43,
@@ -137,6 +138,23 @@ struct GameLumpHeader_t {
     int32_t fileofs;
     int32_t filelen;
 };
+
+// LUMP_DISP_VERTS entry (dDispVert). 20 bytes.
+struct DispVert_t {
+    Vector_t vec;   // unit direction of displacement
+    float dist;     // distance along `vec`
+    float alpha;    // per-vertex blend alpha
+};
+
+// LUMP_DISPINFO entry (ddispinfo_t) is 176 bytes with neighbour data we don't
+// need; only the leading fields are declared and the rest is skipped by stride.
+struct DispInfoHead_t {
+    Vector_t startPosition;   // 0  : orients the grid against the base quad
+    int32_t dispVertStart;    // 12 : first index into LUMP_DISP_VERTS
+    int32_t dispTriStart;     // 16
+    int32_t power;            // 20 : grid is (2^power + 1) per side
+};
+constexpr int kDispInfoSize = 176;
 
 #pragma pack(pop)
 
