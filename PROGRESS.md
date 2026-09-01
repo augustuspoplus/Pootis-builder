@@ -4,12 +4,14 @@ Newest first. See ROADMAP.md for the plan. Q1 = auto-decompile .bsp on open.
 Q2 = Simple-mode kit builds new maps (prioritised). Also doing section G (QoL).
 
 ## Now / next
-- **Milestone D** — essentially complete (D.1–D.7 below). Optional polish left:
-  real iconsprite/studio-model rendering for point entities (boxes + tags for
-  now); entity thumbnail in the catalogue/properties header.
-- Next: **Milestone C** (sub-object editing: vertex/edge/face modes, clip,
-  hollow, carve, the Texture/UV tool), interleaving **G** QoL items
-  (autosave, undo history panel, map-check, Ctrl+K palette, prefabs, …).
+- **Milestones A–F + D + C are all done.** Remaining roadmap: section **G**
+  (QoL — autosave/backups, undo history panel, map-check, Ctrl+K command
+  palette, prefab library, instances, cordon, measure tool, visgroups,
+  groups, .pbproj, bspzip packing, camera bookmarks, snap presets, log
+  panel, favourites, keybinds, tutorial) and the visual-fidelity parallel
+  track (prop MDL rendering, displacements, blend materials).
+- Optional polish: iconsprite/model rendering for point entities (boxes +
+  tags today); entity thumbnail in the catalogue header.
 
 ## Side quests (user-requested, done out of roadmap order)
 - **3D model import** — `import/ObjModel` (OBJ loader) + `import/ModelImport`:
@@ -64,6 +66,22 @@ playtest in TF2.
     log with follow-scroll, Stop. Save / Ctrl+S / Ctrl+Shift+S wired for real.
   - Verified headless: sample map → 270 KB bsp built + copied to tf/maps,
     vrad lump table streamed into the log panel.
+- **Milestone C** — sub-object editing:
+  - C.1 `map/BrushEdit` — welded vertex/edge/face handles from a solid's
+    polygonised loops; drag on a screen-parallel plane with grid snap, then
+    refit every touched face plane (Newell normal, keeps orientation). Top-bar
+    Vertex/Edge/Face sub-mode switch; overlay handles in all four viewports;
+    click empty space falls back to brush picking.
+  - C.2 Texture / Face-edit tool: shift-click faces in any viewport (fill +
+    outline overlay), Properties panel becomes a Face-edit sheet — material
+    picker w/ thumbnail, Shift X/Y, Scale X/Y, Rotation, Lightmap scale,
+    World/Face align, Fit/Top/Bottom/Left/Right/Center justify.
+    `map/Solid` faceAlignWorld/faceAlignToFace/faceRotateUV/faceJustifyUV;
+    `raySolidFace()`.
+  - C.3 Clip tool — drag a cut line in a 2D view (plane ⟂ that view), Tab
+    cycles keep-front/back/both, Enter applies. `Solid::clip(n,d,mat)`.
+  - C.4 Hollow (`hollow()` — 6 AABB slabs) + Carve (`carve()` — convex
+    subtraction into pieces) buttons in the brush inspector.
 - **Milestone D** — entities:
   - D.1 `fgd/Fgd` — lexer + recursive-descent .fgd parser; resolves @include
     (base.fgd, halflife2.fgd), @PointClass/@SolidClass/@BaseClass headers,
