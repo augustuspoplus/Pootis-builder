@@ -285,6 +285,7 @@ void Editor::frame() {
         drawHistoryPanel();
         drawMapCheckPanel();
         drawLogPanel();
+        drawPrefabPanel();
     }
     for (auto& v : views_) drawViewportPanel(v);
     drawStatusBar();
@@ -337,6 +338,7 @@ void Editor::buildDockLayout(unsigned int dockId, const ImVec2& size) {
         ImGui::DockBuilderDockWindow("History", left);
         ImGui::DockBuilderDockWindow("Map Check", left);
         ImGui::DockBuilderDockWindow("Log", left);
+        ImGui::DockBuilderDockWindow("Prefabs", left);
         ImGui::DockBuilderDockWindow("3D View", tl);
         ImGui::DockBuilderDockWindow("Top (x/y)", tr);
         ImGui::DockBuilderDockWindow("Front (x/z)", bl);
@@ -1811,6 +1813,8 @@ void Editor::handleViewportInput(ViewPanel& p) {
         const glm::vec3 at = viewPlanePoint(p, ImGui::GetMousePos());
         if (placing_.rfind("@ent:", 0) == 0)
             placeFgdEntity(placing_.substr(5), at);
+        else if (placing_.rfind("@prefab:", 0) == 0)
+            placePrefab(placing_.substr(8), at);
         else
             placePiece(placing_, at);
         if (!io.KeyShift) placing_.clear();  // hold Shift to place several
@@ -4218,6 +4222,115 @@ void Editor::drawLogPanel() {
     ImGui::PopStyleColor();
     if (pb::ui::fontMono) ImGui::PopFont();
     ImGui::End();
+}
+
+void Editor::drawPrefabPanel() {
+    ImGui::Begin("Prefabs");
+    ImGui::PushStyleColor(ImGuiCol_Text, pb::ui::col::faint);
+    ImGui::TextWrapped("Reusable chunks of brushwork + entities. Click one, then "
+                       "click in a viewport to drop it (snaps to grid).");
+    ImGui::PopStyleColor();
+
+    if (hasDoc() && !selection_.empty() &&
+        ImGui::Button(ICON_FA_FLOPPY_DISK "  Save selection as prefab…", ImVec2(-1, 0)))
+        saveSelectionAsPrefab();
+    ImGui::Separator();
+
+    static std::vector<std::string> dirs = {
+        executableDir() + "/assets/prefabs",
+        executableDir() + "/../assets/prefabs",
+        std::string(kTf2Maps).substr(0, std::string(kTf2Maps).size() - 5) + "/prefabs",
+    };
+    int shown = 0;
+    for (const auto& d : dirs) {
+        std::error_code ec;
+        if (!fs::is_directory(d, ec)) continue;
+        for (auto& de : fs::directory_iterator(d, ec)) {
+            if (de.path().extension() != ".vmf") continue;
+            ++shown;
+            const std::string full = de.path().string();
+            const std::string name = de.path().stem().string();
+            const bool on = placing_ == "@prefab:" + full;
+            ImGui::PushID(full.c_str());
+            if (ImGui::Selectable(name.c_str(), on)) {
+                placing_ = "@prefab:" + full;
+                status_ = "Click in a viewport to place prefab '" + name + "'";
+            }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", full.c_str());
+            ImGui::PopID();
+        }
+    }
+    if (shown == 0) {
+        ImGui::PushStyleColor(ImGuiCol_Text, pb::ui::col::faint);
+        ImGui::TextWrapped("No prefabs found. Drop .vmf files in "
+                           "<app>/assets/prefabs/, or use the button above.");
+        ImGui::PopStyleColor();
+    }
+    ImGui::End();
+}
+
+void Editor::placePrefab(const std::string& path, const glm::vec3& atRaw) {
+    if (!doc_.active()) doc_.newBlank("untitled");
+    map::MapDocument tmp;
+    std::string err;
+    if (!tmp.loadVmf(path, &err)) {
+        status_ = "Prefab load failed: " + err;
+        return;
+    }
+    glm::vec3 mn, mx;
+    tmp.bounds(mn, mx);
+    const glm::vec3 anchor(0.5f * (mn.x + mx.x), 0.5f * (mn.y + mx.y), mn.z);
+    const glm::vec3 d = snapVec(atRaw) - anchor;
+
+    selection_.clear();
+    for (auto s : tmp.worldSolids()) {
+        s.id = doc_.nextId();
+        s.group = 0;
+        s.translate(d);
+        doc_.worldSolids().push_back(std::move(s));
+        selection_.push_back({-1, (int)doc_.worldSolids().size() - 1});
+    }
+    for (auto e : tmp.entities()) {
+        e.id = doc_.nextId();
+        for (auto& s : e.solids) { s.id = doc_.nextId(); s.translate(d); }
+        e.origin += d;
+        e.kv.set("origin", std::to_string((int)e.origin.x) + " " +
+                               std::to_string((int)e.origin.y) + " " +
+                               std::to_string((int)e.origin.z));
+        doc_.entities().push_back(std::move(e));
+    }
+    afterEdit("Insert prefab");
+    status_ = "Placed prefab (" + std::to_string(tmp.worldSolids().size()) +
+              " brushes, " + std::to_string(tmp.entities().size()) + " entities)";
+}
+
+void Editor::saveSelectionAsPrefab() {
+    if (selection_.empty()) return;
+    const std::string dir = executableDir() + "/assets/prefabs";
+    std::error_code ec;
+    fs::create_directories(dir, ec);
+    const std::string out = saveFileDialog(
+        "Save prefab", "Hammer VMF\0*.vmf\0", "prefab", "vmf", dir.c_str());
+    if (out.empty()) return;
+
+    map::MapDocument tmp;
+    tmp.newBlank(fs::path(out).stem().string());
+    for (const auto& r : selection_) {
+        const map::Solid* s = doc_.resolve(r);
+        if (!s) continue;
+        if (r.entity < 0) {
+            tmp.worldSolids().push_back(*s);
+        } else {
+            const auto& e = doc_.entities()[r.entity];
+            map::MapEntity ce = e;
+            tmp.entities().push_back(std::move(ce));
+        }
+    }
+    std::string err;
+    if (tmp.saveVmf(out, &err, /*updateState=*/false))
+        status_ = "Saved prefab  " + fs::path(out).filename().string();
+    else
+        status_ = "Prefab save failed: " + err;
 }
 
 void Editor::drawSelectionDims(ViewPanel& p, float aspect, ImDrawList* dl) {

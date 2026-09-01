@@ -55,6 +55,7 @@ public:
     void debugShapeOp(int op);                        // 0 hollow, 1 carve, 2 clip
     void debugMapCheck() { runMapCheck(); }
     void debugShowPalette() { showPalette_ = true; }
+    void debugPlacePrefab(const std::string& p) { placePrefab(p, glm::vec3(0)); }
     void debugDumpFgd(const std::string& cls);
     void debugImportObj(const std::string& path);  // detail-brush import, headless
     bool saveVmf(const std::string& path);
@@ -131,6 +132,9 @@ private:
     void runMapCheck();
     void drawCommandPalette();
     void drawLogPanel();
+    void drawPrefabPanel();
+    void placePrefab(const std::string& path, const glm::vec3& at);
+    void saveSelectionAsPrefab();
     void drawSelectionDims(ViewPanel& p, float aspect, ImDrawList* dl);
     void autosaveTick();
     void writeBackup(const std::string& vmfPath);
