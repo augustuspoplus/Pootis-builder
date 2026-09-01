@@ -12,6 +12,7 @@
 #include "core/File.h"
 #include "core/Log.h"
 #include "gpu/Gl.h"
+#include "decompile/BspSource.h"
 #include "map/MapMesh.h"
 #include "map/Raycast.h"
 #include "platform/FileDialog.h"
@@ -66,6 +67,7 @@ bool Editor::init(GLFWwindow* window) {
 }
 
 void Editor::shutdown() {
+    if (decompileThread_.joinable()) decompileThread_.join();
     prefs_.save();
     renderer_.clearWorld();
 }
@@ -137,7 +139,46 @@ bool Editor::openMap(const std::string& path) {
     prefs_.pushRecent(path);
     prefs_.save();
     showWelcome_ = false;
+
+    // Q1: auto-decompile to editable brushes in the background.
+    if (!decompileRunning_ && decompile::available(executableDir())) {
+        decompileRunning_ = true;
+        decompileDone_ = false;
+        decompileVmf_.clear();
+        decompileErr_.clear();
+        const std::string exeDir = executableDir();
+        const std::string bsp = path;
+        status_ = bsp_.name() + " — decompiling to editable brushes…";
+        decompileThread_ = std::thread([this, exeDir, bsp] {
+            std::string err2;
+            decompileVmf_ = decompile::bspToVmf(exeDir, bsp, &err2);
+            decompileErr_ = err2;
+            decompileDone_ = true;
+        });
+    }
     return true;
+}
+
+void Editor::pollDecompile() {
+    if (!decompileDone_) return;
+    if (decompileThread_.joinable()) decompileThread_.join();
+    decompileDone_ = false;
+    decompileRunning_ = false;
+
+    if (decompileVmf_.empty()) {
+        status_ = "Decompile failed: " + decompileErr_ + " (viewing the raw BSP)";
+        return;
+    }
+    std::string err;
+    if (doc_.loadVmf(decompileVmf_, &err)) {
+        buildAndUpload(meshOpts_);
+        status_ = doc_.name() + " — editable: " +
+                  std::to_string(doc_.worldSolids().size()) + " brushes, " +
+                  std::to_string(doc_.entities().size()) + " entities  "
+                  "(decompile is approximate)";
+    } else {
+        status_ = "Loaded decompile but parse failed: " + err;
+    }
 }
 
 void Editor::buildAndUpload(const MeshBuildOptions& opts) {
@@ -177,6 +218,7 @@ void Editor::frameAllViews() {
 // Frame
 // ---------------------------------------------------------------------------
 void Editor::frame() {
+    pollDecompile();
     ImGuiViewport* vp = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(vp->WorkPos);
     ImGui::SetNextWindowSize(vp->WorkSize);

@@ -1,7 +1,9 @@
 #pragma once
 #include <array>
+#include <atomic>
 #include <memory>
 #include <string>
+#include <thread>
 
 #include <imgui.h>
 
@@ -54,6 +56,7 @@ public:
 
     bool hasMap() const { return bsp_.loaded() || !doc_.empty(); }
     bool hasDoc() const { return !doc_.empty(); }
+    bool busy() const { return decompileRunning_.load(); }
     const std::string& status() const { return status_; }
 
 private:
@@ -118,6 +121,14 @@ private:
     bool snap_ = true;
     int kitTab_ = 0;
     std::string placing_;
+
+    // Background BSP -> VMF decompile.
+    std::thread decompileThread_;
+    std::atomic<bool> decompileRunning_{false};
+    std::atomic<bool> decompileDone_{false};
+    std::string decompileVmf_;
+    std::string decompileErr_;
+    void pollDecompile();
 
     Settings prefs_;
     float uiScale_ = 1.0f;

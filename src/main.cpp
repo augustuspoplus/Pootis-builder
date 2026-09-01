@@ -79,8 +79,9 @@ int runHeadlessScreenshot(const Options& opt, GLFWwindow* window, float uiScale)
     std::vector<uint8_t> rgba;
 
     if (opt.ui) {
-        // Drive the real docked UI for a few frames, then grab the window FB.
-        for (int i = 0; i < std::max(opt.warmupFrames, 4); ++i) {
+        // Drive the real docked UI; wait out any background decompile (max ~12s).
+        for (int i = 0; i < 3000; ++i) {
+            if (i >= std::max(opt.warmupFrames, 4) && !editor.busy()) break;
             glfwPollEvents();
             ImGui_ImplOpenGL3_NewFrame();
             ImGui_ImplGlfw_NewFrame();
@@ -94,6 +95,7 @@ int runHeadlessScreenshot(const Options& opt, GLFWwindow* window, float uiScale)
             glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
             ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
             glfwSwapBuffers(window);
+            if (editor.busy()) glfwWaitEventsTimeout(0.004);
         }
         int fbw = opt.width, fbh = opt.height;
         glfwGetFramebufferSize(window, &fbw, &fbh);
