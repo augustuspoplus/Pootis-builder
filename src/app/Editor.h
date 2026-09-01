@@ -199,6 +199,7 @@ private:
     void handleBlockTool(ViewPanel& p);
     void handleSelectionResize(ViewPanel& p);    // Hammer-style bbox drag handles
     void handleSelectionMove(ViewPanel& p);      // click the body + drag to move
+    void updateHoverHighlight(ViewPanel& p);     // soft outline under the cursor
     void rebuildHandles();                       // sub-object handles for selection_[0]
     void handleSubObjectInput(ViewPanel& p);
     void drawSubObjectOverlay(ViewPanel& p, float aspect, ImDrawList* dl);
@@ -303,6 +304,8 @@ private:
     glm::vec3 moveGrab_{0};        // world point under the cursor at grab
     glm::vec3 moveEntStart_{0};    // point-entity origin at grab
     bool moveIsEnt_ = false;
+    map::SolidRef hoverRef_;       // solid under the cursor (Select tool)
+    int hoverEnt_ = -1;
 
     std::vector<map::Solid> clipboard_;
     map::MapEntity clipboardEnt_;

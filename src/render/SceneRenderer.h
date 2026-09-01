@@ -44,6 +44,7 @@ public:
 
     // Bright overlay outline for the current selection (line-pairs, world space).
     void setSelectionWire(const std::vector<glm::vec3>& lines);
+    void setHoverWire(const std::vector<glm::vec3>& lines);   // pre-select outline
 
     bool hasWorld() const { return indexCount_ > 0 || wireCount_ > 0; }
     glm::vec3 boundsMin() const { return boundsMin_; }
@@ -87,6 +88,8 @@ private:
     // Selection outline.
     GLuint selVao_ = 0, selVbo_ = 0;
     GLsizei selCount_ = 0;
+    GLuint hovVao_ = 0, hovVbo_ = 0;
+    GLsizei hovCount_ = 0;
     void drawSelectionWire(const glm::mat4& vp);
 
     std::vector<PropInstance> props_;
