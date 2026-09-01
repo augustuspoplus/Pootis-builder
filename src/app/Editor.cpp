@@ -287,6 +287,11 @@ void Editor::frame() {
     drawWorkshopWindow();
     drawWelcome();
 
+    if (focusPanelFrames_ > 0) {
+        ImGui::SetWindowFocus(focusPanel_.c_str());
+        --focusPanelFrames_;
+    }
+
     // Live preview while dragging the gizmo (history is recorded on release).
     if (docMeshDirty_ && gizmoUsing_) {
         buildAndUpload(meshOpts_);
@@ -2675,11 +2680,130 @@ void Editor::drawOutliner() {
         ImGui::End();
         return;
     }
+
+    std::string needle;
+
+    if (hasDoc()) {
+        ImGui::Text(ICON_FA_DIAGRAM_PROJECT "  %s%s",
+                    doc_.name().empty() ? "untitled" : doc_.name().c_str(),
+                    doc_.dirty() ? " *" : "");
+        ImGui::Separator();
+        ImGui::SetNextItemWidth(-1);
+        ImGui::InputTextWithHint("##filter", ICON_FA_MAGNIFYING_GLASS " filter",
+                                 outlinerFilter_, sizeof(outlinerFilter_));
+        needle = outlinerFilter_;
+        std::transform(needle.begin(), needle.end(), needle.begin(), ::tolower);
+        auto pass = [&](const std::string& s) {
+            if (needle.empty()) return true;
+            std::string t = s;
+            std::transform(t.begin(), t.end(), t.begin(), ::tolower);
+            return t.find(needle) != std::string::npos;
+        };
+        auto focusOn = [&](const glm::vec3& c) {
+            for (auto& v : views_) {
+                if (v.kind == ViewKind::Perspective)
+                    v.camera.pos = c - v.camera.forward() * 320.0f;
+                else
+                    v.camera.orthoCenter = c;
+            }
+        };
+
+        const auto& ents = doc_.entities();
+        const auto& world = doc_.worldSolids();
+
+        // ---- Entities ----------------------------------------------------
+        int shown = 0;
+        for (const auto& e : ents)
+            if (pass(e.classname) || pass(e.kv.get("targetname"))) ++shown;
+        char eh[64];
+        std::snprintf(eh, sizeof(eh), "Entities  (%d)###ents", (int)ents.size());
+        if (ImGui::CollapsingHeader(eh, ImGuiTreeNodeFlags_DefaultOpen)) {
+            if (ImGui::BeginChild("entlist", ImVec2(0, 240))) {
+                for (int i = 0; i < (int)ents.size(); ++i) {
+                    const auto& e = ents[i];
+                    const std::string tn = e.kv.get("targetname");
+                    if (!pass(e.classname) && !pass(tn)) continue;
+                    ImGui::PushID(i);
+                    glm::vec3 rgb(0.85f, 0.78f, 0.6f);
+                    if (const fgd::EntityClass* ec = fgd_.flattened(e.classname);
+                        ec && ec->hasColor)
+                        rgb = ec->color;
+                    ImGui::ColorButton("##c",
+                                       ImVec4(rgb.r, rgb.g, rgb.b, 1.0f),
+                                       ImGuiColorEditFlags_NoTooltip |
+                                           ImGuiColorEditFlags_NoDragDrop,
+                                       ImVec2(10, 10));
+                    ImGui::SameLine(0, 6);
+                    std::string lbl = (e.solids.empty() ? "" : ICON_FA_CUBE "  ") +
+                                      e.classname;
+                    if (!tn.empty()) lbl += "  [" + tn + "]";
+                    if (ImGui::Selectable(lbl.c_str(), selectedEntity_ == i,
+                                          ImGuiSelectableFlags_AllowDoubleClick)) {
+                        selectedEntity_ = i;
+                        selection_.clear();
+                        if (!e.solids.empty())
+                            selection_.push_back({i, 0});
+                        rebuildSelectionWire();
+                        status_ = e.classname + " selected";
+                        if (ImGui::IsMouseDoubleClicked(0)) {
+                            glm::vec3 c = e.origin;
+                            if (!e.solids.empty())
+                                c = 0.5f * (e.solids[0].boundsMin + e.solids[0].boundsMax);
+                            focusOn(c);
+                        }
+                    }
+                    ImGui::PopID();
+                }
+                if (ents.empty())
+                    ImGui::TextDisabled("No entities yet — add from the catalogue.");
+            }
+            ImGui::EndChild();
+        }
+
+        // ---- World brushes --------------------------------------------------
+        char wh[64];
+        std::snprintf(wh, sizeof(wh), "World brushes  (%d)###world", (int)world.size());
+        if (ImGui::CollapsingHeader(wh, ImGuiTreeNodeFlags_DefaultOpen)) {
+            if (ImGui::BeginChild("worldlist", ImVec2(0, 220))) {
+                for (int i = 0; i < (int)world.size(); ++i) {
+                    const auto& s = world[i];
+                    const std::string mat =
+                        s.faces.empty() ? std::string("brush") : s.faces[0].material;
+                    char row[160];
+                    std::snprintf(row, sizeof(row), "brush %d   %s", s.id, mat.c_str());
+                    if (!pass(row)) continue;
+                    const bool sel =
+                        std::find(selection_.begin(), selection_.end(),
+                                  map::SolidRef{-1, i}) != selection_.end();
+                    ImGui::PushID(1000000 + i);
+                    if (ImGui::Selectable(row, sel,
+                                          ImGuiSelectableFlags_AllowDoubleClick)) {
+                        if (!ImGui::GetIO().KeyShift) selection_.clear();
+                        selection_.push_back({-1, i});
+                        selectedEntity_ = -1;
+                        rebuildSelectionWire();
+                        status_ = std::to_string(selection_.size()) + " brush(es) selected";
+                        if (ImGui::IsMouseDoubleClicked(0)) focusOn(s.center());
+                    }
+                    if (!s.valid && ImGui::IsItemHovered())
+                        ImGui::SetTooltip("invalid brush (not convex / <4 planes)");
+                    ImGui::PopID();
+                }
+                if (world.empty())
+                    ImGui::TextDisabled("No world brushwork yet.");
+            }
+            ImGui::EndChild();
+        }
+        ImGui::End();
+        return;
+    }
+
+    // ---- BSP-only view: keep the read-only stats -----------------------------
     ImGui::Text("%s", bsp_.name().c_str());
     ImGui::Separator();
     ImGui::InputTextWithHint("##filter", "filter", outlinerFilter_,
                              sizeof(outlinerFilter_));
-    std::string needle = outlinerFilter_;
+    needle = outlinerFilter_;
     std::transform(needle.begin(), needle.end(), needle.begin(), ::tolower);
     auto pass = [&](const std::string& s) {
         if (needle.empty()) return true;
