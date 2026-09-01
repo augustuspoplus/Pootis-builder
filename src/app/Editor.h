@@ -63,6 +63,7 @@ public:
     void debugShapeOp(int op);                        // 0 hollow, 1 carve, 2 clip
     void debugMapCheck() { runMapCheck(); }
     void debugShowPalette() { showPalette_ = true; }
+    void debugShowSettings() { showSettings_ = true; showWelcome_ = false; }
     void debugPlacePrefab(const std::string& p) { placePrefab(p, glm::vec3(0)); }
     void debugDumpProps();
     void debugNoDecompile() { suppressAutoDecompile_ = true; }
@@ -143,6 +144,8 @@ private:
     void drawViewMenuPopup();
     void drawWelcome();
     void drawKeysOverlay();
+    void drawSettingsWindow();
+    void applyPrefs();   // push prefs_ into the live editor state
     void uiScaleMenu();
     void drawViewportPanel(ViewPanel& p);
     void drawBuildKit();
@@ -310,6 +313,7 @@ private:
     std::vector<map::Solid> clipboard_;
     map::MapEntity clipboardEnt_;
     bool showKeys_ = false;   // F1 shortcut cheat-sheet
+    bool showSettings_ = false;
 
     // Block tool
     bool blockDragging_ = false;
