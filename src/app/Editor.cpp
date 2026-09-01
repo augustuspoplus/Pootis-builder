@@ -3330,8 +3330,9 @@ void Editor::drawBuildKit() {
     ImGui::PopStyleColor();
     ImGui::Dummy(ImVec2(0, 4));
 
-    if (ImGui::BeginTabBar("kit", ImGuiTabBarFlags_FittingPolicyResizeDown)) {
-        if (ImGui::BeginTabItem(ICON_FA_CUBE "  Shapes")) {
+    if (ImGui::BeginTabBar("kit", ImGuiTabBarFlags_FittingPolicyScroll |
+                                      ImGuiTabBarFlags_TabListPopupButton)) {
+        if (ImGui::BeginTabItem(ICON_FA_CUBE " Shapes")) {
             static const KitPiece shapes[] = {
                 {ICON_FA_BORDER_ALL, "Floor", "Walkable ground area"},
                 {ICON_FA_SQUARE, "Wall", "Solid cover"},
@@ -3345,7 +3346,7 @@ void Editor::drawBuildKit() {
             kitCards(shapes, IM_ARRAYSIZE(shapes), &placing_, &status_);
             ImGui::EndTabItem();
         }
-        if (ImGui::BeginTabItem(ICON_FA_ARROW_POINTER "  Play")) {
+        if (ImGui::BeginTabItem(ICON_FA_ARROW_POINTER " Play")) {
             static const KitPiece play[] = {
                 {ICON_FA_ARROW_POINTER, "RED spawn", "Team RED respawn room"},
                 {ICON_FA_ARROW_POINTER, "BLU spawn", "Team BLU respawn room"},
@@ -3358,16 +3359,12 @@ void Editor::drawBuildKit() {
             kitCards(play, IM_ARRAYSIZE(play), &placing_, &status_);
             ImGui::EndTabItem();
         }
-        if (ImGui::BeginTabItem(ICON_FA_IMAGE "  Props")) {
+        if (ImGui::BeginTabItem(ICON_FA_IMAGE " Props")) {
             ImGui::Dummy(ImVec2(0, 4));
-            ImGui::PushStyleColor(ImGuiCol_Text, pb::ui::col::dim);
-            ImGui::TextWrapped(
-                "The model browser lands here — pick from the installed TF2 props "
-                "and drop them on the grid.");
-            ImGui::PopStyleColor();
+            drawModelGrid();
             ImGui::EndTabItem();
         }
-        if (ImGui::BeginTabItem(ICON_FA_LIGHTBULB "  Light")) {
+        if (ImGui::BeginTabItem(ICON_FA_LIGHTBULB " Light")) {
             static const KitPiece lights[] = {
                 {ICON_FA_LIGHTBULB, "Point light", "Local glow"},
                 {ICON_FA_LIGHTBULB, "Spot light", "Directional cone"},
@@ -4162,11 +4159,15 @@ void Editor::drawTextureBrowser() {
 }
 
 void Editor::drawModelBrowser() {
-    using namespace pb::ui;
     ImGui::Begin("Models");
+    drawModelGrid();
+    ImGui::End();
+}
+
+void Editor::drawModelGrid() {
+    using namespace pb::ui;
     if (!sourceFs_.ready()) {
-        ImGui::TextDisabled("No game content mounted.");
-        ImGui::End();
+        ImGui::TextDisabled("No game content mounted (install / locate TF2).");
         return;
     }
     if (!modelListBuilt_) {
@@ -4258,7 +4259,6 @@ void Editor::drawModelBrowser() {
         }
     }
     ImGui::EndChild();
-    ImGui::End();
 }
 
 void Editor::drawMaterialList() {
