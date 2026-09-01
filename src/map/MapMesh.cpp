@@ -96,11 +96,13 @@ WorldMesh buildDocMesh(const MapDocument& doc, MaterialLibrary& materials) {
     glm::vec3 bmin(1e30f), bmax(-1e30f);
 
     for (const auto& s : doc.worldSolids())
-        if (s.valid) emitSolid(s, materials, glm::vec3(0), buckets, mesh, bmin, bmax);
+        if (s.valid && !s.hidden)
+            emitSolid(s, materials, glm::vec3(0), buckets, mesh, bmin, bmax);
 
     for (const auto& e : doc.entities()) {
+        if (e.hidden) continue;
         for (const auto& s : e.solids)
-            if (s.valid)
+            if (s.valid && !s.hidden)
                 emitSolid(s, materials, glm::vec3(0), buckets, mesh, bmin, bmax);
     }
 
@@ -125,7 +127,7 @@ WorldMesh buildDocMesh(const MapDocument& doc, MaterialLibrary& materials) {
     // Point entities + spawn framing.
     std::array<std::vector<float>, 3> ax;
     for (const auto& e : doc.entities()) {
-        if (!e.solids.empty()) continue;
+        if (!e.solids.empty() || e.hidden) continue;
         bsp::PointEntity pe;
         pe.classname = e.classname;
         pe.targetname = e.targetname();

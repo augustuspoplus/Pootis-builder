@@ -34,6 +34,7 @@ struct BrushFace {
 struct Solid {
     int id = 0;
     int group = 0;  // 0 = ungrouped; solids sharing an id select together
+    bool hidden = false;  // transient: hidden by a visgroup
     std::vector<BrushFace> faces;
     glm::vec3 boundsMin{0}, boundsMax{0};
     glm::vec3 editorColor{0.7f, 0.55f, 0.35f};
