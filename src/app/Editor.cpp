@@ -68,6 +68,7 @@ bool Editor::init(GLFWwindow* window) {
 
     sourceFs_.mountDefaults(executableDir());
     materials_.init(&sourceFs_);
+    modelThumbs_.init(160);
     loadFgd();
 
     const char* titles[4] = {"3D View", "Top (x/y)", "Front (x/z)", "Side (y/z)"};
@@ -822,6 +823,21 @@ void Editor::drawViewportPanel(ViewPanel& p) {
     ImGui::Image(static_cast<ImTextureID>(static_cast<intptr_t>(p.fb.colorTexture())),
                  ImVec2(static_cast<float>(w), static_cast<float>(h)), ImVec2(0, 1),
                  ImVec2(1, 0));
+
+    // Drop target: drag a model card straight onto a viewport.
+    if (ImGui::BeginDragDropTarget()) {
+        if (const ImGuiPayload* pl = ImGui::AcceptDragDropPayload("PB_MODEL")) {
+            const std::string tag(static_cast<const char*>(pl->Data));
+            const glm::vec3 at = viewPlanePoint(p, ImGui::GetMousePos());
+            if (!doc_.active()) { doc_.newBlank("untitled"); history_.reset(doc_); }
+            placeFgdEntity("prop_static", at);
+            if (!doc_.entities().empty() && tag.rfind("@model:", 0) == 0)
+                doc_.entities().back().kv.set("model", tag.substr(7));
+            afterEdit("Place prop");
+            status_ = "Dropped  " + tag.substr(tag.rfind('/') + 1);
+        }
+        ImGui::EndDragDropTarget();
+    }
 
     drawGizmo(p, aspect);
 
@@ -4211,47 +4227,59 @@ void Editor::drawModelGrid() {
                     const std::string& path = *shown[i];
                     ImGui::PushID(i);
 
-                    // Icon = the model's first material thumbnail, resolved lazily.
+                    // Icon = a real rendered 3/4-view of the model, cached;
+                    // rendered a few per frame so scrolling stays smooth.
                     GLuint tex = 0;
-                    auto it = modelFirstMat_.find(path);
-                    if (it == modelFirstMat_.end() && budget > 0) {
-                        const model::StudioModel& sm =
-                            model::loadStudioModel(sourceFs_, path);
-                        const std::string mat =
-                            (sm.ok && !sm.meshes.empty()) ? sm.meshes[0].material : "";
-                        modelFirstMat_[path] = mat;
-                        it = modelFirstMat_.find(path);
+                    if (modelThumbs_.has(path)) {
+                        tex = modelThumbs_.get(path, model::loadStudioModel(sourceFs_, path),
+                                               materials_);
+                    } else if (budget > 0) {
+                        tex = modelThumbs_.get(
+                            path, model::loadStudioModel(sourceFs_, path), materials_);
                         --budget;
                     }
-                    if (it != modelFirstMat_.end() && !it->second.empty())
-                        tex = materials_.get(it->second).texture;
 
                     const bool on = placing_ == "@model:" + path;
+                    std::string label = path.substr(path.rfind('/') + 1);
+                    if (label.size() > 4) label.resize(label.size() - 4);  // .mdl
+
                     ImGui::BeginGroup();
                     if (tex)
-                        ImGui::Image(static_cast<ImTextureID>((intptr_t)tex),
-                                     ImVec2(cell, cell));
+                        ImGui::ImageButton("##b", static_cast<ImTextureID>((intptr_t)tex),
+                                           ImVec2(cell, cell));
                     else {
                         ImGui::PushStyleColor(ImGuiCol_Button, col::bg2);
-                        ImGui::Button(ICON_FA_CUBE "##t", ImVec2(cell, cell));
+                        ImGui::Button(ICON_FA_CUBE "##t", ImVec2(cell + 8, cell + 8));
                         ImGui::PopStyleColor();
+                    }
+                    const bool cardHit = ImGui::IsItemClicked();
+                    if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID)) {
+                        const std::string payload = "@model:" + path;
+                        ImGui::SetDragDropPayload("PB_MODEL", payload.c_str(),
+                                                 payload.size() + 1);
+                        if (tex)
+                            ImGui::Image(static_cast<ImTextureID>((intptr_t)tex),
+                                         ImVec2(64, 64));
+                        ImGui::TextUnformatted(label.c_str());
+                        ImGui::EndDragDropSource();
                     }
                     if (on)
                         ImGui::GetWindowDrawList()->AddRect(
                             ImGui::GetItemRectMin(), ImGui::GetItemRectMax(),
                             u32(col::acc), 3.0f, 0, 2.0f);
-                    std::string label = path.substr(path.rfind('/') + 1);
-                    if (label.size() > 4) label.resize(label.size() - 4);  // .mdl
                     ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + cell);
                     ImGui::TextWrapped("%s", label.c_str());
                     ImGui::PopTextWrapPos();
                     ImGui::EndGroup();
-                    if (ImGui::IsItemClicked()) {
+                    if (cardHit) {
                         placing_ = "@model:" + path;
                         status_ = "Placing prop  " + label +
-                                  "  — click in a viewport";
+                                  "  — click a viewport (or drag me there)";
                     }
-                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", path.c_str());
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("%s\ndrag into a viewport, or click then "
+                                          "click the grid",
+                                          path.c_str());
                     if (cIdx + 1 < cols) ImGui::SameLine();
                     ImGui::PopID();
                 }
