@@ -16,6 +16,23 @@ Q2 = Simple-mode kit builds new maps (prioritised). Also doing section G (QoL).
   perspective now respects `showPointEntities`; connection lines past 60
   entities only draw for the selection.
 
+## Simple-mode polish (latest)
+- **Things tab**: curated plain-language entity list (spawn rooms, capture
+  point, payload path, resupply, health/ammo, intel, hurt/push triggers,
+  door, sound, particles, fog) with real model-render preview icons.
+- Model browser: **real 3D thumbnails** (ModelThumbnailer -> offscreen FBO,
+  cached) instead of the raw texture atlas; wired into the Simple Props tab
+  too. **Drag-and-drop** from any menu card (model / kit / entity) straight
+  onto a viewport -> drops at the cursor (rect-based DragDropTargetCustom).
+- **Keyboard shortcuts**: Ctrl+Z/Y/S/O/C/V/X/D/A/B/K, Del, F, Esc, [ ]
+  rotate, W/E/R gizmo, F1 cheat-sheet. copy/paste/cut + rotateSelection;
+  Delete now also removes point entities.
+- **Rotate** buttons in the selection panel (turn 90 about Z, tip onto side).
+- **Windows app icon** (src/win/app.rc via staged windres) + runtime GLFW
+  window icon from assets/PootisBuilder.ico.
+- Kit tab bar no longer collapses to "..." in the narrow dock (scroll +
+  popup button); kit cards size to their text.
+
 ## 3D view / editing UX (done this pass)
 - Infinite ground grid in the 3D view (distance fade, red +X / green +Y axes)
   + a world-origin ring marker while the map is empty.
