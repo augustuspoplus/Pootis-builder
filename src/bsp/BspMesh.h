@@ -29,6 +29,7 @@ struct PropInstance {
     glm::vec3 pos{0.0f};
     glm::vec3 anglesPYR{0.0f};  // pitch, yaw, roll (degrees)
     float scale = 1.0f;
+    bool baked = false;         // model geometry folded into the batches
 };
 
 struct PointEntity {
@@ -77,6 +78,7 @@ struct WorldMesh {
 struct MeshBuildOptions {
     bool includeTriggers = false;
     bool includeSky = false;
+    bool bakeProps = true;   // fold prop_static model geometry into the mesh
     float lightmapGain = 1.0f;
 };
 

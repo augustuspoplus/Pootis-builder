@@ -45,6 +45,8 @@ struct Options {
     std::string placePrefabPath;
     int subDemoMode = 0;
     bool workshop = false;
+    bool dumpProps = false;
+    bool noDecompile = false;
     bool dumpFgd = false;
     std::string dumpFgdClass;
     std::string importObjPath;
@@ -84,6 +86,8 @@ Options parseArgs(int argc, char** argv) {
         else if (a == "--map-check") o.mapCheck = true;
         else if (a == "--palette") o.palette = true;
         else if (a == "--place-prefab") o.placePrefabPath = next("");
+        else if (a == "--dump-props") o.dumpProps = true;
+        else if (a == "--no-decompile") o.noDecompile = true;
         else if (a == "--workshop") o.workshop = true;
         else if (a == "--dump-fgd") { o.dumpFgd = true; o.dumpFgdClass = next(""); }
         else if (a == "--import-obj") o.importObjPath = next("");
@@ -106,6 +110,7 @@ int runHeadlessScreenshot(const Options& opt, GLFWwindow* window, float uiScale)
     if (!editor.init(window)) return 2;
     editor.attachSettings(pb::Settings::load(), uiScale);
     if (opt.pro) editor.setProMode();
+    if (opt.noDecompile) editor.debugNoDecompile();
     if (!opt.mapPath.empty() && !editor.openMap(opt.mapPath))
         PB_WARN("map did not load; screenshot will show an empty scene");
     if (opt.sampleMap) editor.debugBuildSampleMap();
@@ -122,6 +127,7 @@ int runHeadlessScreenshot(const Options& opt, GLFWwindow* window, float uiScale)
     if (opt.palette) editor.debugShowPalette();
     if (!opt.saveVmfPath.empty()) editor.saveVmf(opt.saveVmfPath);
     if (!opt.panel.empty()) editor.debugFocusPanel(opt.panel);
+    if (opt.dumpProps) editor.debugDumpProps();
     if (opt.workshop) editor.debugShowWorkshop();
 
     std::vector<uint8_t> rgba;
@@ -272,6 +278,7 @@ int main(int argc, char** argv) {
     }
     editor.attachSettings(std::move(settings), uiScale);
     if (opt.pro) editor.setProMode();
+    if (opt.noDecompile) editor.debugNoDecompile();
     if (!opt.mapPath.empty()) editor.openMap(opt.mapPath);
 
     while (!glfwWindowShouldClose(window)) {

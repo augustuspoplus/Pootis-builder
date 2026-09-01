@@ -56,6 +56,8 @@ public:
     void debugMapCheck() { runMapCheck(); }
     void debugShowPalette() { showPalette_ = true; }
     void debugPlacePrefab(const std::string& p) { placePrefab(p, glm::vec3(0)); }
+    void debugDumpProps();
+    void debugNoDecompile() { suppressAutoDecompile_ = true; }
     void debugDumpFgd(const std::string& cls);
     void debugImportObj(const std::string& path);  // detail-brush import, headless
     bool saveVmf(const std::string& path);
@@ -188,6 +190,7 @@ private:
     std::string pendingOpen_;
     std::string focusPanel_;  // debug: focus this dock tab next frame
     int focusPanelFrames_ = 0;
+    bool suppressAutoDecompile_ = false;  // debug: inspect the raw BSP view
 
     // QoL: command palette, map-check, autosave.
     bool showPalette_ = false;
