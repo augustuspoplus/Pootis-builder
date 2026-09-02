@@ -61,6 +61,18 @@ echo "== phase 2: modal G/R/S transform =="
 "$RUN" --mx-test --screenshot /dev/null --width 32 --height 32 2>&1 \
   | grep -q 'mx-test: 4 passed, 0 failed' && ok || bad "mx-test"
 
+echo "== phase 3: displacement VMF round-trip =="
+DISP="$LOCALAPPDATA/PootisBuilder/decompiled/cp_badlands.vmf"
+[ -f "$DISP" ] || DISP="$LOCALAPPDATA/PootisBuilder/decompiled/cp_process_final.vmf"
+if [ -f "$DISP" ]; then
+  o="$TMP/disp_rt.vmf"; rm -f "$o"
+  "$RUN" "$DISP" --save-vmf "$o" --screenshot /dev/null --width 32 --height 32 >/dev/null 2>&1
+  a=$(grep -c 'dispinfo' "$DISP"); b=$(grep -c 'dispinfo' "$o" 2>/dev/null || echo 0)
+  if [ "$a" -gt 0 ] && [ "$a" = "$b" ]; then ok; else bad "disp round-trip ($a in, $b out)"; fi
+else
+  echo "  (no decompiled disp map cached — skipped)"
+fi
+
 echo "== templates =="
 for f in "$ROOT"/assets/templates/*.vmf; do
   [ -e "$f" ] || continue

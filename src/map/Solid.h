@@ -21,6 +21,13 @@ struct BrushFace {
     float lightmapScale = 16.0f;
     int smoothingGroups = 0;
 
+    // Displacement: the raw Source "dispinfo" block (power / startposition /
+    // normals / distances / offsets / alphas / triangle tags). Kept verbatim so
+    // decompiled terrain round-trips through load -> save losslessly. `disp`
+    // holds the parsed grid once it is rendered or edited.
+    KvNode dispInfo;
+    bool hasDisp = false;
+
     std::vector<glm::vec3> verts;
 
     // Source plane points (kept for lossless round-trip of untouched faces).

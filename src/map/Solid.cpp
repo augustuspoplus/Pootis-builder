@@ -307,6 +307,8 @@ Solid solidFromKv(const KvNode& node) {
             f.rotation = c.getFloat("rotation");
             f.lightmapScale = c.getFloat("lightmapscale", 16.0f);
             f.smoothingGroups = c.getInt("smoothing_groups");
+            for (const auto& sc : c.children)
+                if (sc.name == "dispinfo") { f.dispInfo = sc; f.hasDisp = true; }
             s.faces.push_back(std::move(f));
         } else if (c.name == "editor") {
             s.extra = c;
@@ -423,6 +425,11 @@ KvNode solidToKv(const Solid& s) {
         side.set("rotation", std::to_string(static_cast<int>(f.rotation)));
         side.set("lightmapscale", std::to_string(static_cast<int>(f.lightmapScale)));
         side.set("smoothing_groups", std::to_string(f.smoothingGroups));
+        if (f.hasDisp) {
+            KvNode di = f.dispInfo;
+            di.name = "dispinfo";
+            side.children.push_back(std::move(di));
+        }
         n.children.push_back(std::move(side));
     }
     // Preserve the editor block (colour etc.) and keep groupid in sync.
