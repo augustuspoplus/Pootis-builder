@@ -6811,52 +6811,248 @@ void Editor::drawOutliner() {
     ImGui::End();
 }
 
+void Editor::applyBrowserMaterial(const std::string& mat) {
+    if (mat.empty()) return;
+    recentMaterials_.erase(
+        std::remove(recentMaterials_.begin(), recentMaterials_.end(), mat),
+        recentMaterials_.end());
+    recentMaterials_.insert(recentMaterials_.begin(), mat);
+    if (recentMaterials_.size() > 24) recentMaterials_.resize(24);
+
+    blockMaterial_ = mat;
+    std::snprintf(texMaterial_, sizeof(texMaterial_), "%s", mat.c_str());
+    if (tool_ == Tool::Texture && !texFaces_.empty()) {
+        applyToTexFaces([&](map::BrushFace& f) { f.material = mat; }, "Apply material",
+                        true);
+        status_ = "Applied " + mat + " to " + std::to_string(texFaces_.size()) +
+                  " face(s)";
+    } else {
+        status_ = "Material set: " + mat + "  (block tool + new brushwork)";
+    }
+}
+
 void Editor::drawTextureBrowser() {
+    using namespace pb::ui;
     ImGui::Begin("Textures");
     if (!sourceFs_.ready()) {
-        ImGui::TextDisabled("No game content mounted.");
+        ImGui::TextDisabled("No game content mounted (install / locate TF2).");
         ImGui::End();
         return;
     }
-    ImGui::InputTextWithHint("##texfilter", "filter materials in map", textureFilter_,
-                             sizeof(textureFilter_));
-    std::string needle = textureFilter_;
+
+    // Lazy: enumerate + theme-bucket every material once (like the model browser).
+    if (!materialListBuilt_) {
+        for (std::string m : sourceFs_.listFiles("materials/", ".vmt")) {
+            if (m.rfind("materials/", 0) == 0) m = m.substr(10);
+            if (m.size() > 4 && m.substr(m.size() - 4) == ".vmt") m.resize(m.size() - 4);
+            materialList_.push_back(std::move(m));
+        }
+        materialListBuilt_ = true;
+        PB_INFO("material browser: %zu materials", materialList_.size());
+
+        auto theme = [](std::string s) -> std::string {
+            auto has = [&](const char* k) { return s.find(k) != std::string::npos; };
+            struct R { const char* key; const char* theme; };
+            static const R rules[] = {
+                {"concrete", "Concrete & stone"}, {"stone", "Concrete & stone"},
+                {"rock", "Concrete & stone"},     {"gravel", "Concrete & stone"},
+                {"brick", "Brick & tile"},        {"tile", "Brick & tile"},
+                {"metal", "Metal"},               {"metaltruss", "Metal"},
+                {"wood", "Wood"},                 {"plank", "Wood"},
+                {"plaster", "Plaster & walls"},   {"wall", "Plaster & walls"},
+                {"drywall", "Plaster & walls"},   {"glass", "Glass & windows"},
+                {"window", "Glass & windows"},    {"nature", "Nature & ground"},
+                {"dirt", "Nature & ground"},      {"grass", "Nature & ground"},
+                {"sand", "Nature & ground"},      {"snow", "Nature & ground"},
+                {"water", "Liquids"},             {"slime", "Liquids"},
+                {"lava", "Liquids"},              {"sky", "Skybox"},
+                {"light", "Lights & glows"},      {"lamp", "Lights & glows"},
+                {"tools", "Tool textures"},       {"dev", "Dev & measure"},
+                {"sign", "Signs & overlays"},     {"overlay", "Signs & overlays"},
+                {"decal", "Signs & overlays"},    {"poster", "Signs & overlays"},
+                {"door", "Doors & trim"},         {"trim", "Doors & trim"},
+                {"roof", "Roof & exterior"},      {"awning", "Roof & exterior"},
+                {"models", "Model skins"},        {"effects", "Effects"},
+                {"particle", "Effects"},          {"props", "Prop textures"},
+                {"backpack", "UI & menus"},       {"vgui", "UI & menus"},
+                {"hud", "UI & menus"},            {"console", "UI & menus"},
+                {"menu", "UI & menus"},           {"ambient", "UI & menus"},
+                {"hay", "Farm & sawmill"},        {"barn", "Farm & sawmill"},
+                {"sawmill", "Farm & sawmill"},    {"egypt", "Desert & badlands"},
+                {"desert", "Desert & badlands"},  {"badlands", "Desert & badlands"},
+                {"mvm", "Desert & badlands"},     {"spytech", "Spytech & sci-fi"},
+                {"cliff", "Concrete & stone"},
+            };
+            for (const auto& r : rules)
+                if (has(r.key)) return r.theme;
+            // Otherwise: the first path segment, title-cased.
+            const size_t sl = s.find('/');
+            std::string seg = sl == std::string::npos ? s : s.substr(0, sl);
+            if (seg.empty()) return "Other";
+            seg[0] = (char)std::toupper((unsigned char)seg[0]);
+            return seg;
+        };
+        std::map<std::string, std::vector<int>> cats;
+        for (int i = 0; i < (int)materialList_.size(); ++i)
+            cats[theme(materialList_[i])].push_back(i);
+        std::vector<int> misc;
+        for (auto it = cats.begin(); it != cats.end();) {
+            if (it->second.size() < 20 && it->first != "Other") {
+                misc.insert(misc.end(), it->second.begin(), it->second.end());
+                it = cats.erase(it);
+            } else {
+                ++it;
+            }
+        }
+        if (!misc.empty()) {
+            auto& o = cats["Other"];
+            o.insert(o.end(), misc.begin(), misc.end());
+        }
+        materialCats_.assign(cats.begin(), cats.end());
+        std::sort(materialCats_.begin(), materialCats_.end(),
+                  [](const auto& a, const auto& b) {
+                      return a.second.size() > b.second.size();
+                  });
+    }
+
+    // Materials actually used in the loaded map (from the render batches).
+    std::vector<std::string> inMap;
+    for (const auto& b : mesh_.batches) inMap.push_back(b.material);
+    std::sort(inMap.begin(), inMap.end());
+    inMap.erase(std::unique(inMap.begin(), inMap.end()), inMap.end());
+
+    ImGui::SetNextItemWidth(-1);
+    ImGui::InputTextWithHint("##matfilter",
+                             ICON_FA_MAGNIFYING_GLASS " search every material…",
+                             materialFilter_, sizeof(materialFilter_));
+    std::string needle = materialFilter_;
     std::transform(needle.begin(), needle.end(), needle.begin(), ::tolower);
 
-    if (!hasMap()) {
-        ImGui::TextDisabled("Load a map to see its textures.");
-        ImGui::End();
-        return;
+    auto catIcon = [](const std::string& n) -> const char* {
+        if (n == "Concrete & stone")  return ICON_FA_CUBES_STACKED;
+        if (n == "Brick & tile")      return ICON_FA_BORDER_ALL;
+        if (n == "Metal")             return ICON_FA_GEARS;
+        if (n == "Wood")              return ICON_FA_TREE;
+        if (n == "Plaster & walls")   return ICON_FA_SQUARE;
+        if (n == "Glass & windows")   return ICON_FA_WINDOW_MAXIMIZE;
+        if (n == "Nature & ground")   return ICON_FA_MOUND;
+        if (n == "Liquids")           return ICON_FA_WATER;
+        if (n == "Skybox")            return ICON_FA_CLOUD;
+        if (n == "Lights & glows")    return ICON_FA_LIGHTBULB;
+        if (n == "Tool textures")     return ICON_FA_SCREWDRIVER_WRENCH;
+        if (n == "Dev & measure")     return ICON_FA_RULER_COMBINED;
+        if (n == "Signs & overlays")  return ICON_FA_SIGN_HANGING;
+        if (n == "Doors & trim")      return ICON_FA_DOOR_OPEN;
+        if (n == "Roof & exterior")   return ICON_FA_HOUSE;
+        if (n == "Model skins")       return ICON_FA_CUBE;
+        if (n == "Effects")           return ICON_FA_SPRAY_CAN;
+        if (n == "Prop textures")     return ICON_FA_BOXES_STACKED;
+        if (n == "Farm & sawmill")    return ICON_FA_TRACTOR;
+        if (n == "Desert & badlands") return ICON_FA_SUN;
+        if (n == "Spytech & sci-fi")  return ICON_FA_USER_SECRET;
+        return ICON_FA_IMAGE;
+    };
+
+    materialCat_ = std::clamp(materialCat_, 0, (int)materialCats_.size() + 2);
+    if (needle.empty() &&
+        ImGui::CollapsingHeader("Categories", ImGuiTreeNodeFlags_DefaultOpen)) {
+        const float listH =
+            dp(std::min(280.0f, 76.0f + materialCats_.size() * 19.0f));
+        if (ImGui::BeginChild("##matcats", ImVec2(0, listH), true)) {
+            auto row = [&](int id, const char* icon, const std::string& name,
+                           size_t n) {
+                char buf[96];
+                std::snprintf(buf, sizeof(buf), "%s  %s  (%zu)", icon, name.c_str(), n);
+                if (ImGui::Selectable(buf, materialCat_ == id)) materialCat_ = id;
+            };
+            row(0, ICON_FA_LAYER_GROUP, "All materials", materialList_.size());
+            row(1, ICON_FA_MAP_LOCATION_DOT, "In this map", inMap.size());
+            row(2, ICON_FA_CLOCK, "Recently used", recentMaterials_.size());
+            ImGui::Separator();
+            for (int c = 0; c < (int)materialCats_.size(); ++c)
+                row(c + 3, catIcon(materialCats_[c].first), materialCats_[c].first,
+                    materialCats_[c].second.size());
+        }
+        ImGui::EndChild();
     }
 
-    const float cell = 96.0f;
-    const float avail = ImGui::GetContentRegionAvail().x;
-    const int cols = std::max(1, static_cast<int>(avail / (cell + 8.0f)));
-    ImGui::Text("%zu materials", mesh_.batches.size());
-    if (ImGui::BeginChild("texgrid")) {
-        int col = 0;
-        for (const auto& b : mesh_.batches) {
-            if (!needle.empty()) {
-                std::string t = b.material;
-                std::transform(t.begin(), t.end(), t.begin(), ::tolower);
-                if (t.find(needle) == std::string::npos) continue;
+    std::vector<const std::string*> shown;
+    shown.reserve(256);
+    if (!needle.empty()) {
+        for (const auto& m : materialList_) {
+            std::string t = m;
+            std::transform(t.begin(), t.end(), t.begin(), ::tolower);
+            if (t.find(needle) == std::string::npos) continue;
+            shown.push_back(&m);
+            if (shown.size() >= 5000) break;
+        }
+    } else if (materialCat_ == 0) {
+        for (const auto& m : materialList_) shown.push_back(&m);
+    } else if (materialCat_ == 1) {
+        for (const auto& m : inMap) shown.push_back(&m);
+    } else if (materialCat_ == 2) {
+        for (const auto& m : recentMaterials_) shown.push_back(&m);
+    } else {
+        for (int idx : materialCats_[materialCat_ - 3].second)
+            shown.push_back(&materialList_[idx]);
+    }
+
+    const char* dst = (tool_ == Tool::Texture && !texFaces_.empty())
+                          ? "click a material to paint the selected face(s)"
+                          : "click a material for the block tool + new brushwork";
+    ImGui::TextDisabled("%zu materials  —  %s", shown.size(), dst);
+
+    const float cell = dp(84.0f);
+    const int cols =
+        std::max(1, (int)(ImGui::GetContentRegionAvail().x / (cell + dp(8.0f))));
+    if (ImGui::BeginChild("matgrid")) {
+        int budget = 4;  // decode at most a few VTFs per frame
+        ImGuiListClipper clip;
+        clip.Begin((int)((shown.size() + cols - 1) / cols), cell + dp(30.0f));
+        while (clip.Step()) {
+            for (int row = clip.DisplayStart; row < clip.DisplayEnd; ++row) {
+                for (int c = 0; c < cols; ++c) {
+                    const int i = row * cols + c;
+                    if (i >= (int)shown.size()) break;
+                    const std::string& name = *shown[i];
+                    ImGui::PushID(i);
+
+                    GLuint tex = 0;
+                    const bool cached = materials_.cached(name);
+                    if (cached || budget > 0) {
+                        const auto& info = materials_.get(name);
+                        tex = info.texture;
+                        if (!cached) --budget;
+                    }
+                    const bool on = blockMaterial_ == name;
+                    ImGui::BeginGroup();
+                    if (tex) {
+                        if (on)
+                            ImGui::PushStyleColor(ImGuiCol_Border, col::acc);
+                        ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, on ? 2.0f : 0.0f);
+                        if (ImGui::ImageButton("##m",
+                                               static_cast<ImTextureID>((intptr_t)tex),
+                                               ImVec2(cell, cell)))
+                            applyBrowserMaterial(name);
+                        ImGui::PopStyleVar();
+                        if (on) ImGui::PopStyleColor();
+                    } else {
+                        ImGui::PushStyleColor(ImGuiCol_Button, col::bg2);
+                        if (ImGui::Button(ICON_FA_IMAGE "##p", ImVec2(cell + 8, cell + 8)))
+                            applyBrowserMaterial(name);
+                        ImGui::PopStyleColor();
+                    }
+                    std::string label = name.substr(name.rfind('/') + 1);
+                    ImGui::PushTextWrapPos(ImGui::GetCursorPos().x + cell);
+                    ImGui::TextWrapped("%s", label.c_str());
+                    ImGui::PopTextWrapPos();
+                    ImGui::EndGroup();
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("%s", name.c_str());
+                    if ((i % cols) != cols - 1) ImGui::SameLine();
+                    ImGui::PopID();
+                }
             }
-            const auto& info = materials_.get(b.material);
-            ImGui::BeginGroup();
-            ImGui::Image(static_cast<ImTextureID>(static_cast<intptr_t>(info.texture)),
-                         ImVec2(cell, cell));
-            std::string shortName = b.material;
-            const size_t slash = shortName.find_last_of('/');
-            if (slash != std::string::npos) shortName = shortName.substr(slash + 1);
-            ImGui::PushTextWrapPos(ImGui::GetCursorPos().x + cell);
-            ImGui::TextWrapped("%s", shortName.c_str());
-            ImGui::PopTextWrapPos();
-            ImGui::EndGroup();
-            if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("%s\n%dx%d%s%s", b.material.c_str(), info.width,
-                                  info.height, info.found ? "" : "  (vmt not found)",
-                                  info.tool ? "  [tool]" : "");
-            if (++col % cols != 0) ImGui::SameLine();
         }
     }
     ImGui::EndChild();

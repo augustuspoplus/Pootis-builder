@@ -87,4 +87,8 @@ const MaterialLibrary::Info& MaterialLibrary::get(const std::string& materialNam
     return ins->second;
 }
 
+bool MaterialLibrary::cached(const std::string& materialName) const {
+    return cache_.find(materialName) != cache_.end();
+}
+
 }  // namespace pb

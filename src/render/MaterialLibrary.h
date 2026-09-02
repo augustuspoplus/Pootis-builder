@@ -28,6 +28,9 @@ public:
     // Resolves + uploads (cached). materialName is the BSP texdata string.
     const Info& get(const std::string& materialName);
 
+    // True if get() for this name would return without any disk/decode work.
+    bool cached(const std::string& materialName) const;
+
     void clear();
 
 private:
