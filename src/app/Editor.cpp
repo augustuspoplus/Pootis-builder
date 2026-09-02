@@ -1429,6 +1429,7 @@ void Editor::drawViewportPanel(ViewPanel& p) {
     drawSelectionDims(p, aspect, dl);
     drawCordonOverlay(p, aspect, dl);
     drawRoadOverlay(p, aspect, dl);
+    drawPlacePreview(p, aspect, dl);
 
     if (!hasMap() && p.kind == ViewKind::Perspective) {
         const char* msg = "Open a .bsp  —  File > Open BSP  (Ctrl+O)  or drag one in";
@@ -2968,6 +2969,130 @@ void Editor::drawRoadOverlay(ViewPanel& p, float aspect, ImDrawList* dl) {
                 "ROAD — click to add points, Enter to build");
 }
 
+namespace {
+// Approximate local AABB of a kit piece, for the drop preview ghost. Mirrors
+// the sizes in placePiece(); a generic box for anything not listed.
+void previewBox(const std::string& piece, glm::vec3& mn, glm::vec3& mx) {
+    struct B { const char* n; glm::vec3 mn, mx; };
+    static const B tbl[] = {
+        {"Floor", {-128, -128, -16}, {128, 128, 0}},
+        {"Route", {-256, -64, -16}, {256, 64, 0}},
+        {"Wall", {-128, -8, 0}, {128, 8, 128}},
+        {"Ceiling", {-128, -128, 0}, {128, 128, 16}},
+        {"Pillar", {-32, -32, 0}, {32, 32, 192}},
+        {"Cover", {-96, -8, 0}, {96, 8, 44}},
+        {"Room", {-208, -208, 0}, {208, 208, 400}},
+        {"Doorway", {-128, -8, 0}, {128, 8, 160}},
+        {"Window", {-128, -8, 0}, {128, 8, 160}},
+        {"Ramp", {-128, -64, 0}, {128, 64, 128}},
+        {"Wedge", {-128, -64, 0}, {128, 64, 128}},
+        {"Stairs", {-64, 0, 0}, {64, 192, 128}},
+        {"Spiral stairs", {-96, -96, 0}, {96, 96, 200}},
+        {"Platform", {-96, -96, 0}, {96, 96, 112}},
+        {"Skybox seal", {-64, -64, 0}, {64, 64, 64}},
+        {"Clip wall", {-128, -8, 0}, {128, 8, 160}},
+        {"Water", {-256, -256, -64}, {256, 256, 0}},
+        {"Trigger box", {-96, -96, 0}, {96, 96, 128}},
+        {"Ladder", {-22, -4, 0}, {22, 12, 192}},
+        {"Working door", {-48, -6, 0}, {48, 6, 112}},
+        {"Spawn door", {-64, -4, 0}, {64, 4, 128}},
+        {"Death pit", {-200, -200, -8}, {200, 200, 24}},
+        {"No-build zone", {-128, -128, 0}, {128, 128, 128}},
+        {"RED spawn", {-208, -208, 0}, {208, 208, 208}},
+        {"BLU spawn", {-208, -208, 0}, {208, 208, 208}},
+        {"CTF setup", {-864, -96, -16}, {864, 96, 104}},
+        {"KOTH point", {-128, -128, -16}, {128, 128, 128}},
+        {"Capture point", {-128, -128, -16}, {128, 128, 128}},
+        {"Arena logic", {-128, -128, -16}, {128, 128, 128}},
+        {"Payload track", {-64, -48, 0}, {1024, 48, 90}},
+        {"Breakable crate", {-32, -32, 0}, {32, 32, 64}},
+        {"Crate stack", {-72, -72, 0}, {88, 88, 160}},
+        {"Fence", {-128, -3, 0}, {128, 3, 48}},
+        {"Elevator", {-90, -80, 0}, {80, 80, 72}},
+        {"Moving platform", {-108, -96, 0}, {96, 96, 16}},
+        {"Resupply", {-32, -16, 0}, {32, 16, 96}},
+        {"Health / ammo", {-48, -16, 0}, {48, 16, 40}},
+    };
+    for (const auto& b : tbl)
+        if (piece == b.n) { mn = b.mn; mx = b.mx; return; }
+    mn = glm::vec3(-64, -64, 0);
+    mx = glm::vec3(64, 64, 64);
+}
+}  // namespace
+
+// Ghost outline of the pending piece at the drop point, so you can see where
+// a Floor / Wall / prop will land before you commit it.
+void Editor::drawPlacePreview(ViewPanel& p, float aspect, ImDrawList* dl) {
+    if (!hasDoc()) return;
+    // What's pending: a dragged card, or a clicked ("armed") card.
+    std::string pend = !dragPlace_.empty() ? dragPlace_ : placing_;
+    if (pend.empty() || pend.rfind("@prefab:", 0) == 0) return;
+    // Only the viewport under the cursor (headless: force one).
+    ImVec2 m = ImGui::GetMousePos();
+    const bool over =
+        m.x >= p.contentMin.x && m.x < p.contentMin.x + p.contentSize.x &&
+        m.y >= p.contentMin.y && m.y < p.contentMin.y + p.contentSize.y;
+    if (!over) {
+        if (debugPreviewAtCenter_ && p.kind == ViewKind::Perspective)
+            m = ImVec2(p.contentMin.x + p.contentSize.x * 0.5f,
+                       p.contentMin.y + p.contentSize.y * 0.5f);
+        else
+            return;
+    }
+
+    glm::vec3 lo, hi;
+    std::string label;
+    if (pend.rfind("@model:", 0) == 0) {
+        lo = glm::vec3(-32, -32, 0); hi = glm::vec3(32, 32, 72);
+        label = "prop";
+    } else if (pend.rfind("@ent:", 0) == 0) {
+        const std::string cls = pend.substr(5);
+        lo = glm::vec3(-16); hi = glm::vec3(16);
+        if (const fgd::EntityClass* ec = fgd_.flattened(cls); ec && ec->hasSize) {
+            lo = ec->sizeMin; hi = ec->sizeMax;
+        }
+        label = cls;
+    } else {
+        const std::string piece =
+            pend.rfind("@kit:", 0) == 0 ? pend.substr(5) : pend;
+        previewBox(piece, lo, hi);
+        label = piece;
+    }
+
+    const glm::vec3 at = dropWorldPoint(p, m);
+    const glm::vec3 a = at + lo, b = at + hi;
+    const glm::vec3 cs[8] = {
+        {a.x, a.y, a.z}, {b.x, a.y, a.z}, {b.x, b.y, a.z}, {a.x, b.y, a.z},
+        {a.x, a.y, b.z}, {b.x, a.y, b.z}, {b.x, b.y, b.z}, {a.x, b.y, b.z}};
+    const glm::mat4 vp = p.camera.proj(aspect) * p.camera.view();
+    ImVec2 pv[8];
+    bool okAll = true;
+    for (int k = 0; k < 8; ++k) {
+        bool ok;
+        pv[k] = projectPt(p.kind, vp, p.contentMin, p.contentSize, cs[k], ok);
+        okAll = okAll && ok;
+    }
+    if (!okAll) return;
+    static const int E[12][2] = {{0, 1}, {1, 2}, {2, 3}, {3, 0}, {4, 5}, {5, 6},
+                                 {6, 7}, {7, 4}, {0, 4}, {1, 5}, {2, 6}, {3, 7}};
+    const ImU32 line = IM_COL32(120, 220, 140, 235);
+    const ImU32 fill = IM_COL32(120, 220, 140, 40);
+    // Faint fill on the base quad.
+    dl->AddQuadFilled(pv[0], pv[1], pv[2], pv[3], fill);
+    for (auto& e : E) dl->AddLine(pv[e[0]], pv[e[1]], line, 1.6f);
+    // Drop-point tick + label.
+    bool ok;
+    const ImVec2 sp = projectPt(p.kind, vp, p.contentMin, p.contentSize, at, ok);
+    if (ok) {
+        dl->AddCircleFilled(sp, 3.0f, line);
+        char buf[96];
+        std::snprintf(buf, sizeof(buf), "%s  (%d %d %d)", label.c_str(), (int)at.x,
+                      (int)at.y, (int)at.z);
+        dl->AddText(ImVec2(sp.x + 8, sp.y - 16), IM_COL32(15, 20, 15, 210), buf);
+        dl->AddText(ImVec2(sp.x + 7, sp.y - 17), line, buf);
+    }
+}
+
 void Editor::placeFromPayload(const std::string& payload, const glm::vec3& at) {
     if (payload.rfind("@model:", 0) == 0) {
         const std::string mdl = payload.substr(7);
@@ -4219,6 +4344,7 @@ struct KitPiece {
 void kitCards(const KitPiece* pieces, int count, std::string* placing,
               std::string* status, std::string* dragOut = nullptr) {
     using pb::ui::dp;
+    using namespace pb::ui;
     const float gap = dp(8.0f);
     const float avail = ImGui::GetContentRegionAvail().x;
     // 2 columns when there's room for a readable card, else 1.
@@ -4226,43 +4352,50 @@ void kitCards(const KitPiece* pieces, int count, std::string* placing,
     const float cellW = ncol == 2 ? (avail - gap) * 0.5f : avail;
     // Tall enough for the icon+name row plus two wrapped hint lines at any scale.
     const float cellH = ImGui::GetTextLineHeight() * 3.4f + dp(16.0f);
+    ImDrawList* dl = ImGui::GetWindowDrawList();
     for (int i = 0; i < count; ++i) {
         if (ncol == 2 && (i % 2)) ImGui::SameLine(0, gap);
         ImGui::PushID(i);
         const bool on = *placing == pieces[i].name;
-        ImGui::PushStyleColor(ImGuiCol_Button, on ? pb::ui::col::bg3 : pb::ui::col::bg2);
-        ImGui::PushStyleColor(ImGuiCol_Border, on ? pb::ui::col::acc : pb::ui::col::bd);
-        if (ImGui::BeginChild("card", ImVec2(cellW, cellH),
-                              ImGuiChildFlags_Borders | ImGuiChildFlags_FrameStyle)) {
-            ImGui::PushStyleColor(ImGuiCol_Text, pb::ui::col::acc);
-            ImGui::TextUnformatted(pieces[i].icon);
-            ImGui::PopStyleColor();
-            ImGui::SameLine(0, dp(8.0f));
-            if (pb::ui::fontUiMed) ImGui::PushFont(pb::ui::fontUiMed);
-            ImGui::TextUnformatted(pieces[i].name);
-            if (pb::ui::fontUiMed) ImGui::PopFont();
-            ImGui::PushStyleColor(ImGuiCol_Text, pb::ui::col::faint);
-            ImGui::PushTextWrapPos(0.0f);
-            ImGui::TextUnformatted(pieces[i].hint);
-            ImGui::PopTextWrapPos();
-            ImGui::PopStyleColor();
-        }
-        ImGui::EndChild();
-        if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID)) {
-            ImGui::SetDragDropPayload("PB_KIT", pieces[i].name,
-                                     std::strlen(pieces[i].name) + 1);
-            ImGui::Text("%s  %s", pieces[i].icon, pieces[i].name);
-            ImGui::EndDragDropSource();
-            if (dragOut) *dragOut = std::string("@kit:") + pieces[i].name;
-        }
-        if (ImGui::IsItemClicked()) {
-            *placing = pieces[i].name;
+
+        // One real widget = the whole card. A Selectable (not a child window)
+        // so drag detection and click both work reliably.
+        const ImVec2 p0 = ImGui::GetCursorScreenPos();
+        ImGui::Selectable("##card", on, ImGuiSelectableFlags_None,
+                          ImVec2(cellW, cellH));
+        const bool hovered = ImGui::IsItemHovered();
+
+        // Click (no drag) arms click-to-place; a drag past threshold starts a
+        // manual drag that frame() drops onto a viewport.
+        if (ImGui::IsItemActivated())
             *status = std::string("Placing ") + pieces[i].name +
                       " — click a viewport, or drag me there.";
+        if (ImGui::IsItemDeactivated() &&
+            !ImGui::IsMouseDragPastThreshold(ImGuiMouseButton_Left, 6.0f))
+            *placing = pieces[i].name;  // treated as a click
+        if (dragOut && ImGui::IsItemActive() &&
+            ImGui::IsMouseDragPastThreshold(ImGuiMouseButton_Left, 6.0f)) {
+            *dragOut = std::string("@kit:") + pieces[i].name;
+            ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+            ImGui::SetTooltip("%s  %s   — drop on a viewport", pieces[i].icon,
+                              pieces[i].name);
         }
-        if (ImGui::IsItemHovered())
+        if (hovered && !ImGui::IsMouseDown(ImGuiMouseButton_Left))
             ImGui::SetTooltip("%s\n%s", pieces[i].name, pieces[i].hint);
-        ImGui::PopStyleColor(2);
+
+        // Paint the card over the selectable's rect.
+        const ImU32 bg = on ? u32(col::bg3) : (hovered ? u32(col::bg3) : u32(col::bg2));
+        dl->AddRectFilled(p0, ImVec2(p0.x + cellW, p0.y + cellH), bg, 4.0f);
+        dl->AddRect(p0, ImVec2(p0.x + cellW, p0.y + cellH),
+                    on ? u32(col::acc) : u32(col::bd), 4.0f, 0, on ? 2.0f : 1.0f);
+        const float pad = dp(9.0f);
+        dl->AddText(ImVec2(p0.x + pad, p0.y + pad), u32(col::acc), pieces[i].icon);
+        dl->AddText(fontUiMed ? fontUiMed : nullptr, 0.0f,
+                    ImVec2(p0.x + pad + dp(22.0f), p0.y + pad - dp(1.0f)),
+                    u32(col::tx), pieces[i].name);
+        dl->AddText(nullptr, 0.0f,
+                    ImVec2(p0.x + pad, p0.y + pad + ImGui::GetTextLineHeight() + dp(4.0f)),
+                    u32(col::faint), pieces[i].hint, nullptr, cellW - pad * 2.0f);
         ImGui::PopID();
     }
 }
@@ -4795,10 +4928,7 @@ void Editor::drawBuildKit() {
             kitCards(zones, IM_ARRAYSIZE(zones), &placing_, &status_, &dragPlace_);
             ImGui::EndTabItem();
         }
-        // kitTab_ == 1 also means "Things" for older callers; 5 is its ordinal.
-        if (ImGui::BeginTabItem(ICON_FA_BOLT " Things", nullptr,
-                                (kitTab_ == 1 || kitTab_ == 5)
-                                    ? ImGuiTabItemFlags_SetSelected : 0)) {
+        if (ImGui::BeginTabItem(ICON_FA_BOLT " Things", nullptr, tabSel(5))) {
             ImGui::Dummy(ImVec2(0, 4));
             drawSimpleEntities();
             ImGui::EndTabItem();
@@ -5148,22 +5278,23 @@ void Editor::drawSimpleEntities() {
         // One full-width hit target for the whole row (icon + label).
         const ImVec2 p0 = ImGui::GetCursorScreenPos();
         const float rowW = ImGui::GetContentRegionAvail().x;
-        if (ImGui::Selectable("##row", on, 0, ImVec2(rowW, cell))) {
+        ImGui::Selectable("##row", on, 0, ImVec2(rowW, cell));
+        const bool rowHov = ImGui::IsItemHovered();
+        if (ImGui::IsItemDeactivated() &&
+            !ImGui::IsMouseDragPastThreshold(ImGuiMouseButton_Left, 6.0f)) {
             placing_ = payload;
             status_ = std::string("Placing ") + it.name +
                       " — click a viewport, or drag it in.";
         }
-        if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID)) {
-            if (isKit)
-                ImGui::SetDragDropPayload("PB_KIT", it.spec + 4,
-                                         std::strlen(it.spec + 4) + 1);
-            else
-                ImGui::SetDragDropPayload("PB_ENTITY", cls.c_str(), cls.size() + 1);
-            ImGui::TextUnformatted(it.name);
-            ImGui::EndDragDropSource();
+        // Manual drag: frame() drops dragPlace_ onto whatever viewport the
+        // mouse is released over (ImGui's own drag-drop is unreliable here).
+        if (ImGui::IsItemActive() &&
+            ImGui::IsMouseDragPastThreshold(ImGuiMouseButton_Left, 6.0f)) {
             dragPlace_ = payload;
+            ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+            ImGui::SetTooltip("%s   — drop on a viewport", it.name);
         }
-        if (ImGui::IsItemHovered() && cls.size())
+        if (rowHov && !ImGui::IsMouseDown(ImGuiMouseButton_Left) && cls.size())
             ImGui::SetTooltip("%s  (%s)", it.name, cls.c_str());
 
         // Draw the icon + text over the selectable's rect.
@@ -5996,17 +6127,14 @@ void Editor::drawModelGrid() {
                         ImGui::Button(ICON_FA_CUBE "##t", ImVec2(cell + 8, cell + 8));
                         ImGui::PopStyleColor();
                     }
-                    const bool cardHit = ImGui::IsItemClicked();
-                    if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID)) {
-                        const std::string payload = "@model:" + path;
-                        ImGui::SetDragDropPayload("PB_MODEL", payload.c_str(),
-                                                 payload.size() + 1);
-                        if (tex)
-                            ImGui::Image(static_cast<ImTextureID>((intptr_t)tex),
-                                         ImVec2(64, 64));
-                        ImGui::TextUnformatted(label.c_str());
-                        ImGui::EndDragDropSource();
-                        dragPlace_ = payload;
+                    const bool cardHit =
+                        ImGui::IsItemDeactivated() &&
+                        !ImGui::IsMouseDragPastThreshold(ImGuiMouseButton_Left, 6.0f);
+                    if (ImGui::IsItemActive() &&
+                        ImGui::IsMouseDragPastThreshold(ImGuiMouseButton_Left, 6.0f)) {
+                        dragPlace_ = "@model:" + path;
+                        ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+                        ImGui::SetTooltip("%s   — drop on a viewport", label.c_str());
                     }
                     if (on)
                         ImGui::GetWindowDrawList()->AddRect(
@@ -6117,11 +6245,11 @@ void Editor::drawEntityCatalog() {
                 status_ = "Placing " + cls + " — click a viewport, or drag me there.";
             }
         }
-        if (!solid && ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID)) {
-            ImGui::SetDragDropPayload("PB_ENTITY", cls.c_str(), cls.size() + 1);
-            ImGui::TextUnformatted(cls.c_str());
-            ImGui::EndDragDropSource();
+        if (!solid && ImGui::IsItemActive() &&
+            ImGui::IsMouseDragPastThreshold(ImGuiMouseButton_Left, 6.0f)) {
             dragPlace_ = "@ent:" + cls;
+            ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+            ImGui::SetTooltip("%s   — drop on a viewport", cls.c_str());
         }
         ImGui::SameLine(6);
         if (ec && ec->hasColor) {
