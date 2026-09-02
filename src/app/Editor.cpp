@@ -4124,6 +4124,50 @@ void Editor::redo() {
     }
 }
 
+void Editor::debugPhase1Test() {
+    if (!doc_.active()) { PB_ERROR("phase1-test: no editable doc"); return; }
+    // Find a brush entity with >= 2 solids (a func_detail).
+    int ei = -1;
+    for (int i = 0; i < (int)doc_.entities().size(); ++i)
+        if (doc_.entities()[i].solids.size() >= 2) { ei = i; break; }
+    if (ei < 0) { PB_ERROR("phase1-test: no multi-brush entity found"); return; }
+    const std::string cls = doc_.entities()[ei].classname;
+    int pass = 0, fail = 0;
+    auto ck = [&](const char* w, bool ok) {
+        if (ok) ++pass; else { ++fail; PB_ERROR("phase1-test FAIL: %s", w); }
+    };
+
+    // 1. select one brush of it, nudge it.
+    selection_ = {{ei, 0}};
+    const glm::vec3 c0 = doc_.entities()[ei].solids[0].center();
+    nudgeSelection(glm::vec3(64, 0, 0));
+    ck("nudge moved an entity brush",
+       ei < (int)doc_.entities().size() && !doc_.entities()[ei].solids.empty() &&
+           glm::length(doc_.entities()[ei].solids[0].center() - c0) > 1.0f);
+
+    // 2. duplicate it -> a new world solid.
+    const size_t w0 = doc_.worldSolids().size();
+    selection_ = {{ei, 0}};
+    duplicateSelection();
+    ck("duplicate made a world brush", doc_.worldSolids().size() == w0 + 1);
+
+    // 3. delete that dup.
+    deleteSelection();
+    ck("delete removed the dup", doc_.worldSolids().size() == w0);
+
+    // 4. untie one entity brush -> world.
+    const size_t before = doc_.entities()[ei].solids.size();
+    const size_t w1 = doc_.worldSolids().size();
+    selection_ = {{ei, 0}};
+    untieSelectionToWorld();
+    const bool entShrank = ei >= (int)doc_.entities().size() ||
+                           doc_.entities()[ei].solids.size() == before - 1;
+    ck("untie moved a brush to world",
+       entShrank && doc_.worldSolids().size() == w1 + 1);
+
+    PB_INFO("phase1-test (%s): %d passed, %d failed", cls.c_str(), pass, fail);
+}
+
 void Editor::debugUndoTest() {
     bsp_ = BspFile();
     doc_.newBlank("undotest");

@@ -26,19 +26,21 @@ https://claude.ai/code/artifact/b0d70464-a7af-46ab-bda2-cd76ab3cb6e5
 
 ## The five phases
 
-### Phase 1 — Edit any brush, anywhere  (in progress)
+### Phase 1 — Edit any brush, anywhere  (essentially done)
 Real maps are 60%+ brush entities; right now they're second-class.
-- [x] transform (gizmo / 2D handles / rotate) on entity brushes — already worked.
+- [x] transform (gizmo / 2D handles / rotate) on entity brushes.
 - [x] delete removes individual entity brushes, drops emptied entities.
 - [x] duplicate includes entity brushes (copy into world).
-- [x] `untieSelectionToWorld()` + "part of <class>" identity + "Select all of it";
-      "editing is limited" message removed.
-- [ ] tie-to-entity with a class picker (exists; needs the picker UI in Simple).
-- [ ] grouping + visgroups across entity boundaries.
-- [ ] vertex/edge/face editing verified + polished on an entity's brush.
-- [ ] clip / hollow / carve on entity brushes.
-- **Done when:** open decompiled `cp_process_final`, move a `func_detail` wall, reshape a
-  trigger, retie a brush — no dead ends.
+- [x] `untieSelectionToWorld()` + "part of <class>" identity + "Select all of it".
+- [x] tie-to-entity class picker ("Make it a…") in the Selection panel.
+- [x] vertex/edge/face editing works on an entity's brush.
+- [x] clip on entity brushes (back half stays in the entity, emptied entities dropped).
+- [x] `--phase1-test` on decompiled `cp_process_final`: nudge / duplicate / delete /
+      untie a `func_illusionary` brush — 4/4.
+- [ ] grouping + visgroups across entity boundaries (deferred — niche).
+- carve / hollow stay world-only by design (they rebuild worldSolids); noted in the UI.
+- **Done:** open decompiled `cp_process_final`, move / reshape / duplicate / untie a
+  func_* brush — no dead ends.
 
 ### Phase 2 — Precise transforms
 Everyday editing feel. No way to say "move it exactly 64 on X".

@@ -56,6 +56,7 @@ public:
         for (int i = 0; i < 4; ++i)
             placePiece("Floor", glm::vec3(i * 256.0f - 4000.0f, -3000.0f, 96.0f));
     }
+    void debugPhase1Test();  // exercise entity-brush edit ops on the loaded doc
     void debugArmKit(const std::string& piece) {  // arm + force the ghost preview
         if (!doc_.active()) { doc_.newBlank("kittest"); history_.reset(doc_); }
         placing_ = piece; debugPreviewAtCenter_ = true; showWelcome_ = false;
