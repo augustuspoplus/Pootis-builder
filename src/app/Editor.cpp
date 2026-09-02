@@ -107,6 +107,7 @@ void Editor::applyPrefs() {
     gizmoSize_ = std::clamp(prefs_.gizmoSize, 0.08f, 0.4f);
     gizmoStyle_ = std::clamp(prefs_.gizmoStyle, 0, 2);
     perfMode_ = std::clamp(prefs_.perfMode, 0, 2);
+    mode_ = static_cast<Mode>(std::clamp(prefs_.workspaceDial, 0, 2));
     settings_.showGrid = prefs_.showGrid;
     settings_.showProps = prefs_.showProps;
     settings_.showPointEntities = prefs_.showPointEntities;
@@ -443,7 +444,7 @@ void Editor::frame() {
             if (tap(ImGuiKey_R)) beginModalXform(2);
             if (tap(ImGuiKey_S)) beginModalXform(3);
             // Pro gizmo mode still on W/E/R.
-            if (mode_ == Mode::Pro) {
+            if (mode_ == Mode::Full) {
                 if (tap(ImGuiKey_W)) gizmoMode_ = 0;
                 if (tap(ImGuiKey_E)) gizmoMode_ = 1;
             }
@@ -454,11 +455,15 @@ void Editor::frame() {
     drawKeysOverlay();
     drawSettingsWindow();
 
-    if (mode_ == Mode::Simple) {
+    if (mode_ != Mode::Full) {
         drawBuildKit();
         drawTextureBrowser();  // tabbed with Build Kit; feeds the Surface tool
         drawSelectionPanel();
         drawHistoryPanel();
+        if (mode_ == Mode::Standard) {  // one step up: the grown-up panels appear
+            drawOutliner();
+            drawMapCheckPanel();
+        }
     } else {
         drawProperties();
         drawOutliner();
@@ -531,7 +536,7 @@ void Editor::buildDockLayout(unsigned int dockId, const ImVec2& size) {
     ImGui::DockBuilderAddNode(dockId, ImGuiDockNodeFlags_DockSpace);
     ImGui::DockBuilderSetNodeSize(dockId, size.x > 0 ? size : ImVec2(1600, 900));
 
-    if (mode_ == Mode::Simple) {
+    if (mode_ != Mode::Full) {
         ImGuiID left, rest, right, center;
         left = ImGui::DockBuilderSplitNode(dockId, ImGuiDir_Left, 0.28f, nullptr, &rest);
         right = ImGui::DockBuilderSplitNode(rest, ImGuiDir_Right, 0.22f, nullptr, &center);
@@ -539,6 +544,9 @@ void Editor::buildDockLayout(unsigned int dockId, const ImVec2& size) {
         ImGui::DockBuilderDockWindow("Textures", left);  // reachable for the Surface tool
         ImGui::DockBuilderDockWindow("Selection", right);
         ImGui::DockBuilderDockWindow("History", right);
+        // Standard tier: the outliner + map check tab in on the right.
+        ImGui::DockBuilderDockWindow("Contents", right);
+        ImGui::DockBuilderDockWindow("Map Check", right);
         ImGui::DockBuilderDockWindow("Top (x/y)", center);
         ImGui::DockBuilderDockWindow("Front (x/z)", center);
         ImGui::DockBuilderDockWindow("Side (y/z)", center);
@@ -623,17 +631,25 @@ void Editor::drawTopBar() {
             status_ = "Open or start a map first.";
     }
 
-    // Simple / Pro
+    // The complexity dial: Guided -> Standard -> Full.
     ImGui::SameLine(0, dp(18.0f));
     ImGui::SetCursorPosY((barH - row) * 0.5f);
     {
-        const char* const modes[] = {ICON_FA_TABLE_CELLS_LARGE "  Simple",
-                                     ICON_FA_PEN_RULER "  Pro"};
-        int r = segmented("mode", modes, 2, static_cast<int>(mode_), row);
+        // The dial keeps its labels even when narrow — they're the main
+        // signpost for "there's more editor here when you want it".
+        const char* const modes[] = {ICON_FA_SEEDLING "  Guided",
+                                     ICON_FA_TABLE_CELLS_LARGE "  Standard",
+                                     ICON_FA_PEN_RULER "  Full"};
+        int r = segmented("mode", modes, 3, static_cast<int>(mode_), row);
         if (r >= 0 && r != static_cast<int>(mode_)) {
             mode_ = static_cast<Mode>(r);
             layoutDirty_ = true;
+            prefs_.workspaceDial = r;
+            prefs_.save();
         }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("How much of the editor to show — same map, same "
+                              "tools, just more of them as you turn it up.");
     }
 
     // 2D view toggles — 3D is always up; Top / Front / Side open on demand.
@@ -667,9 +683,8 @@ void Editor::drawTopBar() {
         }
     }
 
-    // Tool strip — available in both modes now (Simple users can reach for a
-    // brush / clip / surface tool without switching to the Pro layout).
-    {
+    // Tool strip — Standard and Full (Guided is pure Build Kit).
+    if (mode_ != Mode::Guided) {
         ImGui::SameLine(0, dp(14.0f));
         ImGui::SetCursorPosY((barH - row) * 0.5f);
         const char* const tools[] = {ICON_FA_ARROW_POINTER, ICON_FA_CUBE,
@@ -1404,7 +1419,7 @@ void Editor::drawWelcome() {
         doc_.newBlank("untitled");
         history_.reset(doc_);
         clearSelection();
-        mode_ = Mode::Simple;
+        mode_ = Mode::Standard;
         layoutDirty_ = true;
         buildAndUpload(meshOpts_);
         for (auto& v : views_) {
@@ -1458,7 +1473,7 @@ void Editor::drawWelcome() {
                     p = executableDir() + "/../assets/templates/" +
                         std::string(tpls[i].file) + ".vmf";
                 if (openMap(p)) {
-                    mode_ = Mode::Simple;
+                    mode_ = Mode::Standard;
                     layoutDirty_ = true;
                     showWelcome_ = false;
                     doc_.markDirty();
@@ -5137,7 +5152,7 @@ void Editor::debugSelectEntity(int i) {
     if (i >= 0 && i < static_cast<int>(doc_.entities().size())) {
         selectedEntity_ = i;
         selection_.clear();
-        mode_ = Mode::Pro;
+        mode_ = Mode::Full;
         layoutDirty_ = true;
         status_ = "Selected entity " + std::to_string(i) + " (" +
                   doc_.entities()[i].classname + ")";
@@ -5196,7 +5211,7 @@ void Editor::debugShapeOp(int op) {
                                 "dev/dev_measurewall01a"));
         doc_.worldSolids().back().id = doc_.nextId();
     }
-    mode_ = Mode::Pro;
+    mode_ = Mode::Full;
     showWelcome_ = false;
     buildAndUpload(meshOpts_);
 
@@ -5228,7 +5243,7 @@ void Editor::debugShapeOp(int op) {
 
 void Editor::debugTextureDemo(int solidIdx) {
     debugSelectWorldSolid(solidIdx);
-    mode_ = Mode::Pro;
+    mode_ = Mode::Full;
     tool_ = Tool::Texture;
     layoutDirty_ = true;
     texFaces_.clear();
@@ -5246,7 +5261,7 @@ void Editor::debugTextureDemo(int solidIdx) {
 void Editor::debugSubObjectDemo(int solidIdx, int mode) {
     debugSelectWorldSolid(solidIdx);
     tool_ = Tool::Vertex;
-    mode_ = Mode::Pro;
+    mode_ = Mode::Full;
     layoutDirty_ = true;
     subMode_ = static_cast<SubMode>(std::clamp(mode, 0, 2));
     handlesDirty_ = true;
@@ -7667,7 +7682,9 @@ void Editor::drawStatusBar() {
     if (ImGui::Begin("##status", nullptr, flags)) {
         const Camera& c3d = views_[0].camera;
         ImGui::PushStyleColor(ImGuiCol_Text, pb::ui::col::acc);
-        ImGui::TextUnformatted(mode_ == Mode::Simple ? "Simple" : "Pro");
+        ImGui::TextUnformatted(mode_ == Mode::Guided     ? "Guided"
+                               : mode_ == Mode::Standard ? "Standard"
+                                                         : "Full");
         ImGui::PopStyleColor();
         ImGui::SameLine(0, 14);
         ImGui::Text("%s", status_.c_str());
@@ -7885,8 +7902,9 @@ void Editor::drawCommandPalette() {
             {"Tool: Vertex/Edge/Face", [&] { tool_ = Tool::Vertex; }},
             {"Tool: Clip", [&] { tool_ = Tool::Clip; }},
             {"Tool: Texture", [&] { tool_ = Tool::Texture; }},
-            {"Switch to Simple mode", [&] { mode_ = Mode::Simple; layoutDirty_ = true; }},
-            {"Switch to Pro mode", [&] { mode_ = Mode::Pro; layoutDirty_ = true; }},
+            {"Dial: Guided", [&] { mode_ = Mode::Guided; layoutDirty_ = true; }},
+            {"Dial: Standard", [&] { mode_ = Mode::Standard; layoutDirty_ = true; }},
+            {"Dial: Full (Pro)", [&] { mode_ = Mode::Full; layoutDirty_ = true; }},
             {"Reset window layout", [&] { layoutDirty_ = true; }},
             {"Open map…", [&] { promptOpenMap(); }},
             {"Import 3D model…", [&] { openModelImport(); }},
