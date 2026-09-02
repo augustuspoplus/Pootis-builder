@@ -796,8 +796,8 @@ void Editor::makeTemplates(const std::string& outDir) {
     placePiece("BLU spawn", glm::vec3(1024, 0, 0));
     placePiece("KOTH point", glm::vec3(0, 0, 0));
     placePiece("Health / ammo", glm::vec3(0, 320, 0));
+    sun(glm::vec3(0, 0, 192));
     seal();
-    sun(glm::vec3(0, 0, 384));
     doc_.saveVmf(outDir + "/arena.vmf");
 
     // 3. CTF two-base.
@@ -808,8 +808,8 @@ void Editor::makeTemplates(const std::string& outDir) {
     placePiece("CTF setup", glm::vec3(0, 0, 0));
     placePiece("Resupply", glm::vec3(-1152, 200, 0));
     placePiece("Resupply", glm::vec3(1152, 200, 0));
+    sun(glm::vec3(0, 0, 192));
     seal();
-    sun(glm::vec3(0, 0, 384));
     doc_.saveVmf(outDir + "/ctf_2base.vmf");
 
     // 4. Payload skeleton.
@@ -819,8 +819,8 @@ void Editor::makeTemplates(const std::string& outDir) {
     placePiece("RED spawn", glm::vec3(1408, 0, 0));
     placePiece("Payload track", glm::vec3(-384, 0, 0));
     placePiece("Health / ammo", glm::vec3(384, 256, 0));
+    sun(glm::vec3(0, 0, 192));
     seal();
-    sun(glm::vec3(0, 0, 384));
     doc_.saveVmf(outDir + "/payload.vmf");
 
     // 5. Trade / spawn box.
@@ -840,8 +840,8 @@ void Editor::makeTemplates(const std::string& outDir) {
     placePiece("RED spawn", glm::vec3(896, 0, 0));
     placePiece("Capture point", glm::vec3(384, 0, 0));
     placePiece("Round timer", glm::vec3(0, 0, 0));
+    sun(glm::vec3(0, 0, 192));
     seal();
-    sun(glm::vec3(0, 0, 384));
     doc_.saveVmf(outDir + "/cp_push.vmf");
 
     // 7. ctf_turbine layout reconstruction (its own builder).
@@ -1641,9 +1641,19 @@ void Editor::drawEntityTags(ViewPanel& p, float aspect, ImDrawList* dl) {
         if (!sel && crowded(sp)) continue;
         labelled.push_back(sp);
         const std::string& tn = e.kv.get("targetname");
-        const std::string lbl = tn.empty() ? e.classname : e.classname + "  " + tn;
-        dl->AddText(ImVec2(sp.x + 8, sp.y - 7), IM_COL32(20, 20, 22, 220), lbl.c_str());
-        dl->AddText(ImVec2(sp.x + 7, sp.y - 8), col, lbl.c_str());
+        // Path nodes chain tightly — the targetname alone (the diamond already
+        // shows the class) keeps the route readable. Everything else gets
+        // "class  name".
+        const bool pathNode = e.classname == "path_track" ||
+                              e.classname == "path_corner";
+        const std::string lbl =
+            tn.empty() ? e.classname
+                       : (pathNode ? tn : e.classname + "  " + tn);
+        // Stagger the label vertically for dense chains so they don't stack.
+        const float dy = pathNode ? ((i & 1) ? 9.0f : -13.0f) : -7.0f;
+        dl->AddText(ImVec2(sp.x + 8, sp.y + dy + 1), IM_COL32(20, 20, 22, 220),
+                    lbl.c_str());
+        dl->AddText(ImVec2(sp.x + 7, sp.y + dy), col, lbl.c_str());
     }
 }
 
@@ -2586,6 +2596,13 @@ void Editor::placePiece(const std::string& piece, const glm::vec3& atRaw) {
         glm::vec3 mn, mx;
         doc_.bounds(mn, mx);
         if (mx.x <= mn.x) { mn = at - glm::vec3(1024); mx = at + glm::vec3(1024); }
+        // Also enclose every point entity (a high light_environment, an outlying
+        // spawn) so the seal never leaves something poking through.
+        for (const auto& e : doc_.entities()) {
+            if (!e.solids.empty()) continue;
+            mn = glm::min(mn, e.origin - glm::vec3(64));
+            mx = glm::max(mx, e.origin + glm::vec3(64));
+        }
         mn -= glm::vec3(128);
         mx += glm::vec3(256);
         const float t = 32;
