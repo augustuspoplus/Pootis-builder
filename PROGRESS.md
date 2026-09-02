@@ -15,9 +15,12 @@ Newest first. ROADMAP.md milestones A–H are spent; **PLAN.md** is the live pla
   scan of tracked files is clean; `tools/` (BSPSource + JRE) and
   `assets/mapping_resource_pack/` stay gitignored. Awaiting the user's
   `gh auth login` before `gh repo create pootis-builder --public --push`.
-  Open decisions for the user: LICENSE file (none yet), and every commit is
-  authored `Pootis Builder <…@protonmail.com>` — that address goes public
-  with the push unless rewritten.
+  **Licensed GPL-3.0** (`LICENSE` = full FSF text; README "## License"
+  section, `Copyright (C) 2026 the Pootis Builder authors`). All bundled/
+  fetched deps are GPL-compatible (MIT/Zlib/OFL). Still pending before the
+  push: rewrite all commits' author+committer email to the user's GitHub
+  `…@users.noreply.github.com` address (needs their username/ID from
+  `gh api user` after auth) so the personal address never goes public.
 - **Things list — icons + a lot more of them.** The Simple-mode ▸ Things tab
   had ~20 entries and every non-model item fell back to a generic bolt/cube
   glyph. `SE` now carries a per-item FontAwesome icon and a `group` header;
