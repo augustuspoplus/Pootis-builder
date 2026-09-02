@@ -4,6 +4,16 @@ Newest first. ROADMAP.md milestones A–H are spent; **PLAN.md** is the live pla
 (five gated phases to 1.0 + the UI plan).
 
 ## Phases + performance batch
+- **Phase 4 — one adaptive workspace (dial shipped).** `enum Mode {
+  Simple, Pro }` → `{ Guided, Standard, Full }`. Guided = pure Build Kit;
+  Standard = kit + the full tool strip + Textures / Contents / Map Check
+  tabbed in; Full = the old Pro layout. Layout branches key off `!= Full`,
+  the tool strip off `!= Guided`. `drawSelectionPanel` now routes to the
+  Face-edit panel when the Surface tool is active (mirrors Pro's
+  `drawProperties`). Dial position persists via `Settings::workspaceDial`
+  / pootis.ini; `setDial(0|1|2)` + `--dial <n>`. Command palette + status
+  bar updated. `test.sh` 71/71. Deferred: KitInstance re-optionable
+  pieces, preview-everywhere, guided-first-map coach marks.
 - **Phase 3 — Surfaces (core done).** Material browser rebuilt on the
   model-browser pattern (30k VMTs themed into groups, All / In this map /
   Recent, full search, click-to-apply to selected faces). Surface tool:
