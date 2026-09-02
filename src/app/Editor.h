@@ -43,7 +43,7 @@ public:
 
     bool openMap(const std::string& path);
     void promptOpenMap();  // native file dialog
-    void setProMode() { mode_ = Mode::Pro; layoutDirty_ = true; }
+    void setProMode() { mode_ = Mode::Full; layoutDirty_ = true; }
     void debugSelectWorldSolid(int i);  // test hook for headless screenshots
     void debugSelectEntity(int i);
     void debugPlaceEntity(const std::string& cls);
@@ -177,7 +177,10 @@ private:
         glm::vec2 contentSize{0.0f};
     };
 
-    enum class Mode { Simple, Pro };
+    // The complexity dial. Guided = pure Build Kit; Standard = kit + the full
+    // tool strip + outliner / map-check; Full = the dense Pro layout. Guided and
+    // Standard share one friendly docking; only Full swaps the layout.
+    enum class Mode { Guided, Standard, Full };
     enum class Tool { Select, Block, Vertex, Clip, Texture, Entity };
     enum class SubMode { Vertex, Edge, Face };
 
@@ -461,7 +464,7 @@ private:
     bool subDragging_ = false;
     glm::vec3 subDragStartHit_{0}, subDragStartPos_{0}, subCurPos_{0};
 
-    Mode mode_ = Mode::Simple;
+    Mode mode_ = Mode::Standard;
     Tool tool_ = Tool::Select;
     bool layoutDirty_ = true;
     int gridSize_ = 64;
