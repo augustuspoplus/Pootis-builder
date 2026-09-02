@@ -79,6 +79,21 @@ Q2 = Simple-mode kit builds new maps (prioritised). Also doing section G (QoL).
   - Options persistence confirmed: all 16 keys + the recent-files MRU
     round-trip through `%LOCALAPPDATA%\PootisBuilder\pootis.ini`.
   - Full 52-piece kit re-sweep: 0 empty, 0 crashes.
+- **Third pass**:
+  - Props browser: the category dropdown is now a real **collapsible,
+    scrollable category list** under a "Categories" header (Simple + Pro
+    both use `drawModelGrid`). Player cosmetics (~10.5k of 16k models) split
+    into their own "Cosmetics (hats)" bucket; workshop packs bucket by pack
+    name; sub-12 buckets fold to "Other". `--kit-tab N` now selects any of
+    the seven kit tabs (for the screenshot sweep).
+  - Option panels added for **Room** ("half-size"), **Spiral stairs**
+    (steps / rise / diameter) and **Moving platform** (travel).
+  - Drag-drop re-verified for all three payloads (`@kit:`, `@ent:`,
+    `@model:`) via the headless `--place-kit / --place-ent / --drop-model`
+    hooks.
+  - Turbine reconstruction fleshed out (144 solids) — spawn annex + hall
+    flank room per side widen the silhouette toward the real decompiled
+    top-down; still vbsp leak-free.
 
 ## Visual fidelity (done)
 - **prop_static models**: `model/StudioModel` parses MDL + VVD + VTX (LOD 0,
