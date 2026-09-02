@@ -3829,7 +3829,23 @@ void Editor::beginModalXform(int op) {
     mx_.view = hv->kind;
     const ImVec2 m = ImGui::GetMousePos();
     mx_.startMouse = {m.x - hv->contentMin.x, m.y - hv->contentMin.y};
+    // Pivot: selection centre, or the point under the cursor if Alt is held
+    // when the op starts (rotate/scale around an arbitrary point).
     mx_.pivot = selectionCenter();
+    if (ImGui::GetIO().KeyAlt && op != 1) {
+        glm::vec3 ro, rd;
+        hv->camera.pixelRay({mx_.startMouse.x, mx_.startMouse.y}, hv->contentSize,
+                            ro, rd);
+        if (hv->kind == pb::ViewKind::Perspective) {
+            const float t = std::fabs(rd.z) > 1e-4f ? -ro.z / rd.z : 0.0f;
+            if (t > 0) mx_.pivot = glm::vec3((ro + rd * t).x, (ro + rd * t).y,
+                                             mx_.pivot.z);
+        } else {
+            mx_.pivot = viewPlanePoint(*hv, m);
+        }
+        mx_.pivot = snapVec(mx_.pivot);
+        status_ = "Pivot at cursor";
+    }
     for (const auto& r : selection_)
         if (const map::Solid* s = doc_.resolve(r)) {
             mx_.snap.push_back(*s);
@@ -4359,7 +4375,8 @@ void Editor::drawKeysOverlay() {
             {"Delete / Backspace", "Delete selection"},
             {"[ / ]", "Rotate selection about Z  (Shift = other way)"},
             {"G / R / S", "Move / rotate / scale — then X/Y/Z to lock an axis, "
-                          "type an amount, Enter (Esc cancels)"},
+                          "type an amount, Enter (Esc cancels).  Hold Alt = pivot "
+                          "on the cursor"},
             {"drag the object", "Move it — 3D drags on the ground, Shift = up/down"},
             {"drag a corner box", "Resize that side / corner"},
             {"W / E", "Move / rotate gizmo mode  (Pro)"},
