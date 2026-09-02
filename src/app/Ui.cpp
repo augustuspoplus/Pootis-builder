@@ -15,6 +15,8 @@ ImFont* fontUiMed = nullptr;
 ImFont* fontBig = nullptr;
 ImFont* fontMono = nullptr;
 float g_scale = 1.0f;
+std::string g_gpuRenderer;
+std::string g_gpuVersion;
 
 void loadFonts(const char* exeDir, float scale) {
     ImGuiIO& io = ImGui::GetIO();

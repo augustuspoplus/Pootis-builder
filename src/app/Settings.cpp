@@ -60,6 +60,7 @@ Settings Settings::load() {
         else if (key == "lightmap_gain") s.lightmapGain = fnum();
         else if (key == "auto_decompile") s.autoDecompile = b();
         else if (key == "bake_props") s.bakeProps = b();
+        else if (key == "perf_mode") s.perfMode = inum();
         else if (key == "tf2_dir") s.tf2Dir = val;
         else if (key.rfind("recent", 0) == 0 && !val.empty()) s.recent.push_back(val);
     }
@@ -91,6 +92,7 @@ void Settings::save() const {
     f << "lightmap_gain=" << lightmapGain << "\n";
     f << "auto_decompile=" << (autoDecompile ? 1 : 0) << "\n";
     f << "bake_props=" << (bakeProps ? 1 : 0) << "\n";
+    f << "perf_mode=" << perfMode << "\n";
     if (!tf2Dir.empty()) f << "tf2_dir=" << tf2Dir << "\n";
     for (size_t i = 0; i < recent.size() && i < kMaxRecent; ++i)
         f << "recent" << i << "=" << recent[i] << "\n";
