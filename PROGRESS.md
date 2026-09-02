@@ -4,6 +4,18 @@ Newest first. ROADMAP.md milestones A–H are spent; **PLAN.md** is the live pla
 (five gated phases to 1.0 + the UI plan).
 
 ## Phases + performance batch
+- **Things list — icons + a lot more of them.** The Simple-mode ▸ Things tab
+  had ~20 entries and every non-model item fell back to a generic bolt/cube
+  glyph. `SE` now carries a per-item FontAwesome icon and a `group` header;
+  the list is ~43 entries in five sections — **Players & goals** (spawn door,
+  CTF/KOTH/Arena/Round-timer setups, no-build), **Pickups**, **Doors & movers**
+  (working door, elevator, moving platform, button, lever, fan, teleport pair,
+  breakable crate), **Volumes & triggers** (death pit, water, clip wall,
+  ladder, trigger box), **Atmosphere** (3D sky camera, env_cubemap,
+  soundscape, rain/snow, light glow). All 38 glyphs verified present in the
+  bundled `fa-solid-900.ttf`; new raw classes (`sky_camera`, `env_cubemap`,
+  `env_soundscape`, `func_precipitation`, `env_lightglow`) smoke-tested via
+  `--place-ent`. 69/69.
 - **Phase 2 — precise transforms** (c880bed → f72923d, essentially done).
   Modal `G`/`R`/`S` + `X`/`Y`/`Z` axis lock + numeric entry + HUD (2D/3D,
   world/entity). "Snap to grid" button; live centre/delta readout on 2D

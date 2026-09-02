@@ -6088,29 +6088,96 @@ void Editor::drawBrushInspector() {
 
 void Editor::drawSimpleEntities() {
     using namespace pb::ui;
-    struct SE { const char* name; const char* spec; const char* hint; };
+    // group: a section header printed before the first item that carries it.
+    struct SE { const char* group; const char* icon; const char* name;
+                const char* spec; const char* hint; };
     // spec: "kit:<Name>" -> placePiece, otherwise a raw entity classname.
     static const SE items[] = {
-        {"RED spawn room", "kit:RED spawn", "Where RED players start (room + spawns)"},
-        {"BLU spawn room", "kit:BLU spawn", "Where BLU players start (room + spawns)"},
-        {"One spawn point", "info_player_teamspawn", "A single respawn spot"},
-        {"Capture point", "kit:Capture point", "Stand on it to capture"},
-        {"Payload path", "kit:Payload track", "Track nodes for the cart"},
-        {"Resupply cabinet", "kit:Resupply", "Refills health and ammo"},
-        {"Small health", "item_healthkit_small", "+ a bit of health"},
-        {"Medium health", "item_healthkit_medium", "+ half health"},
-        {"Full health", "item_healthkit_full", "Full heal"},
-        {"Small ammo", "item_ammopack_small", ""},
-        {"Medium ammo", "item_ammopack_medium", ""},
-        {"Full ammo", "item_ammopack_full", ""},
-        {"Intel briefcase", "item_teamflag", "The flag for CTF"},
-        {"Spectator camera", "info_observer_point", "A camera angle for spectators"},
-        {"Hurt zone", "trigger_hurt", "Brush trigger — hurts players inside"},
-        {"Push / jump pad", "trigger_push", "Brush trigger — shoves players"},
-        {"Sliding door", "func_door", "Select a brush, then click this"},
-        {"Ambient sound", "ambient_generic", "A looping sound at a spot"},
-        {"Particle effect", "info_particle_system", "Smoke / fire / sparks"},
-        {"Map fog", "env_fog_controller", "Map-wide fog colour + distance"},
+        {"PLAYERS & GOALS", ICON_FA_PERSON_RIFLE, "RED spawn room", "kit:RED spawn",
+         "Where RED players start (room + spawns)"},
+        {nullptr, ICON_FA_PERSON_RIFLE, "BLU spawn room", "kit:BLU spawn",
+         "Where BLU players start (room + spawns)"},
+        {nullptr, ICON_FA_LOCATION_DOT, "One spawn point", "info_player_teamspawn",
+         "A single respawn spot"},
+        {nullptr, ICON_FA_DOOR_CLOSED, "Spawn door", "kit:Spawn door",
+         "Team-only one-way wall across a spawn exit"},
+        {nullptr, ICON_FA_BOX_OPEN, "Resupply cabinet", "kit:Resupply",
+         "Refills health and ammo"},
+        {nullptr, ICON_FA_CIRCLE_DOT, "Capture point", "kit:Capture point",
+         "Stand on it to capture"},
+        {nullptr, ICON_FA_TRAIN, "Payload path", "kit:Payload track",
+         "Cart + track + control point"},
+        {nullptr, ICON_FA_FLAG, "CTF setup", "kit:CTF setup",
+         "Both flags + capture zones"},
+        {nullptr, ICON_FA_MOUND, "KOTH point", "kit:KOTH point",
+         "King-of-the-hill point + timer"},
+        {nullptr, ICON_FA_TROPHY, "Arena logic", "kit:Arena logic",
+         "Arena rules + a mid point"},
+        {nullptr, ICON_FA_CLOCK, "Round timer", "kit:Round timer",
+         "Countdown for the round"},
+        {nullptr, ICON_FA_HELMET_SAFETY, "No-build zone", "kit:No-build zone",
+         "Blocks Engineer buildings"},
+        {nullptr, ICON_FA_BRIEFCASE, "Intel briefcase", "item_teamflag",
+         "The flag for CTF"},
+
+        {"PICKUPS", ICON_FA_KIT_MEDICAL, "Small health", "item_healthkit_small",
+         "+ a bit of health"},
+        {nullptr, ICON_FA_KIT_MEDICAL, "Medium health", "item_healthkit_medium",
+         "+ half health"},
+        {nullptr, ICON_FA_KIT_MEDICAL, "Full health", "item_healthkit_full",
+         "Full heal"},
+        {nullptr, ICON_FA_BOX, "Small ammo", "item_ammopack_small", ""},
+        {nullptr, ICON_FA_BOX, "Medium ammo", "item_ammopack_medium", ""},
+        {nullptr, ICON_FA_BOX, "Full ammo", "item_ammopack_full", ""},
+
+        {"DOORS & MOVERS", ICON_FA_DOOR_OPEN, "Working door", "kit:Working door",
+         "Opens when a player is near"},
+        {nullptr, ICON_FA_ELEVATOR, "Elevator", "kit:Elevator",
+         "Platform + call button"},
+        {nullptr, ICON_FA_ARROWS_LEFT_RIGHT, "Moving platform", "kit:Moving platform",
+         "Slides between two points on a button"},
+        {nullptr, ICON_FA_HAND_POINTER, "Button", "kit:Button",
+         "Press to trigger something"},
+        {nullptr, ICON_FA_TOGGLE_ON, "Lever", "kit:Lever",
+         "A switch that toggles and stays"},
+        {nullptr, ICON_FA_FAN, "Fan / rotating", "kit:Fan / rotating",
+         "A spinning brush"},
+        {nullptr, ICON_FA_RIGHT_LEFT, "Teleporter pair", "kit:Teleport pair",
+         "Trigger + a destination"},
+        {nullptr, ICON_FA_BOX, "Breakable crate", "kit:Breakable crate",
+         "Breaks when shot"},
+
+        {"VOLUMES & TRIGGERS", ICON_FA_HEART_CRACK, "Hurt zone", "trigger_hurt",
+         "Damages players inside"},
+        {nullptr, ICON_FA_WIND, "Push / jump pad", "trigger_push",
+         "Shoves players in a direction"},
+        {nullptr, ICON_FA_SKULL, "Death pit", "kit:Death pit",
+         "Instant-kill pit with a rim"},
+        {nullptr, ICON_FA_WATER, "Water", "kit:Water", "A body of water"},
+        {nullptr, ICON_FA_BAN, "Clip wall", "kit:Clip wall",
+         "Invisible wall (blocks players)"},
+        {nullptr, ICON_FA_STAIRS, "Ladder", "kit:Ladder", "A climbable volume"},
+        {nullptr, ICON_FA_BOMB, "Trigger box", "kit:Trigger box",
+         "Fires outputs when touched"},
+
+        {"ATMOSPHERE", ICON_FA_CLOUD, "Map fog", "env_fog_controller",
+         "Map-wide fog colour + distance"},
+        {nullptr, ICON_FA_MOUNTAIN_SUN, "3D sky camera", "sky_camera",
+         "Where the 3D skybox is viewed from"},
+        {nullptr, ICON_FA_CIRCLE_HALF_STROKE, "Reflection probe", "env_cubemap",
+         "Cubemap — shiny surfaces sample this"},
+        {nullptr, ICON_FA_HEADPHONES, "Soundscape", "env_soundscape",
+         "Ambient environmental audio in a radius"},
+        {nullptr, ICON_FA_VOLUME_HIGH, "Ambient sound", "ambient_generic",
+         "A looping sound at a spot"},
+        {nullptr, ICON_FA_SNOWFLAKE, "Rain / snow", "func_precipitation",
+         "Weather inside a brush volume"},
+        {nullptr, ICON_FA_FIRE, "Particle effect", "info_particle_system",
+         "Smoke / fire / sparks"},
+        {nullptr, ICON_FA_SUN, "Light glow", "env_lightglow",
+         "A halo sprite on a light source"},
+        {nullptr, ICON_FA_VIDEO, "Spectator camera", "info_observer_point",
+         "A camera angle for spectators"},
     };
 
     ImGui::PushStyleColor(ImGuiCol_Text, col::faint);
@@ -6121,6 +6188,11 @@ void Editor::drawSimpleEntities() {
     const float cell = dp(46.0f);
     ImDrawList* dl = ImGui::GetWindowDrawList();
     for (const auto& it : items) {
+        if (it.group) {
+            ImGui::Dummy(ImVec2(0, dp(6.0f)));
+            pb::ui::sectionLabel(it.group);
+            ImGui::Dummy(ImVec2(0, dp(2.0f)));
+        }
         const bool isKit = std::strncmp(it.spec, "kit:", 4) == 0;
         const std::string cls = isKit ? "" : it.spec;
         const std::string payload = isKit ? std::string("@kit:") + (it.spec + 4)
@@ -6169,12 +6241,16 @@ void Editor::drawSimpleEntities() {
             glm::vec3 rgb = ec && ec->hasColor ? ec->color : glm::vec3(0.55f);
             dl->AddRectFilled(icTL, ImVec2(icTL.x + ic, icTL.y + ic),
                               IM_COL32((int)(rgb.r * 255), (int)(rgb.g * 255),
-                                       (int)(rgb.b * 255), 60),
+                                       (int)(rgb.b * 255), 45),
                               3.0f);
-            dl->AddText(ImVec2(icTL.x + ic * 0.30f, icTL.y + ic * 0.22f),
+            const char* glyph = it.icon ? it.icon
+                                        : (isKit ? ICON_FA_CUBES : ICON_FA_BOLT);
+            const ImVec2 gsz = ImGui::CalcTextSize(glyph);
+            dl->AddText(ImVec2(icTL.x + (ic - gsz.x) * 0.5f,
+                               icTL.y + (ic - gsz.y) * 0.5f),
                         IM_COL32((int)(rgb.r * 255), (int)(rgb.g * 255),
                                  (int)(rgb.b * 255), 255),
-                        isKit ? ICON_FA_CUBES : ICON_FA_BOLT);
+                        glyph);
         }
         const float tx = p0.x + cell + dp(4.0f);
         dl->AddText(fontUiMed ? fontUiMed : nullptr, 0.0f, ImVec2(tx, p0.y + pad),
