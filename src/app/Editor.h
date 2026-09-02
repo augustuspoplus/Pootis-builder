@@ -383,6 +383,7 @@ private:
           archHeight_ = 128.0f;
     float doorOpenDir_ = 0.0f;   // 0=up, 90/180/270 slide directions
     float elevTravel_ = 256.0f;
+    float roomHalf_ = 192.0f;    // interior half-extent for Room / spawn rooms
     // Curvy-road spline tool
     std::vector<glm::vec3> roadPts_;
     bool roadActive_ = false;
