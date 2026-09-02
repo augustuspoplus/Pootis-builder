@@ -7857,10 +7857,16 @@ void Editor::runMapCheck() {
     };
 
     int spawns = 0, lights = 0, objectives = 0, invalid = 0;
+    int cubemaps = 0, respawnRooms = 0, redSpawns = 0, bluSpawns = 0;
+    bool skyBrush = false;
     glm::vec3 dmn(1e9f), dmx(-1e9f);
     for (int i = 0; i < (int)doc_.worldSolids().size(); ++i) {
         const auto& s = doc_.worldSolids()[i];
         if (!s.valid) { ++invalid; add(2, "Invalid world brush (not convex / <4 planes)", -1, i, s.center()); }
+        for (const auto& f : s.faces)
+            if (f.material == "tools/toolsskybox" ||
+                f.material == "tools/toolsskybox2d")
+                skyBrush = true;
         dmn = glm::min(dmn, s.boundsMin);
         dmx = glm::max(dmx, s.boundsMax);
         const glm::vec3 sz = s.boundsMax - s.boundsMin;
@@ -7876,11 +7882,26 @@ void Editor::runMapCheck() {
     for (int i = 0; i < (int)doc_.entities().size(); ++i) {
         const auto& e = doc_.entities()[i];
         const std::string& c = e.classname;
-        if (c == "info_player_teamspawn" || c == "info_player_start") ++spawns;
+        if (c == "info_player_teamspawn" || c == "info_player_start") {
+            ++spawns;
+            const std::string tn = e.kv.get("TeamNum");
+            if (tn == "2") ++redSpawns;
+            else if (tn == "3") ++bluSpawns;
+        }
         if (c.rfind("light", 0) == 0) ++lights;
+        if (c == "env_cubemap") ++cubemaps;
+        if (c == "func_respawnroom") ++respawnRooms;
         if (c == "team_control_point" || c == "trigger_capture_area" ||
             c == "func_capturezone" || c.rfind("func_tracktrain", 0) == 0)
             ++objectives;
+        // Displacements only compile on world brushes.
+        for (const auto& s : e.solids)
+            for (const auto& f : s.faces)
+                if (f.hasDisp) {
+                    add(2, c + " has a displacement face — vbsp only allows those "
+                              "on world brushes; untie it first", i, -1, e.origin);
+                    break;
+                }
         for (const auto& conn : e.connections) {
             std::string tgt = conn.second.substr(0, conn.second.find_first_of(",\x1b"));
             if (tgt.empty() || tgt == "!activator" || tgt == "!self" ||
@@ -7901,10 +7922,21 @@ void Editor::runMapCheck() {
 
     if (spawns < 1) add(2, "No player spawns (info_player_teamspawn)");
     else if (spawns < 2) add(1, "Only one spawn point — add a few per team");
+    if (spawns >= 1 && (redSpawns == 0 || bluSpawns == 0))
+        add(1, "Spawns are all one team (set TeamNum 2 = RED, 3 = BLU)");
+    if (spawns >= 1 && respawnRooms < 1)
+        add(1, "Spawns but no func_respawnroom — no spawn protection or "
+               "resupply trigger");
     if (lights < 1) add(1, "No lights — the map will be fullbright");
+    if (cubemaps < 1)
+        add(1, "No env_cubemap — reflective surfaces render black until "
+               "buildcubemaps is run");
     if (objectives < 1) add(1, "No objective entity (control point / cap zone / cart)");
     if (doc_.worldExtra().get("skyname").empty())
         add(2, "worldspawn has no skyname — the map won't seal");
+    else if (!skyBrush)
+        add(2, "skyname is set but no tools/toolsskybox brush — the sky won't "
+               "seal the map");
     if (doc_.worldSolids().empty())
         add(2, "No world brushwork at all");
 
