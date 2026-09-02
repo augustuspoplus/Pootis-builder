@@ -3377,6 +3377,45 @@ void Editor::tieSelectionToEntity(const std::string& cls) {
     status_ = "Tied " + std::to_string(idx.size()) + " brush(es) to " + cls;
 }
 
+void Editor::untieSelectionToWorld() {
+    // Gather selected brushes by entity, move them to worldSolids, and drop
+    // any entity left empty. The entity's keyvalues/IO go with it if emptied.
+    std::map<int, std::vector<int>> byEnt;
+    for (const auto& r : selection_)
+        if (r.entity >= 0) byEnt[r.entity].push_back(r.solid);
+    if (byEnt.empty()) { status_ = "Select a brush that belongs to an entity."; return; }
+
+    std::vector<map::Solid> freed;
+    std::vector<int> emptied;
+    for (auto& [ei, brushes] : byEnt) {
+        if (ei < 0 || ei >= (int)doc_.entities().size()) continue;
+        auto& sols = doc_.entities()[ei].solids;
+        std::sort(brushes.rbegin(), brushes.rend());
+        brushes.erase(std::unique(brushes.begin(), brushes.end()), brushes.end());
+        for (int bi : brushes)
+            if (bi >= 0 && bi < (int)sols.size()) {
+                map::Solid s = sols[bi];
+                s.group = 0;
+                freed.push_back(std::move(s));
+                sols.erase(sols.begin() + bi);
+            }
+        if (sols.empty()) emptied.push_back(ei);
+    }
+    std::sort(emptied.rbegin(), emptied.rend());
+    for (int ei : emptied) doc_.entities().erase(doc_.entities().begin() + ei);
+
+    std::vector<map::SolidRef> sel;
+    for (auto& s : freed) {
+        s.id = doc_.nextId();
+        doc_.worldSolids().push_back(std::move(s));
+        sel.push_back({-1, (int)doc_.worldSolids().size() - 1});
+    }
+    selection_ = sel;
+    selectedEntity_ = -1;
+    afterEdit("Untie to world");
+    status_ = "Untied " + std::to_string(freed.size()) + " brush(es) to world";
+}
+
 void Editor::handleViewportInput(ViewPanel& p) {
     if (!p.hovered) return;
     ImGuiIO& io = ImGui::GetIO();
@@ -3696,24 +3735,41 @@ void Editor::deleteSelection() {
     }
     if (selection_.empty()) return;
 
-    std::vector<int> ws, ents;
+    // World brushes, and per-entity the individual brush indices to remove.
+    std::vector<int> ws;
+    std::map<int, std::vector<int>> entBrush;
     for (const auto& r : selection_) {
         if (r.entity < 0) ws.push_back(r.solid);
-        else ents.push_back(r.entity);
+        else entBrush[r.entity].push_back(r.solid);
     }
     std::sort(ws.rbegin(), ws.rend());
+    ws.erase(std::unique(ws.begin(), ws.end()), ws.end());
     for (int i : ws)
-        if (i < static_cast<int>(doc_.worldSolids().size()))
+        if (i >= 0 && i < static_cast<int>(doc_.worldSolids().size()))
             doc_.worldSolids().erase(doc_.worldSolids().begin() + i);
-    std::sort(ents.rbegin(), ents.rend());
-    ents.erase(std::unique(ents.begin(), ents.end()), ents.end());
-    for (int i : ents)
-        if (i < static_cast<int>(doc_.entities().size()))
-            doc_.entities().erase(doc_.entities().begin() + i);
-    const size_t n = ws.size() + ents.size();
+
+    // Remove those brushes from their entities; drop an entity left with none.
+    std::vector<int> emptied;
+    size_t nBrush = 0;
+    for (auto& [ei, brushes] : entBrush) {
+        if (ei < 0 || ei >= static_cast<int>(doc_.entities().size())) continue;
+        auto& sols = doc_.entities()[ei].solids;
+        std::sort(brushes.rbegin(), brushes.rend());
+        brushes.erase(std::unique(brushes.begin(), brushes.end()), brushes.end());
+        for (int bi : brushes)
+            if (bi >= 0 && bi < static_cast<int>(sols.size())) {
+                sols.erase(sols.begin() + bi);
+                ++nBrush;
+            }
+        if (sols.empty()) emptied.push_back(ei);
+    }
+    std::sort(emptied.rbegin(), emptied.rend());
+    for (int ei : emptied) doc_.entities().erase(doc_.entities().begin() + ei);
+
+    const size_t n = ws.size() + nBrush;
     clearSelection();
     afterEdit("Delete");
-    status_ = "Deleted " + std::to_string(n) + " object(s)";
+    status_ = "Deleted " + std::to_string(n) + " brush(es)";
 }
 
 void Editor::copySelection() {
@@ -3796,9 +3852,12 @@ void Editor::duplicateSelection() {
     std::vector<map::SolidRef> newSel;
     for (const auto& r : selection_) {
         const map::Solid* s = doc_.resolve(r);
-        if (!s || r.entity >= 0) continue;
+        if (!s) continue;
+        // Entity brushes duplicate into the world — a free copy you can then
+        // re-tie or edit on its own.
         map::Solid copy = *s;
         copy.id = doc_.nextId();
+        copy.group = 0;
         copy.translate(glm::vec3(float(gridSize_), float(gridSize_), 0.0f));
         doc_.worldSolids().push_back(std::move(copy));
         newSel.push_back({-1, static_cast<int>(doc_.worldSolids().size()) - 1});
@@ -5374,6 +5433,37 @@ void Editor::drawBrushInspector() {
                 selection_.size() == 1 ? "" : "es");
     if (pb::ui::fontUiMed) ImGui::PopFont();
 
+    // "part of <entity>" identity + one-click untie, so entity brushwork is
+    // first-class instead of a dead end.
+    {
+        int entOf = -2;
+        for (const auto& r : selection_) {
+            if (entOf == -2) entOf = r.entity;
+            else if (entOf != r.entity) entOf = -3;
+        }
+        if (entOf >= 0 && entOf < (int)doc_.entities().size()) {
+            const auto& e = doc_.entities()[entOf];
+            ImGui::PushStyleColor(ImGuiCol_Text, pb::ui::col::faint);
+            ImGui::Text(ICON_FA_LINK "  part of  %s", e.classname.c_str());
+            ImGui::PopStyleColor();
+            if (ImGui::SmallButton("Select all of it")) {
+                selection_.clear();
+                for (int i = 0; i < (int)e.solids.size(); ++i)
+                    selection_.push_back({entOf, i});
+                rebuildSelectionWire();
+            }
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Untie to world")) untieSelectionToWorld();
+        } else if (entOf == -3) {
+            ImGui::PushStyleColor(ImGuiCol_Text, pb::ui::col::faint);
+            ImGui::TextWrapped("Mixed selection — world brushes and pieces of "
+                               "different entities.");
+            ImGui::PopStyleColor();
+            if (ImGui::SmallButton("Untie entity brushes to world"))
+                untieSelectionToWorld();
+        }
+    }
+
     pb::ui::sectionLabel("POSITION  (centre)");
     glm::vec3 newCtr = ctr;
     ImGui::SetNextItemWidth(-1);
@@ -5504,10 +5594,10 @@ void Editor::drawBrushInspector() {
                               "it overlaps (the carve brush itself is removed).");
     }
 
-    if (worldCount != static_cast<int>(selection_.size())) {
+    if (worldCount != static_cast<int>(selection_.size()) && worldCount > 0) {
         ImGui::PushStyleColor(ImGuiCol_Text, pb::ui::col::faint);
-        ImGui::TextWrapped("(some selected brushes belong to entities — brush-entity "
-                           "editing is limited for now)");
+        ImGui::TextWrapped("Carve / hollow act on the world brushes only. "
+                           "Untie the rest first to include them.");
         ImGui::PopStyleColor();
     }
 }
