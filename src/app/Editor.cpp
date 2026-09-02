@@ -2188,9 +2188,25 @@ void Editor::handleTextureTool(ViewPanel& p) {
     }
 
     if (hitFace < 0) {
-        if (!io.KeyShift) texFaces_.clear();
+        if (!io.KeyShift && !io.KeyAlt) texFaces_.clear();
         return;
     }
+
+    // Alt-click = eyedropper: lift the whole projection off the clicked face
+    // (material + axes + scale + rotation + lightmap scale) into the panel /
+    // clipboard, without changing the selection.
+    if (io.KeyAlt) {
+        if (const map::Solid* s = doc_.resolve(hitRef);
+            s && hitFace < (int)s->faces.size()) {
+            texClip_ = s->faces[hitFace];
+            texClipSet_ = true;
+            std::snprintf(texMaterial_, sizeof(texMaterial_), "%s",
+                          texClip_.material.c_str());
+            status_ = "Sampled " + texClip_.material + " — Paste onto selected faces";
+        }
+        return;
+    }
+
     const std::pair<map::SolidRef, int> pick{hitRef, hitFace};
     auto it = std::find(texFaces_.begin(), texFaces_.end(), pick);
     if (io.KeyShift) {
@@ -2290,6 +2306,39 @@ void Editor::drawFaceEditPanel() {
     ImGui::EndGroup();
     ImGui::TextDisabled("%dx%d%s", minfo.width, minfo.height,
                         minfo.found ? "" : "  (not found)");
+
+    // Eyedropper clipboard + continuous-projection helpers.
+    ImGui::PushStyleColor(ImGuiCol_Text, col::faint);
+    ImGui::TextWrapped("Alt-click a face in a viewport to sample its projection.");
+    ImGui::PopStyleColor();
+    ImGui::BeginDisabled(!texClipSet_);
+    if (ImGui::Button(ICON_FA_EYE_DROPPER "  Paste sampled projection", ImVec2(-1, 0))) {
+        const map::BrushFace c = texClip_;
+        applyToTexFaces(
+            [&](map::BrushFace& f) {
+                f.material = c.material;
+                f.uAxis = c.uAxis; f.vAxis = c.vAxis;
+                f.uScale = c.uScale; f.vScale = c.vScale;
+                f.rotation = c.rotation;
+                f.lightmapScale = c.lightmapScale;
+            },
+            "Paste projection", true);
+        std::snprintf(texMaterial_, sizeof(texMaterial_), "%s", c.material.c_str());
+    }
+    ImGui::EndDisabled();
+    if (ImGui::Button(ICON_FA_OBJECT_GROUP "  Treat selection as one surface",
+                      ImVec2(-1, 0))) {
+        // Copy the representative face's world-space axes/scale/offset onto every
+        // selected face so the texture runs continuously across the group.
+        const glm::vec4 u = rf.uAxis, v = rf.vAxis;
+        const float us = rf.uScale, vs = rf.vScale, rot = rf.rotation;
+        applyToTexFaces(
+            [&](map::BrushFace& f) {
+                f.uAxis = u; f.vAxis = v;
+                f.uScale = us; f.vScale = vs; f.rotation = rot;
+            },
+            "Treat as one surface", true);
+    }
 
     sectionLabel("PROJECTION");
     auto flabel = [](const char* t) {
