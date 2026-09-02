@@ -58,6 +58,7 @@ public:
         showWelcome_ = false; afterEdit("drop"); frameAllViews();
     }
     void debugBuildSampleMap();
+    void debugUndoTest();
     void debugStartCompile(bool fast);
     void debugCompileOut(const std::string& name, const std::string& dir);
     void debugShowWorkshop();

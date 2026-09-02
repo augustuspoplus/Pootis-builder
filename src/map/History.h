@@ -6,9 +6,10 @@
 
 namespace pb::map {
 
-// Simple snapshot undo/redo over a MapDocument's brushwork. Snapshots the world
-// solids and each entity's brush solids (entity keyvalue editing is handled
-// separately). Memory-heavy on huge maps — capped; revisit with deltas later.
+// Simple snapshot undo/redo over a MapDocument. Snapshots the world solids and
+// the full entity list (classnames, key/values, origin, connections, brush
+// solids), so adding, deleting, moving and re-keying entities all undo.
+// Memory-heavy on huge maps — capped; revisit with deltas later.
 class History {
 public:
     void reset(const MapDocument& doc);          // clear + take the baseline
@@ -32,7 +33,7 @@ private:
     struct Snap {
         std::string label;
         std::vector<Solid> world;
-        std::vector<std::vector<Solid>> entitySolids;
+        std::vector<MapEntity> entities;
     };
     static Snap capture(const MapDocument& doc, std::string label);
     static void restore(MapDocument& doc, const Snap& s);
