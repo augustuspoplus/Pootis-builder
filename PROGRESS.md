@@ -94,16 +94,17 @@ Q2 = Simple-mode kit builds new maps (prioritised). Also doing section G (QoL).
   - Turbine reconstruction fleshed out (144 solids) — spawn annex + hall
     flank room per side widen the silhouette toward the real decompiled
     top-down; still vbsp leak-free.
-- **Fourth pass — full Phase-6 sweep** (`scratchpad/sweep.sh`, 128 checks):
-  40 raw stock maps, 6 decompiles, 52 kit pieces, 15 Things, undo, 7
-  templates + their vbsp compiles, Options persistence. Result 120/128;
-  the 8 misses were (a) 6 "decompile no VMF" — a harness bug, the non-UI
-  `--view` path doesn't block for the async BSPSource run (all 6 load fine
-  under `--ui`), and (b) **empty_room + trade_box leaked** — sun above a
-  192-tall Room with no explicit seal. Both fixed (low sun + `seal()`);
-  all 7 templates now compile leak-free.
+- **Fourth pass — full Phase-6 sweep** (now `test.sh` at the repo root):
+  40 raw stock maps, 6 decompiles (`--ui`, so it waits for BSPSource),
+  52 kit pieces, 15 Things, undo, 7 templates + their vbsp compiles,
+  Options persistence. First run 120/128 caught two real regressions —
+  **empty_room + trade_box leaked** (sun above a 192-tall Room, no explicit
+  seal). Fixed with a low sun + `seal()` pass; the other 6 misses were a
+  harness bug (non-UI `--view` doesn't block for the async decompile).
+  Re-run: **129 / 129 green**.
 - Added **Lever** (Moving tab) — a toggle/stay `func_button`, vs the
   momentary Button.
+- `test.sh` [quick] committed as the standing regression check.
 
 ## Visual fidelity (done)
 - **prop_static models**: `model/StudioModel` parses MDL + VVD + VTX (LOD 0,
