@@ -43,7 +43,12 @@ public:
 
     bool openMap(const std::string& path);
     void promptOpenMap();  // native file dialog
-    void setProMode() { mode_ = Mode::Full; layoutDirty_ = true; }
+    void setProMode() { setDial(2); }
+    void setDial(int stop) {  // 0 Guided · 1 Standard · 2 Full
+        mode_ = static_cast<Mode>(std::clamp(stop, 0, 2));
+        prefs_.workspaceDial = static_cast<int>(mode_);
+        layoutDirty_ = true;
+    }
     void debugSelectWorldSolid(int i);  // test hook for headless screenshots
     void debugSelectEntity(int i);
     void debugPlaceEntity(const std::string& cls);

@@ -78,6 +78,7 @@ struct Options {
     bool quad = false;
     bool ui = false;  // capture the full docked UI, not just a viewport
     bool pro = false;
+    int dial = -1;
     bool shotOverview = false;  // reframe 3D cam on the whole map for doc shots
     int selectSolid = -1;
     int selectEnt = -1;
@@ -135,6 +136,7 @@ Options parseArgs(int argc, char** argv) {
         if (a == "--screenshot") o.screenshotPath = next("");
         else if (a == "--ui") o.ui = true;
         else if (a == "--pro") o.pro = true;
+        else if (a == "--dial") o.dial = std::atoi(next("1").c_str());
         else if (a == "--select") o.selectSolid = std::atoi(next("0").c_str());
         else if (a == "--select-ent") o.selectEnt = std::atoi(next("0").c_str());
         else if (a == "--sample-map") o.sampleMap = true;
@@ -190,6 +192,7 @@ int runHeadlessScreenshot(const Options& opt, GLFWwindow* window, float uiScale)
     if (!editor.init(window)) return 2;
     editor.attachSettings(pb::Settings::load(), uiScale);
     if (opt.pro) editor.setProMode();
+    if (opt.dial >= 0) editor.setDial(opt.dial);
     if (opt.noDecompile) editor.debugNoDecompile();
     if (!opt.mapPath.empty() && !editor.openMap(opt.mapPath))
         PB_WARN("map did not load; screenshot will show an empty scene");
@@ -384,6 +387,7 @@ int main(int argc, char** argv) {
     }
     editor.attachSettings(std::move(settings), uiScale);
     if (opt.pro) editor.setProMode();
+    if (opt.dial >= 0) editor.setDial(opt.dial);
     if (opt.noDecompile) editor.debugNoDecompile();
     if (!opt.mapPath.empty()) editor.openMap(opt.mapPath);
 
