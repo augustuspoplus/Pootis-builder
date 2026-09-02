@@ -3198,9 +3198,25 @@ void Editor::finalizeRoad() {
     path.push_back(roadPts_.back());
 
     const float hw = roadWidth_ * 0.5f, ht = roadThick_ * 0.5f;
+
+    // Per-vertex tangents, so each segment's end caps are mitred to the
+    // bisector of the two directions meeting there — no gaps on the outside
+    // of a bend.
+    const int N = (int)path.size();
+    std::vector<glm::vec3> tan(N, glm::vec3(1, 0, 0));
+    for (int i = 0; i < N; ++i) {
+        glm::vec3 in = i > 0 ? path[i] - path[i - 1] : glm::vec3(0);
+        glm::vec3 out = i + 1 < N ? path[i + 1] - path[i] : glm::vec3(0);
+        if (glm::length(in) > 1e-4f) in = glm::normalize(in);
+        if (glm::length(out) > 1e-4f) out = glm::normalize(out);
+        glm::vec3 t = in + out;
+        tan[i] = glm::length(t) > 1e-4f ? glm::normalize(t)
+                 : (glm::length(out) > 1e-4f ? out : in);
+    }
+
     std::vector<map::Solid> segs;
-    for (size_t i = 0; i + 1 < path.size(); ++i) {
-        glm::vec3 a = path[i], b = path[i + 1];
+    for (int i = 0; i + 1 < N; ++i) {
+        const glm::vec3 a = path[i], b = path[i + 1];
         glm::vec3 f = b - a;
         const float len = glm::length(f);
         if (len < 1.0f) continue;
@@ -3208,10 +3224,14 @@ void Editor::finalizeRoad() {
         glm::vec3 rt = glm::normalize(glm::cross(f, glm::vec3(0, 0, 1)));
         if (!std::isfinite(rt.x)) rt = glm::vec3(1, 0, 0);
         glm::vec3 up = glm::normalize(glm::cross(rt, f));
-        const glm::vec3 c = 0.5f * (a + b) - up * ht;  // top of road at the path
-        const float hl = len * 0.5f + 1.0f;            // overlap neighbours a hair
+        const glm::vec3 c = 0.5f * (a + b) - up * ht;  // road top at the path
+        // Mitred end caps: outward normals along the bisector tangents.
+        glm::vec3 nEnd = tan[i + 1];
+        glm::vec3 nStart = -tan[i];
+        if (glm::dot(nEnd, f) < 0.1f) nEnd = f;      // guard against sharp folds
+        if (glm::dot(nStart, -f) < 0.1f) nStart = -f;
         std::vector<std::pair<glm::vec3, float>> planes = {
-            {f, glm::dot(f, c) + hl},   {-f, glm::dot(-f, c) + hl},
+            {nEnd, glm::dot(nEnd, b)}, {nStart, glm::dot(nStart, a)},
             {rt, glm::dot(rt, c) + hw}, {-rt, glm::dot(-rt, c) + hw},
             {up, glm::dot(up, c) + ht}, {-up, glm::dot(-up, c) + ht}};
         map::Solid seg = map::Solid::fromPlanes(planes, "dev/dev_measuregeneric01b");
@@ -6171,6 +6191,10 @@ void Editor::drawSimpleEntities() {
 
 void Editor::drawSelectionPanel() {
     ImGui::Begin("Selection");
+    // Guaranteed scroll region — the entity-properties view can be much taller
+    // than the panel and the plain window wasn't always giving a scrollbar.
+    ImGui::BeginChild("##selbody", ImVec2(0, 0), ImGuiChildFlags_None,
+                      ImGuiWindowFlags_AlwaysVerticalScrollbar);
     if (!placing_.empty()) {
         const char* pn = placing_.rfind("@ent:", 0) == 0 ? placing_.c_str() + 5
                                                          : placing_.c_str();
@@ -6268,11 +6292,15 @@ void Editor::drawSelectionPanel() {
                            "started.");
         ImGui::PopStyleColor();
     }
+    ImGui::Dummy(ImVec2(0, pb::ui::dp(12.0f)));  // breathing room at the bottom
+    ImGui::EndChild();
     ImGui::End();
 }
 
 void Editor::drawProperties() {
     ImGui::Begin("Properties");
+    ImGui::BeginChild("##propbody", ImVec2(0, 0), ImGuiChildFlags_None,
+                      ImGuiWindowFlags_AlwaysVerticalScrollbar);
     if (tool_ == Tool::Texture && hasDoc())
         drawFaceEditPanel();
     else if (selectedEntity_ >= 0 &&
@@ -6282,6 +6310,8 @@ void Editor::drawProperties() {
         drawBrushInspector();
     else
         ImGui::TextDisabled("Load a map to edit brushes.");
+    ImGui::Dummy(ImVec2(0, pb::ui::dp(12.0f)));
+    ImGui::EndChild();
     ImGui::End();
 }
 

@@ -95,7 +95,10 @@ public:
         doc_.newBlank("roadtest");
         history_.reset(doc_);
         showWelcome_ = false;
-        roadPts_ = {{-512, -256, 0}, {-128, 256, 0}, {256, -128, 0}, {640, 320, 0}};
+        // A sharp U-turn — the case where segment gaps used to show.
+        roadPts_ = {{-600, 400, 96}, {-200, 400, 96}, {100, 250, 96},
+                    {200, 0, 96},    {100, -250, 96}, {-200, -400, 96},
+                    {-600, -400, 96}};
         finalizeRoad();
         frameAllViews();
     }
