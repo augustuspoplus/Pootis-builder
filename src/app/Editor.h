@@ -51,6 +51,11 @@ public:
         if (!doc_.active()) { doc_.newBlank("kittest"); history_.reset(doc_); }
         placePiece(piece, glm::vec3(0)); showWelcome_ = false; frameAllViews();
     }
+    void debugPerfProbe() {  // time a few consecutive edits on the loaded map
+        if (!doc_.active()) return;
+        for (int i = 0; i < 4; ++i)
+            placePiece("Floor", glm::vec3(i * 256.0f - 4000.0f, -3000.0f, 96.0f));
+    }
     void debugArmKit(const std::string& piece) {  // arm + force the ghost preview
         if (!doc_.active()) { doc_.newBlank("kittest"); history_.reset(doc_); }
         placing_ = piece; debugPreviewAtCenter_ = true; showWelcome_ = false;
@@ -261,6 +266,21 @@ private:
     SceneRenderer renderer_;
     RenderSettings settings_;
     MeshBuildOptions meshOpts_;
+
+    // Performance. perfMode_: 0 auto, 1 quality, 2 fast. In fast (or auto on a
+    // heavy map) the doc rebuild skips re-baking prop models and re-uses a
+    // cached blob of their geometry — placing a wall no longer walks 500 MDLs.
+    int perfMode_ = 0;
+    struct PropBlob {
+        std::vector<bsp::WorldVertex> verts;
+        std::vector<uint32_t> indices;          // 0-based within `verts`
+        std::vector<bsp::DrawBatch> batches;    // firstIndex 0-based within `indices`
+    };
+    PropBlob propBlob_;
+    size_t propBlobKey_ = 0;
+    double lastEditTime_ = 0.0;   // for coalescing rapid edits
+    bool heavyDoc() const;        // doc is big enough to auto-throttle
+    bool fastEdit() const;        // perfMode_==2 || (auto && heavyDoc)
 
     std::array<ViewPanel, 4> views_;
     // [0]=3D always on; [1..3]=Top/Front/Side, opened on demand.

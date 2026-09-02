@@ -1,5 +1,6 @@
 #pragma once
 #include <imgui.h>
+#include <string>
 
 // Shared visual language for the editor chrome: the warm-neutral dark palette
 // from the approved UI direction, plus font handles and small widgets.
@@ -35,6 +36,10 @@ extern ImFont* fontMono;    // 14.5px mono   — coordinates, keycaps
 
 // The UI scale currently in effect (set by applyStyle). 1.0 = 100%.
 extern float g_scale;
+
+// GPU / driver strings, filled once at startup (shown in Options).
+extern std::string g_gpuRenderer;
+extern std::string g_gpuVersion;
 
 // `px` device-independent pixels scaled to the active UI scale.
 inline float dp(float px) { return px * g_scale; }

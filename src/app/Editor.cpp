@@ -2,8 +2,10 @@
 
 #include <algorithm>
 #include <cstdlib>
+#include <chrono>
 #include <cstring>
 #include <filesystem>
+#include <functional>
 #include <initializer_list>
 #include <unordered_map>
 #include <utility>
@@ -104,6 +106,7 @@ void Editor::applyPrefs() {
     settings_.shadeMode = static_cast<ShadeMode>(std::clamp(prefs_.shadeMode, 0, 3));
     gizmoSize_ = std::clamp(prefs_.gizmoSize, 0.08f, 0.4f);
     gizmoStyle_ = std::clamp(prefs_.gizmoStyle, 0, 2);
+    perfMode_ = std::clamp(prefs_.perfMode, 0, 2);
     settings_.showGrid = prefs_.showGrid;
     settings_.showProps = prefs_.showProps;
     settings_.showPointEntities = prefs_.showPointEntities;
@@ -226,14 +229,81 @@ void Editor::pollDecompile() {
     }
 }
 
+bool Editor::heavyDoc() const {
+    // Rough: a decompiled map or anything with a lot of geometry / props.
+    return doc_.worldSolids().size() + doc_.entities().size() > 900 ||
+           mesh_.indices.size() > 600000 || mesh_.props.size() > 120;
+}
+bool Editor::fastEdit() const {
+    return perfMode_ == 2 || (perfMode_ == 0 && heavyDoc());
+}
+
+namespace {
+size_t hashProps(const std::vector<bsp::PropInstance>& props) {
+    size_t h = 1469598103934665603ull;
+    auto mix = [&](size_t v) { h = (h ^ v) * 1099511628211ull; };
+    for (const auto& p : props) {
+        mix(std::hash<std::string>{}(p.model));
+        mix(std::hash<float>{}(p.pos.x) ^ (std::hash<float>{}(p.pos.y) << 1) ^
+            (std::hash<float>{}(p.pos.z) << 2));
+        mix(std::hash<float>{}(p.anglesPYR.x + p.anglesPYR.y * 7.0f +
+                               p.anglesPYR.z * 53.0f + p.scale * 131.0f));
+    }
+    return h;
+}
+}  // namespace
+
 void Editor::buildAndUpload(const MeshBuildOptions& opts) {
+    const auto t0 = std::chrono::steady_clock::now();
     if (doc_.active()) {
         auto modelForClass = [this](const std::string& cls) -> std::string {
             const fgd::EntityClass* ec = fgd_.flattened(cls);
             return ec ? ec->studioModel : std::string();
         };
         mesh_ = map::buildDocMesh(doc_, materials_, modelForClass);
-        if (opts.bakeProps) model::bakePropModels(mesh_, sourceFs_);
+        // Fast mode on a prop-dense map: don't bake model geometry at all
+        // (they draw as their bounding boxes). Turns an 18 s decompile bake
+        // into ~1 s; edits stay instant either way via the cache below.
+        const bool bakeHere = opts.bakeProps && !mesh_.props.empty() &&
+                              !(perfMode_ == 2 && mesh_.props.size() > 200);
+        if (bakeHere) {
+            const size_t key = hashProps(mesh_.props);
+            if (key == propBlobKey_ && !propBlob_.verts.empty()) {
+                // Props unchanged — splice the cached geometry back in instead
+                // of re-transforming every model. This is the big edit-latency
+                // win on decompiled maps.
+                const uint32_t vbase = (uint32_t)mesh_.vertices.size();
+                mesh_.vertices.insert(mesh_.vertices.end(),
+                                      propBlob_.verts.begin(), propBlob_.verts.end());
+                for (const auto& b : propBlob_.batches) {
+                    bsp::DrawBatch nb = b;
+                    nb.firstIndex = (uint32_t)mesh_.indices.size();
+                    for (uint32_t k = 0; k < b.indexCount; ++k)
+                        mesh_.indices.push_back(vbase +
+                            propBlob_.indices[b.firstIndex + k]);
+                    mesh_.batches.push_back(std::move(nb));
+                }
+                for (auto& p : mesh_.props) p.baked = true;
+            } else {
+                // First time, or props changed — do the real bake and snapshot
+                // the appended range so the next edit is cheap.
+                const uint32_t v0 = (uint32_t)mesh_.vertices.size();
+                const uint32_t i0 = (uint32_t)mesh_.indices.size();
+                const size_t b0 = mesh_.batches.size();
+                model::bakePropModels(mesh_, sourceFs_);
+                propBlob_ = {};
+                propBlob_.verts.assign(mesh_.vertices.begin() + v0, mesh_.vertices.end());
+                propBlob_.indices.reserve(mesh_.indices.size() - i0);
+                for (size_t k = i0; k < mesh_.indices.size(); ++k)
+                    propBlob_.indices.push_back(mesh_.indices[k] - v0);
+                for (size_t k = b0; k < mesh_.batches.size(); ++k) {
+                    bsp::DrawBatch cb = mesh_.batches[k];
+                    cb.firstIndex -= i0;
+                    propBlob_.batches.push_back(std::move(cb));
+                }
+                propBlobKey_ = key;
+            }
+        }
     } else {
         mesh_ = buildWorldMesh(bsp_, opts);
         if (opts.bakeProps) model::bakePropModels(mesh_, sourceFs_);
@@ -267,8 +337,13 @@ void Editor::buildAndUpload(const MeshBuildOptions& opts) {
             if (shown++ < 12) PB_WARN("no texture for material: %s", b.material.c_str());
         }
     }
-    PB_INFO("materials: %d textured, %d missing (of %zu)", textured, missing,
-            mesh_.batches.size());
+    const double ms = std::chrono::duration<double, std::milli>(
+                          std::chrono::steady_clock::now() - t0)
+                          .count();
+    if (ms > 30.0)
+        PB_INFO("mesh rebuild: %.0f ms  (%zu verts, %zu tris, %s)", ms,
+                mesh_.vertices.size(), mesh_.indices.size() / 3,
+                fastEdit() ? "fast" : "quality");
 }
 
 void Editor::frameAllViews() {
@@ -423,14 +498,20 @@ void Editor::frame() {
 
     // Live preview while dragging (gizmo, bbox handles, body-move, sub-object).
     // History is recorded once on release.
-    if (docMeshDirty_ &&
-        (gizmoUsing_ || resizeHandle_ >= 0 || moveDrag_ != 0 || subDragging_)) {
-        // On big maps skip the prop re-bake each drag frame — the props snap
-        // back on release. Small maps rebuild everything (imperceptible).
-        MeshBuildOptions o = meshOpts_;
-        if (mesh_.props.size() > 40) o.bakeProps = false;
-        buildAndUpload(o);
-        rebuildSelectionWire();
+    const bool dragging =
+        gizmoUsing_ || resizeHandle_ >= 0 || moveDrag_ != 0 || subDragging_;
+    if (docMeshDirty_ && dragging) {
+        // Heavy map: the selection wireframe follows the cursor every frame, but
+        // the solid mesh only rebuilds on release — a full rebuild per frame is
+        // what makes big maps feel stuck.
+        if (fastEdit()) {
+            rebuildSelectionWire();
+        } else {
+            MeshBuildOptions o = meshOpts_;
+            if (mesh_.props.size() > 40) o.bakeProps = false;
+            buildAndUpload(o);
+            rebuildSelectionWire();
+        }
     }
 }
 
@@ -486,6 +567,10 @@ void Editor::drawTopBar() {
                       ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
     ImGui::PopStyleVar();
 
+    // Narrow window: drop the wordmark, collapse file buttons + 2D toggles to
+    // icons so Publish / Build & play never get clipped.
+    const bool narrow = ImGui::GetWindowWidth() < dp(1580.0f);
+
     ImGui::SetCursorPosY((barH - row) * 0.5f);
 
     // Brand
@@ -494,25 +579,31 @@ void Editor::drawTopBar() {
     ImGui::TextUnformatted(ICON_FA_CUBES);
     if (fontBig) ImGui::PopFont();
     ImGui::PopStyleColor();
-    ImGui::SameLine(0, dp(8.0f));
-    if (fontUiMed) ImGui::PushFont(fontUiMed);
-    ImGui::SetCursorPosY((barH - ImGui::GetTextLineHeight()) * 0.5f);
-    ImGui::TextUnformatted("Pootis Builder");
-    if (fontUiMed) ImGui::PopFont();
+    if (!narrow) {
+        ImGui::SameLine(0, dp(8.0f));
+        if (fontUiMed) ImGui::PushFont(fontUiMed);
+        ImGui::SetCursorPosY((barH - ImGui::GetTextLineHeight()) * 0.5f);
+        ImGui::TextUnformatted("Pootis Builder");
+        if (fontUiMed) ImGui::PopFont();
+    }
 
-    ImGui::SameLine(0, dp(18.0f));
+    ImGui::SameLine(0, dp(narrow ? 12.0f : 18.0f));
     ImGui::SetCursorPosY((barH - row) * 0.5f);
-    if (toolButton(ICON_FA_FOLDER_OPEN "  Open", false, "Open a .bsp  (Ctrl+O)"))
+    if (toolButton(narrow ? ICON_FA_FOLDER_OPEN : ICON_FA_FOLDER_OPEN "  Open",
+                   false, "Open a .bsp  (Ctrl+O)"))
         promptOpenMap();
     ImGui::SameLine(0, dp(2.0f));
-    if (toolButton(ICON_FA_DOWNLOAD "  Import")) ImGui::OpenPopup("importMenu");
+    if (toolButton(narrow ? ICON_FA_DOWNLOAD : ICON_FA_DOWNLOAD "  Import", false,
+                   narrow ? "Import" : nullptr))
+        ImGui::OpenPopup("importMenu");
     if (ImGui::BeginPopup("importMenu")) {
         if (ImGui::MenuItem(ICON_FA_MAP "  Map  (.bsp / .vmf)")) promptOpenMap();
         if (ImGui::MenuItem(ICON_FA_CUBE "  3D model  (.obj)")) openModelImport();
         ImGui::EndPopup();
     }
     ImGui::SameLine(0, dp(2.0f));
-    if (toolButton(ICON_FA_FLOPPY_DISK "  Save", false,
+    if (toolButton(narrow ? ICON_FA_FLOPPY_DISK : ICON_FA_FLOPPY_DISK "  Save",
+                   false,
                    "Save the map to .vmf  (Ctrl+S,  Ctrl+Shift+S = Save As)")) {
         if (hasDoc())
             saveMap(ImGui::GetIO().KeyShift);
@@ -534,17 +625,32 @@ void Editor::drawTopBar() {
     }
 
     // 2D view toggles — 3D is always up; Top / Front / Side open on demand.
+    // Narrow: fold into one "2D ▾" popup.
     ImGui::SameLine(0, dp(14.0f));
     ImGui::SetCursorPosY((barH - row) * 0.5f);
     {
         struct V { int idx; const char* lbl; };
         static const V vs[] = {{1, "Top"}, {2, "Front"}, {3, "Side"}};
-        for (int k = 0; k < 3; ++k) {
-            if (k) ImGui::SameLine(0, dp(2.0f));
-            if (toolButton(vs[k].lbl, viewOpen_[vs[k].idx],
-                           "Show / hide this 2D view")) {
-                viewOpen_[vs[k].idx] = !viewOpen_[vs[k].idx];
-                if (viewOpen_[vs[k].idx]) ImGui::SetWindowFocus(views_[vs[k].idx].title);
+        const bool anyOpen = viewOpen_[1] || viewOpen_[2] || viewOpen_[3];
+        auto toggleView = [&](int idx) {
+            viewOpen_[idx] = !viewOpen_[idx];
+            if (viewOpen_[idx]) ImGui::SetWindowFocus(views_[idx].title);
+        };
+        if (narrow) {
+            if (toolButton(ICON_FA_BORDER_ALL "  2D", anyOpen, "Open a 2D view"))
+                ImGui::OpenPopup("##views2d");
+            if (ImGui::BeginPopup("##views2d")) {
+                for (int k = 0; k < 3; ++k)
+                    if (ImGui::MenuItem(vs[k].lbl, nullptr, viewOpen_[vs[k].idx]))
+                        toggleView(vs[k].idx);
+                ImGui::EndPopup();
+            }
+        } else {
+            for (int k = 0; k < 3; ++k) {
+                if (k) ImGui::SameLine(0, dp(2.0f));
+                if (toolButton(vs[k].lbl, viewOpen_[vs[k].idx],
+                               "Show / hide this 2D view"))
+                    toggleView(vs[k].idx);
             }
         }
     }
@@ -580,25 +686,40 @@ void Editor::drawTopBar() {
         }
     }
 
-    // Right cluster — measure the buttons so it never overlaps the left side.
+    // Right cluster. Measure it; if it won't fit, drop the labels on the
+    // lower-priority buttons so Publish and Build & play always stay whole.
     char gridLabel[48];
     std::snprintf(gridLabel, sizeof(gridLabel), ICON_FA_TABLE_CELLS "  Grid %d", gridSize_);
     const char* snapLabel = snap_ ? ICON_FA_CHECK "  Snap" : ICON_FA_XMARK "  Snap";
     auto bw = [&](const char* s) {
+        // CalcTextSize under-reports icon-font runs (the FA merge advance is
+        // tuned wider than the metric), so pad generously.
         return ImGui::CalcTextSize(s, nullptr, true).x +
-               ImGui::GetStyle().FramePadding.x * 2.0f;
+               ImGui::GetStyle().FramePadding.x * 2.0f + dp(14.0f);
     };
     const float gap = dp(2.0f), gap2 = dp(8.0f);
-    const float rightW = bw(gridLabel) + gap + bw(snapLabel) + gap + bw(ICON_FA_BARS) +
-                         gap2 + bw(ICON_FA_CLOUD_ARROW_UP "  Publish") + gap2 +
-                         bw(ICON_FA_PLAY "  Build & play") + dp(6.0f);
+    const float padX = ImGui::GetStyle().WindowPadding.x;
     ImGui::SameLine();
     const float curX = ImGui::GetCursorPosX();
+    const float avail = ImGui::GetWindowWidth() - curX - dp(12.0f);
+
+    auto clusterW = [&](bool compact) {
+        const char* g = compact ? ICON_FA_TABLE_CELLS : gridLabel;
+        const char* s = compact ? (snap_ ? ICON_FA_CHECK : ICON_FA_XMARK) : snapLabel;
+        const char* pub = compact ? ICON_FA_CLOUD_ARROW_UP
+                                  : ICON_FA_CLOUD_ARROW_UP "  Publish";
+        return bw(g) + gap + bw(s) + gap + bw(ICON_FA_GEAR) + gap + bw(ICON_FA_BARS) +
+               gap2 + bw(pub) + gap2 + bw(ICON_FA_PLAY "  Build & play") + padX +
+               dp(28.0f);
+    };
+    const bool compact = clusterW(false) > avail;
     ImGui::SetCursorPosX(std::max(curX + dp(12.0f),
-                                  ImGui::GetWindowWidth() - rightW));
+                                  ImGui::GetWindowWidth() - clusterW(compact)));
     ImGui::SetCursorPosY((barH - row) * 0.5f);
 
-    if (toolButton(gridLabel)) ImGui::OpenPopup("##gridpop");
+    if (toolButton(compact ? ICON_FA_TABLE_CELLS : gridLabel,
+                   false, compact ? "Grid size" : nullptr))
+        ImGui::OpenPopup("##gridpop");
     if (ImGui::BeginPopup("##gridpop")) {
         for (int g : {1, 2, 4, 8, 16, 32, 64, 128, 256, 512}) {
             char b[16];
@@ -608,18 +729,21 @@ void Editor::drawTopBar() {
         ImGui::EndPopup();
     }
     ImGui::SameLine(0, gap);
-    if (toolButton(snapLabel, snap_)) snap_ = !snap_;
+    if (toolButton(compact ? (snap_ ? ICON_FA_CHECK : ICON_FA_XMARK) : snapLabel,
+                   snap_, "Snap to grid"))
+        snap_ = !snap_;
 
     ImGui::SameLine(0, gap);
     if (toolButton(ICON_FA_GEAR, showSettings_, "Options")) showSettings_ = !showSettings_;
 
     ImGui::SameLine(0, gap);
-    if (toolButton(ICON_FA_BARS)) ImGui::OpenPopup("##viewmenu");
+    if (toolButton(ICON_FA_BARS, false, "View menu")) ImGui::OpenPopup("##viewmenu");
     drawViewMenuPopup();
 
     ImGui::SameLine(0, gap2);
-    if (toolButton(ICON_FA_CLOUD_ARROW_UP "  Publish", showWorkshop_,
-                   "Publish the map to the Steam Workshop")) {
+    if (toolButton(compact ? ICON_FA_CLOUD_ARROW_UP
+                           : ICON_FA_CLOUD_ARROW_UP "  Publish",
+                   showWorkshop_, "Publish the map to the Steam Workshop")) {
         showWorkshop_ = !showWorkshop_;
         if (showWorkshop_ && wsItem_.title.empty() && hasDoc())
             wsItem_.title = doc_.name();
@@ -3773,6 +3897,46 @@ void Editor::drawSettingsWindow() {
             gizmoStyle_ = prefs_.gizmoStyle;
             dirty = true;
         }
+    }
+
+    if (ImGui::CollapsingHeader("Performance", ImGuiTreeNodeFlags_DefaultOpen)) {
+        const char* modes[] = {"Auto", "Quality", "Fast"};
+        ImGui::SetNextItemWidth(dp(200));
+        if (ImGui::Combo("Editing speed", &prefs_.perfMode, modes, 3)) {
+            perfMode_ = prefs_.perfMode;
+            dirty = true;
+        }
+        ImGui::PushStyleColor(ImGuiCol_Text, col::faint);
+        ImGui::TextWrapped(
+            prefs_.perfMode == 2
+                ? "Fast: on every map, skip the model re-bake and the live mesh "
+                  "preview while dragging. Snaps back on release."
+            : prefs_.perfMode == 1
+                ? "Quality: always rebuild everything on every edit. Fine on small "
+                  "maps, slow on decompiled ones."
+                : "Auto: full quality on small maps, switches to Fast behaviour on "
+                  "big / decompiled maps so adding a piece stays responsive.");
+        if (hasDoc())
+            ImGui::Text("This map: %zu brushes, %zu entities, %zu props%s",
+                        doc_.worldSolids().size(), doc_.entities().size(),
+                        mesh_.props.size(),
+                        fastEdit() ? "  —  throttling on" : "");
+        ImGui::PopStyleColor();
+
+        ImGui::Dummy(ImVec2(0, 4));
+        ImGui::TextUnformatted("Graphics");
+        ImGui::PushStyleColor(ImGuiCol_Text, col::faint);
+        ImGui::TextWrapped("Renderer: %s", pb::ui::g_gpuRenderer.empty()
+                                               ? "?"
+                                               : pb::ui::g_gpuRenderer.c_str());
+        if (!pb::ui::g_gpuVersion.empty())
+            ImGui::TextWrapped("Driver: %s", pb::ui::g_gpuVersion.c_str());
+        ImGui::TextWrapped(
+            "Pootis Builder asks laptops to use the discrete GPU. If this still "
+            "shows an integrated chip (Intel UHD / AMD Radeon Graphics), force "
+            "\"High performance\" for PootisBuilder.exe in Windows Graphics "
+            "settings, or in the NVIDIA / AMD control panel.");
+        ImGui::PopStyleColor();
     }
 
     if (ImGui::CollapsingHeader("Advanced")) {

@@ -32,6 +32,7 @@ struct Settings {
     // Advanced
     bool autoDecompile = true; // decompile .bsp on open
     bool bakeProps = true;     // render prop_static models
+    int perfMode = 0;          // 0 auto, 1 quality, 2 fast (heavy-map throttle)
     std::string tf2Dir;        // override for the TF2 install
 
     std::vector<std::string> recent;  // most-recent first, capped

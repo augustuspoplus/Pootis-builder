@@ -22,6 +22,17 @@
 #include "core/File.h"
 #include "core/Log.h"
 
+// Ask a hybrid-graphics laptop to run us on the discrete GPU. Both vendors read
+// an exported symbol from the .exe at process start; there is no runtime OpenGL
+// equivalent. An mapping editor wants the fast adapter — the integrated one can
+// be an order of magnitude slower on a big lightmapped scene.
+#if defined(_WIN32)
+extern "C" {
+__declspec(dllexport) unsigned long NvOptimusEnablement = 1;
+__declspec(dllexport) int AmdPowerXpressRequestHighPerformance = 1;
+}
+#endif
+
 namespace {
 
 void glfwErrorCallback(int code, const char* desc) {
@@ -96,6 +107,7 @@ struct Options {
     std::string dumpFgdClass;
     std::string importObjPath;
     std::string placeEnt, placeKit, armKit;
+    bool perfProbe = false;
     std::string saveVmfPath;
     int width = 1600;
     int height = 950;
@@ -151,6 +163,7 @@ Options parseArgs(int argc, char** argv) {
         else if (a == "--place-ent") o.placeEnt = next("");
         else if (a == "--place-kit") o.placeKit = next("");
         else if (a == "--arm-kit") o.armKit = next("");
+        else if (a == "--perf-probe") o.perfProbe = true;
         else if (a == "--save-vmf") o.saveVmfPath = next("");
         else if (a == "--view") {
             const std::string v = next("persp");
@@ -178,6 +191,7 @@ int runHeadlessScreenshot(const Options& opt, GLFWwindow* window, float uiScale)
     if (!opt.placeEnt.empty()) editor.debugPlaceEntity(opt.placeEnt);
     if (!opt.placeKit.empty()) editor.debugPlaceKit(opt.placeKit);
     if (!opt.armKit.empty()) editor.debugArmKit(opt.armKit);
+    if (opt.perfProbe) editor.debugPerfProbe();
     if (!opt.placePrefabPath.empty()) editor.debugPlacePrefab(opt.placePrefabPath);
     if (opt.selectSolid >= 0) editor.debugSelectWorldSolid(opt.selectSolid);
     if (opt.selectEnt >= 0) editor.debugSelectEntity(opt.selectEnt);
@@ -298,8 +312,14 @@ int main(int argc, char** argv) {
         PB_ERROR("gladLoadGL failed");
         return 1;
     }
-    PB_INFO("OpenGL %d.%d — %s", GLAD_VERSION_MAJOR(glv), GLAD_VERSION_MINOR(glv),
-            reinterpret_cast<const char*>(glGetString(GL_RENDERER)));
+    {
+        const char* rend = reinterpret_cast<const char*>(glGetString(GL_RENDERER));
+        const char* vers = reinterpret_cast<const char*>(glGetString(GL_VERSION));
+        pb::ui::g_gpuRenderer = rend ? rend : "unknown";
+        pb::ui::g_gpuVersion = vers ? vers : "";
+        PB_INFO("OpenGL %d.%d — %s", GLAD_VERSION_MAJOR(glv), GLAD_VERSION_MINOR(glv),
+                pb::ui::g_gpuRenderer.c_str());
+    }
 
     pb::Settings settings = pb::Settings::load();
     float uiScale = settings.uiScale;
