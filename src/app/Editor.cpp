@@ -5880,6 +5880,19 @@ void Editor::drawBrushInspector() {
         ImGui::SetTooltip("Tip the object onto its side (rotate 90 about X).\n"
                           "Keyboard:  [ and ]  rotate about Z in 15 steps.");
 
+    if (ImGui::Button(ICON_FA_BORDER_ALL "  Snap to grid", ImVec2(-1, 0))) {
+        int moved = 0;
+        for (const auto& r : selection_)
+            if (map::Solid* s = doc_.resolve(r)) {
+                const glm::vec3 c = s->center();
+                const glm::vec3 g = snapVec(c);
+                if (glm::length(g - c) > 0.01f) { s->translate(g - c); ++moved; }
+            }
+        if (moved) { afterEdit("Snap to grid"); status_ = "Snapped to grid"; }
+    }
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Nudge each brush so its centre lands on the grid.");
+
     ImGui::Dummy(ImVec2(0, 8));
     if (ImGui::Button(ICON_FA_CLONE "  Duplicate", ImVec2(-1, 0)))
         duplicateSelection();
@@ -8180,6 +8193,26 @@ void Editor::drawSelectionDims(ViewPanel& p, float aspect, ImDrawList* dl) {
     dl->AddText(ImVec2((x0 + x1) * 0.5f - ImGui::CalcTextSize(b1).x * 0.5f, y0 - 16), c, b1);
     dl->AddText(ImVec2(x1 + 4, (y0 + y1) * 0.5f - 7), c, b2);
     dl->AddRect(ImVec2(x0, y0), ImVec2(x1, y1), IM_COL32(255, 210, 140, 90));
+
+    // Live readout while a move/resize is in progress: centre + (for a move) the
+    // delta from where it started.
+    const bool moving = moveDrag_ != 0 || mx_.op == 1;
+    if (moving || resizeHandle_ >= 0) {
+        const glm::vec3 ctr = 0.5f * (mn + mx);
+        char line[80];
+        if (moving && !resizeSnap_.empty()) {
+            glm::vec3 s0c(0);
+            for (const auto& s : resizeSnap_) s0c += s.center();
+            s0c /= float(resizeSnap_.size());
+            const glm::vec3 d = ctr - s0c;
+            std::snprintf(line, sizeof(line), "d %+.0f %+.0f %+.0f", d.x, d.y, d.z);
+        } else {
+            std::snprintf(line, sizeof(line), "%.0f  %.0f  %.0f", ctr.x, ctr.y, ctr.z);
+        }
+        dl->AddRectFilled(ImVec2(x0, y1 + 4), ImVec2(x0 + ImGui::CalcTextSize(line).x + 8,
+                          y1 + 20), IM_COL32(20, 22, 26, 220), 3.0f);
+        dl->AddText(ImVec2(x0 + 4, y1 + 5), IM_COL32(255, 235, 200, 255), line);
+    }
 
     // Hammer-style resize handles (Select tool only).
     if (tool_ != Tool::Select) return;
