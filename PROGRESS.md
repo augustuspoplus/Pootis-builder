@@ -1,7 +1,25 @@
 # Progress log (autonomous overnight build)
 
-Newest first. See ROADMAP.md for the plan. Q1 = auto-decompile .bsp on open.
-Q2 = Simple-mode kit builds new maps (prioritised). Also doing section G (QoL).
+Newest first. ROADMAP.md milestones A–H are spent; **PLAN.md** is the live plan
+(five gated phases to 1.0 + the UI plan).
+
+## Phases + performance batch
+- **Perf: baked-prop cache** (dcdcce3). Every edit re-baked every prop model —
+  pl_upward (1748 props → 1.5M verts) was ~18 s per placement. `buildAndUpload`
+  now snapshots the baked-prop geometry into a blob keyed by the prop list and
+  splices it back when props are unchanged → **~18 s → <30 ms**. Options ▸
+  Performance: Auto / Quality / Fast (Fast shows props as boxes on dense maps,
+  cutting the decompile bake to ~1 s). GL renderer/driver shown; laptop
+  discrete-GPU exports in main.cpp. Top bar now collapses gracefully below
+  ~1580 dp so "Build & play" never clips.
+- **Auto sky-seal** (ef2e16b). One-click "Seal map with sky" under the MAP
+  CHECKLIST; the seal piece re-fits (removes the old shell) on re-run; the
+  checklist row checks for real `toolsskybox` brushwork.
+- **Phase 1 — brush-entity editing** (93c9917). Delete / duplicate work on
+  individual entity brushes; `untieSelectionToWorld()`; "part of <class>" +
+  "Select all of it" in the Selection panel; the "editing is limited" message
+  is gone. Transform already worked. Remaining P1: class-picker for tie,
+  cross-entity grouping, sub-object on entity brushes, clip/hollow/carve.
 
 ## User-requested batch (editing UX)
 - **Reliable card drag + drop preview** (cb51c56): every Build card, Things

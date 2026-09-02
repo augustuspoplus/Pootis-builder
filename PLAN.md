@@ -26,14 +26,17 @@ https://claude.ai/code/artifact/b0d70464-a7af-46ab-bda2-cd76ab3cb6e5
 
 ## The five phases
 
-### Phase 1 — Edit any brush, anywhere
+### Phase 1 — Edit any brush, anywhere  (in progress)
 Real maps are 60%+ brush entities; right now they're second-class.
-- Mixed world + entity brush selections behave identically for transform / delete /
-  duplicate / clip / hollow / carve.
-- Grouping + visgroups work across entity boundaries.
-- Vertex/edge/face editing works on an entity's brush.
-- One-key tie-to-entity / move-to-world with a class picker; keyvalues + I/O survive.
-- Remove the "brush-entity editing is limited" message — its absence = phase shipped.
+- [x] transform (gizmo / 2D handles / rotate) on entity brushes — already worked.
+- [x] delete removes individual entity brushes, drops emptied entities.
+- [x] duplicate includes entity brushes (copy into world).
+- [x] `untieSelectionToWorld()` + "part of <class>" identity + "Select all of it";
+      "editing is limited" message removed.
+- [ ] tie-to-entity with a class picker (exists; needs the picker UI in Simple).
+- [ ] grouping + visgroups across entity boundaries.
+- [ ] vertex/edge/face editing verified + polished on an entity's brush.
+- [ ] clip / hollow / carve on entity brushes.
 - **Done when:** open decompiled `cp_process_final`, move a `func_detail` wall, reshape a
   trigger, retie a brush — no dead ends.
 
