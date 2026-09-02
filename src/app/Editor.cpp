@@ -4704,9 +4704,13 @@ void Editor::drawBuildKit() {
     ImGui::PopStyleColor();
     ImGui::Dummy(ImVec2(0, 4));
 
+    // A debug/one-shot hook: kitTab_ = N selects the Nth tab next frame.
+    auto tabSel = [&](int n) {
+        return kitTab_ == n ? ImGuiTabItemFlags_SetSelected : 0;
+    };
     if (ImGui::BeginTabBar("kit", ImGuiTabBarFlags_FittingPolicyScroll |
                                       ImGuiTabBarFlags_TabListPopupButton)) {
-        if (ImGui::BeginTabItem(ICON_FA_CUBE " Build")) {
+        if (ImGui::BeginTabItem(ICON_FA_CUBE " Build", nullptr, tabSel(1))) {
             static const KitPiece shapes[] = {
                 {ICON_FA_BORDER_ALL, "Floor", "Walkable ground area"},
                 {ICON_FA_SQUARE, "Wall", "Solid cover"},
@@ -4733,7 +4737,7 @@ void Editor::drawBuildKit() {
             kitCards(shapes, IM_ARRAYSIZE(shapes), &placing_, &status_, &dragPlace_);
             ImGui::EndTabItem();
         }
-        if (ImGui::BeginTabItem(ICON_FA_FLAG " Play")) {
+        if (ImGui::BeginTabItem(ICON_FA_FLAG " Play", nullptr, tabSel(2))) {
             static const KitPiece play[] = {
                 {ICON_FA_ARROW_POINTER, "RED spawn", "Team RED respawn room"},
                 {ICON_FA_ARROW_POINTER, "BLU spawn", "Team BLU respawn room"},
@@ -4751,7 +4755,7 @@ void Editor::drawBuildKit() {
             kitCards(play, IM_ARRAYSIZE(play), &placing_, &status_, &dragPlace_);
             ImGui::EndTabItem();
         }
-        if (ImGui::BeginTabItem(ICON_FA_GEARS " Moving")) {
+        if (ImGui::BeginTabItem(ICON_FA_GEARS " Moving", nullptr, tabSel(3))) {
             static const KitPiece dyn[] = {
                 {ICON_FA_DOOR_OPEN, "Working door", "Opens when touched"},
                 {ICON_FA_DOOR_CLOSED, "Spawn door", "Team-only one-way spawn wall"},
@@ -4766,7 +4770,7 @@ void Editor::drawBuildKit() {
             kitCards(dyn, IM_ARRAYSIZE(dyn), &placing_, &status_, &dragPlace_);
             ImGui::EndTabItem();
         }
-        if (ImGui::BeginTabItem(ICON_FA_VECTOR_SQUARE " Zones")) {
+        if (ImGui::BeginTabItem(ICON_FA_VECTOR_SQUARE " Zones", nullptr, tabSel(4))) {
             static const KitPiece zones[] = {
                 {ICON_FA_BOMB, "Trigger box", "Fires outputs on touch"},
                 {ICON_FA_BAN, "Clip wall", "Invisible wall (players only)"},
@@ -4780,20 +4784,20 @@ void Editor::drawBuildKit() {
             kitCards(zones, IM_ARRAYSIZE(zones), &placing_, &status_, &dragPlace_);
             ImGui::EndTabItem();
         }
-        const ImGuiTabItemFlags tf =
-            kitTab_ == 1 ? ImGuiTabItemFlags_SetSelected : 0;
-        if (ImGui::BeginTabItem(ICON_FA_BOLT " Things", nullptr, tf)) {
-            kitTab_ = 0;  // consume the one-shot
+        // kitTab_ == 1 also means "Things" for older callers; 5 is its ordinal.
+        if (ImGui::BeginTabItem(ICON_FA_BOLT " Things", nullptr,
+                                (kitTab_ == 1 || kitTab_ == 5)
+                                    ? ImGuiTabItemFlags_SetSelected : 0)) {
             ImGui::Dummy(ImVec2(0, 4));
             drawSimpleEntities();
             ImGui::EndTabItem();
         }
-        if (ImGui::BeginTabItem(ICON_FA_IMAGE " Props")) {
+        if (ImGui::BeginTabItem(ICON_FA_IMAGE " Props", nullptr, tabSel(6))) {
             ImGui::Dummy(ImVec2(0, 4));
             drawModelGrid();
             ImGui::EndTabItem();
         }
-        if (ImGui::BeginTabItem(ICON_FA_LIGHTBULB " Light")) {
+        if (ImGui::BeginTabItem(ICON_FA_LIGHTBULB " Light", nullptr, tabSel(7))) {
             static const KitPiece lights[] = {
                 {ICON_FA_LIGHTBULB, "Point light", "Local glow"},
                 {ICON_FA_LIGHTBULB, "Spot light", "Directional cone"},
@@ -4805,6 +4809,7 @@ void Editor::drawBuildKit() {
         }
         ImGui::EndTabBar();
     }
+    kitTab_ = 0;  // consume the one-shot tab selection
 
     ImGui::Dummy(ImVec2(0, 8));
     ImGui::Separator();
@@ -5818,15 +5823,52 @@ void Editor::drawModelGrid() {
             if (!s.empty()) s[0] = (char)std::toupper((unsigned char)s[0]);
             return s.empty() ? std::string("Other") : s;
         };
+        // The nth '/'-separated segment of a path (0-based), or "".
+        auto segAt = [](const std::string& m, int n) -> std::string {
+            size_t p = 0;
+            for (int k = 0; k < n; ++k) {
+                p = m.find('/', p);
+                if (p == std::string::npos) return "";
+                ++p;
+            }
+            const size_t e = m.find('/', p);
+            return e == std::string::npos ? m.substr(p) : m.substr(p, e - p);
+        };
         std::map<std::string, std::vector<int>> cats;
         for (int i = 0; i < (int)modelList_.size(); ++i) {
-            const std::string& m = modelList_[i];  // "models/<seg>/..."
-            const size_t a = m.find('/');
-            const size_t b = a == std::string::npos ? a : m.find('/', a + 1);
-            const std::string seg = (a != std::string::npos && b != std::string::npos)
-                                        ? m.substr(a + 1, b - a - 1)
-                                        : "other";
-            cats[friendly(seg)].push_back(i);
+            const std::string& m = modelList_[i];  // "models/<seg1>/<seg2>/..."
+            std::string seg = segAt(m, 1);
+            std::string label;
+            // Player cosmetics dominate the model set — give them their own
+            // bucket so the mapping-relevant categories stay usable.
+            if ((seg == "workshop" || seg == "workshop_partner") &&
+                segAt(m, 2) == "player") {
+                label = "Cosmetics (hats)";
+            } else if (seg == "workshop" || seg == "workshop_partner") {
+                // Otherwise bucket workshop packs by the pack name one deeper.
+                std::string deeper = segAt(m, 2);
+                label = friendly(deeper.empty() ? seg : deeper);
+            } else if (seg == "player" || seg == "bots") {
+                label = "Cosmetics (hats)";
+            } else {
+                label = friendly(seg.empty() ? "other" : seg);
+            }
+            cats[label].push_back(i);
+        }
+        // Fold tiny buckets (< 12 models) into a single "Other" so the list
+        // stays scannable.
+        std::vector<int> misc;
+        for (auto it2 = cats.begin(); it2 != cats.end();) {
+            if (it2->second.size() < 12 && it2->first != "Other") {
+                misc.insert(misc.end(), it2->second.begin(), it2->second.end());
+                it2 = cats.erase(it2);
+            } else {
+                ++it2;
+            }
+        }
+        if (!misc.empty()) {
+            auto& o = cats["Other"];
+            o.insert(o.end(), misc.begin(), misc.end());
         }
         modelCats_.assign(cats.begin(), cats.end());
         std::sort(modelCats_.begin(), modelCats_.end(),
@@ -5835,21 +5877,37 @@ void Editor::drawModelGrid() {
                   });
     }
 
-    // Category picker + search. Search (when non-empty) spans every model.
-    std::vector<const char*> catNames = {"All models", ICON_FA_CLOCK " Recently used"};
-    std::vector<std::string> catLabels;
-    for (const auto& c : modelCats_) {
-        catLabels.push_back(c.first + "  (" + std::to_string(c.second.size()) + ")");
-    }
-    for (const auto& s : catLabels) catNames.push_back(s.c_str());
-    modelCat_ = std::clamp(modelCat_, 0, (int)catNames.size() - 1);
-    ImGui::SetNextItemWidth(-1);
-    ImGui::Combo("##mdlcat", &modelCat_, catNames.data(), (int)catNames.size());
-
+    // Search spans every model; when it's empty the category list drives the grid.
     ImGui::SetNextItemWidth(-1);
     ImGui::InputTextWithHint("##mdlfilter",
                              ICON_FA_MAGNIFYING_GLASS " search all models…",
                              modelFilter_, sizeof(modelFilter_));
+    std::string needlePre = modelFilter_;
+
+    // Collapsible category list (always-visible, scrollable). Row 0 = all,
+    // row 1 = recently used, then one row per plain-language group.
+    modelCat_ = std::clamp(modelCat_, 0, (int)modelCats_.size() + 1);
+    if (needlePre.empty() &&
+        ImGui::CollapsingHeader("Categories", ImGuiTreeNodeFlags_DefaultOpen)) {
+        const float listH = pb::ui::dp(std::min(230.0f,
+                                     56.0f + modelCats_.size() * 19.0f));
+        if (ImGui::BeginChild("##mdlcats", ImVec2(0, listH), true)) {
+            auto row = [&](int id, const char* icon, const std::string& name,
+                           size_t n) {
+                char buf[96];
+                std::snprintf(buf, sizeof(buf), "%s %s  (%zu)", icon,
+                              name.c_str(), n);
+                if (ImGui::Selectable(buf, modelCat_ == id)) modelCat_ = id;
+            };
+            row(0, ICON_FA_LAYER_GROUP, "All models", modelList_.size());
+            row(1, ICON_FA_CLOCK, "Recently used", recentModels_.size());
+            ImGui::Separator();
+            for (int c = 0; c < (int)modelCats_.size(); ++c)
+                row(c + 2, ICON_FA_FOLDER, modelCats_[c].first,
+                    modelCats_[c].second.size());
+        }
+        ImGui::EndChild();
+    }
     std::string needle = modelFilter_;
     std::transform(needle.begin(), needle.end(), needle.begin(), ::tolower);
 
