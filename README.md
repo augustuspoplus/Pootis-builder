@@ -14,6 +14,14 @@ from a template and build it with a friendly one-click kit. Then compile with
 > five gated phases to a 1.0 anyone could finish a shippable map in, and
 > `PROGRESS.md` for the running build log.
 
+## Screenshots
+
+| | |
+| --- | --- |
+| ![Welcome screen](docs/img/welcome.png) | **Start screen** — new map, open a `.bsp`/`.vmf`, or one of the bundled templates (empty room, arena, KOTH, CTF, payload, trade box, a to-scale ctf_turbine greybox). |
+| ![Simple mode Build Kit](docs/img/simple-build.png) | **Simple mode** — the one-click Build Kit over a decompiled `ctf_turbine` (1039 brushes, 1464 entities), rendered with real lightmaps, props and materials. |
+| ![Simple mode Things list](docs/img/simple-things.png) | **Things** — a plain-language, grouped, iconified list of ~40 gameplay entities; each drops working brushwork/entities on the grid. |
+
 ## What works
 
 **Loading & rendering**
@@ -92,7 +100,11 @@ Headless captures for the Hammer-comparison loop:
 ```bash
 build/PootisBuilder.exe <map.bsp> --screenshot out.png --view persp|top|front|side|quad
 build/PootisBuilder.exe <map.bsp> --screenshot out.png --ui          # full docked UI
+build/PootisBuilder.exe <map> --ui --shot-overview [--pro] [--kit-tab N]   # framed doc shot
 ```
+
+The screenshots above were produced with `--ui --shot-overview` (which reframes
+the 3D view on the whole map instead of standing at a spawn).
 
 `test.sh` is a headless regression sweep (stock maps, every kit card, undo,
 templates + their `vbsp` compiles).

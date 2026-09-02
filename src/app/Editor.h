@@ -110,6 +110,23 @@ public:
         frameAllViews();
     }
     void debugKitTab(int t) { kitTab_ = t; showWelcome_ = false; }
+    // A 3/4 overview of the whole map (for docs/README shots) instead of
+    // frameAllViews()'s "stand at a spawn" perspective camera.
+    void debugShotOverview() {
+        showWelcome_ = false;
+        Camera& c = views_[0].camera;
+        c.kind = ViewKind::Perspective;
+        c.fovDeg = 74.0f;
+        // Anchor on a spawn (always valid) and pull back + up for a 3/4 view of
+        // the surrounding architecture. Bounds-based framing is unreliable on
+        // decompiled maps (skybox brush blows the AABB up).
+        const glm::vec3 anchor =
+            mesh_.hasSpawn ? mesh_.spawnPos
+                           : 0.5f * (mesh_.playBoundsMin + mesh_.playBoundsMax);
+        c.yawDeg = (mesh_.hasSpawn ? mesh_.spawnYaw : 0.0f) + 8.0f;
+        c.pitchDeg = -21.0f;
+        c.pos = anchor - c.forward() * 1250.0f + glm::vec3(0.0f, 0.0f, 780.0f);
+    }
     void debugNewBlank() {
         doc_.newBlank("untitled");
         history_.reset(doc_);

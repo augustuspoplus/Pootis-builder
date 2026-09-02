@@ -13,14 +13,21 @@ Newest first. ROADMAP.md milestones A–H are spent; **PLAN.md** is the live pla
   for `*.sh`, `eol=crlf` for `*.ps1`, binary rules for fonts/assets).
   `gh` 2.99.0 installed to `%LOCALAPPDATA%\Programs\gh`; secret/email/abs-path
   scan of tracked files is clean; `tools/` (BSPSource + JRE) and
-  `assets/mapping_resource_pack/` stay gitignored. Awaiting the user's
-  `gh auth login` before `gh repo create pootis-builder --public --push`.
+  `assets/mapping_resource_pack/` stay gitignored.
   **Licensed GPL-3.0** (`LICENSE` = full FSF text; README "## License"
   section, `Copyright (C) 2026 the Pootis Builder authors`). All bundled/
-  fetched deps are GPL-compatible (MIT/Zlib/OFL). Still pending before the
-  push: rewrite all commits' author+committer email to the user's GitHub
-  `…@users.noreply.github.com` address (needs their username/ID from
-  `gh api user` after auth) so the personal address never goes public.
+  fetched deps are GPL-compatible (MIT/Zlib/OFL).
+  **Published:** https://github.com/augustuspoplus/Pootis-builder (public,
+  branch `main`, 111 commits). Whole history was `filter-branch`'d to
+  `Pootis Builder <49472861+augustuspoplus@users.noreply.github.com>` —
+  the personal address is nowhere in the pushed repo; local `user.email`
+  set to match. See `memory/github-repo.md`.
+- **README screenshots.** `docs/img/{welcome,simple-build,simple-things}.png`
+  (1760×950, headless `--ui`) in a "## Screenshots" table near the top.
+  New `--shot-overview` flag + `Editor::debugShotOverview()` reframes the 3D
+  view on the whole map (anchored on a spawn, pulled back + up) —
+  bounds-based framing is unreliable on decompiled maps (skybox brush blows
+  the AABB up). `--panel` now runs before the shot hooks. 69/69.
 - **Things list — icons + a lot more of them.** The Simple-mode ▸ Things tab
   had ~20 entries and every non-model item fell back to a generic bolt/cube
   glyph. `SE` now carries a per-item FontAwesome icon and a `group` header;

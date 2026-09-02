@@ -78,6 +78,7 @@ struct Options {
     bool quad = false;
     bool ui = false;  // capture the full docked UI, not just a viewport
     bool pro = false;
+    bool shotOverview = false;  // reframe 3D cam on the whole map for doc shots
     int selectSolid = -1;
     int selectEnt = -1;
     bool sampleMap = false;
@@ -155,6 +156,7 @@ Options parseArgs(int argc, char** argv) {
         else if (a == "--hill") o.shape = 1;
         else if (a == "--road") o.shape = 2;
         else if (a == "--kit-tab") o.kitTab = std::atoi(next("0").c_str());
+        else if (a == "--shot-overview") o.shotOverview = true;
         else if (a == "--map-name") o.mapName = next("");
         else if (a == "--out-dir") o.outDir = next("");
         else if (a == "--drop-model") o.dropModel = next("");
@@ -204,6 +206,8 @@ int runHeadlessScreenshot(const Options& opt, GLFWwindow* window, float uiScale)
     if (opt.newBlank) editor.debugNewBlank();
     if (!opt.dropModel.empty()) editor.debugDropModel(opt.dropModel);
     if (opt.kitTab >= 0) editor.debugKitTab(opt.kitTab);
+    if (!opt.panel.empty()) editor.debugFocusPanel(opt.panel);
+    if (opt.shotOverview) editor.debugShotOverview();
     if (opt.shape == 1) editor.debugHill();
     if (opt.shape == 2) editor.debugRoad();
     if (opt.cordon > 0.0f) editor.debugCordon(opt.cordon);
@@ -218,7 +222,6 @@ int runHeadlessScreenshot(const Options& opt, GLFWwindow* window, float uiScale)
     if (!opt.makeTpl.empty()) editor.debugMakeTemplates(opt.makeTpl);
     if (!opt.makeTurbine.empty()) editor.debugMakeTurbine(opt.makeTurbine);
     if (!opt.saveVmfPath.empty()) editor.saveVmf(opt.saveVmfPath);
-    if (!opt.panel.empty()) editor.debugFocusPanel(opt.panel);
     if (opt.dumpProps) editor.debugDumpProps();
     if (opt.workshop) editor.debugShowWorkshop();
 
