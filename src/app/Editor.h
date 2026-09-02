@@ -66,7 +66,11 @@ public:
     void debugStartCompile(bool fast);
     void debugCompileOut(const std::string& name, const std::string& dir);
     void debugShowWorkshop();
-    void debugFocusPanel(const std::string& name) { focusPanel_ = name; focusPanelFrames_ = 6; }
+    void debugFocusPanel(const std::string& name) {
+        focusPanel_ = name; focusPanelFrames_ = 6;
+        for (int i = 1; i < 4; ++i)
+            if (name == views_[i].title) viewOpen_[i] = true;  // open a closed 2D view
+    }
     void debugSubObjectDemo(int solidIdx, int mode);  // select brush, deform one handle
     void debugTextureDemo(int solidIdx);              // pick faces for the Texture tool
     void debugShapeOp(int op);                        // 0 hollow, 1 carve, 2 clip
@@ -160,7 +164,7 @@ private:
     void drawSettingsWindow();
     void applyPrefs();   // push prefs_ into the live editor state
     void uiScaleMenu();
-    void drawViewportPanel(ViewPanel& p);
+    void drawViewportPanel(ViewPanel& p, bool* pOpen = nullptr);
     void drawBuildKit();
     void drawSimpleEntities();   // curated plain-language entity list (Simple)
     void openModelImport();
@@ -259,6 +263,8 @@ private:
     MeshBuildOptions meshOpts_;
 
     std::array<ViewPanel, 4> views_;
+    // [0]=3D always on; [1..3]=Top/Front/Side, opened on demand.
+    bool viewOpen_[4] = {true, false, false, false};
     std::string status_ = "No map loaded";
     std::string pendingOpen_;
     std::string focusPanel_;  // debug: focus this dock tab next frame
