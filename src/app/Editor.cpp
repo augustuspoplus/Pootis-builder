@@ -2801,7 +2801,18 @@ void Editor::placePiece(const std::string& piece, const glm::vec3& atRaw) {
         brushEnt("trigger_hurt", {at.x - 168, at.y - 168, at.z - 256},
                  {at.x + 168, at.y + 168, at.z + 16},
                  {{"damage", "1000"}, {"damagecap", "1000"}, {"spawnflags", "1"}});
-    } else if (piece == "Skybox seal") {
+    } else if (piece == "Skybox seal" || piece == "Sky seal" ||
+               piece == "Seal with sky") {
+        // Drop any previous sky shell so re-running this just re-fits it.
+        auto isSky = [](const map::Solid& s) {
+            if (s.faces.empty()) return false;
+            for (const auto& f : s.faces)
+                if (f.material != "tools/toolsskybox") return false;
+            return true;
+        };
+        auto& ws = doc_.worldSolids();
+        ws.erase(std::remove_if(ws.begin(), ws.end(), isSky), ws.end());
+
         glm::vec3 mn, mx;
         doc_.bounds(mn, mx);
         if (mx.x <= mn.x) { mn = at - glm::vec3(1024); mx = at + glm::vec3(1024); }
@@ -5171,7 +5182,7 @@ void Editor::drawBuildKit() {
                 {ICON_FA_HELMET_SAFETY, "No-build zone", "Blocks Engineer buildings"},
                 {ICON_FA_WATER, "Water", "A body of water"},
                 {ICON_FA_STAIRS, "Ladder", "Climbable ladder volume"},
-                {ICON_FA_CLOUD, "Skybox seal", "Wraps the map in sky brushes"},
+                {ICON_FA_CLOUD, "Skybox seal", "Wraps the whole map in sky (re-fits on re-run)"},
             };
             ImGui::Dummy(ImVec2(0, 4));
             kitCards(zones, IM_ARRAYSIZE(zones), &placing_, &status_, &dragPlace_);
@@ -5239,6 +5250,18 @@ void Editor::drawBuildKit() {
         auto it = ws->find("skyname");
         if (it != ws->end()) skyname = it->second;
     }
+    // A skyname is set on every new doc; what actually matters is whether the
+    // map is *sealed* — i.e. has tools/toolsskybox brushwork around it.
+    bool hasSkyBrush = false;
+    if (useDoc) {
+        for (const auto& s : doc_.worldSolids()) {
+            for (const auto& f : s.faces)
+                if (f.material == "tools/toolsskybox") { hasSkyBrush = true; break; }
+            if (hasSkyBrush) break;
+        }
+    } else {
+        hasSkyBrush = !skyname.empty();  // BSP view: assume compiled maps sealed
+    }
 
     struct Row {
         bool ok;
@@ -5249,8 +5272,8 @@ void Editor::drawBuildKit() {
     const Row rows[] = {
         {countClass("info_player_teamspawn") >= 2 || countClass("info_player_start") >= 1,
          "Spawn points placed", "RED spawn", "adds a RED spawn room"},
-        {!skyname.empty(), "Skybox set (seals the map)", "Skybox seal",
-         "wraps the map in sky brushes"},
+        {hasSkyBrush, "Map sealed with sky", "Skybox seal",
+         "wraps the whole map in sky brushes"},
         {countClass("team_control_point") > 0 || countClass("trigger_capture_area") > 0 ||
              countClass("func_capturezone") > 0,
          "An objective (capture / flag)", "Capture point", "adds a control point"},
@@ -5302,6 +5325,21 @@ void Editor::drawBuildKit() {
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", r.fixHint);
         }
         ImGui::PopID();
+    }
+
+    // One-click: wrap the whole map in sky so it compiles without a leak.
+    if (hasDoc()) {
+        ImGui::Dummy(ImVec2(0, 6));
+        const bool sealed = hasSkyBrush;
+        if (sealed) ImGui::BeginDisabled();
+        if (ImGui::Button(sealed ? ICON_FA_CLOUD "  Map is sky-sealed"
+                                 : ICON_FA_CLOUD "  Seal map with sky",
+                          ImVec2(-1, 0)))
+            placePiece("Skybox seal", glm::vec3(0));
+        if (sealed) ImGui::EndDisabled();
+        if (!sealed && ImGui::IsItemHovered())
+            ImGui::SetTooltip("Adds a sky box around everything. Re-run any time "
+                              "to re-fit it as the map grows.");
     }
 
     ImGui::End();
