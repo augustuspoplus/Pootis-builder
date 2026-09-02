@@ -92,17 +92,21 @@ The seam between Simple and Pro was an abrupt app-swap.
 - **Done:** a beginner on Guided grows to Standard, then Full, on the same map — same
   document, camera, undo, selection — and never hits "you can't edit that here".
 
-### Phase 5 — Ship it
+### Phase 5 — Ship it  (in progress)
 The compile-test loop and content pipeline aren't fast/trustworthy enough yet.
-- Iteration loop: tuned fast-compile profile, changed-leaves-only where possible, auto
-  `+map` reload of the running game, compile-time budget shown.
-- Map check that catches real problems: leak → draw the line to the hole and frame it;
-  pointfile load; hint/skip suggestions; nodraw-the-void; dangling entity I/O; missing
-  assets with a fix button; displacement errors.
-- Content packing: every referenced custom material/model/sound auto-detected and
-  `bspzip`'d in, with a review list.
-- Workshop publish end-to-end: thumbnail, description, tags, changenote, real upload,
-  tested against an actual submission.
+- [x] **Leak diagnostics**: `MapCompiler` grabs the `.lin` pointfile vbsp drops on
+      a leak; the editor auto-loads it, draws the trace as a glowing line in every
+      view with a "leaked entity" marker, and Map Check gets a "Frame the leak" /
+      "Load pointfile" / "Clear" section. `--leak-test`.
+- [x] **Map Check depth**: no-skybox-brush (with skyname set), no `env_cubemap`,
+      one-team spawns, spawns-without-`func_respawnroom`, displacement on a brush
+      entity. (Dangling entity I/O + invalid/oversized brushes were already in.)
+- [ ] Iteration loop: changed-leaves-only, auto `+map` reload, compile-time budget
+      (fast profile + live log + `+map` launch already exist).
+- [ ] Content packing: auto-detect every custom material/model/sound and `bspzip`
+      it in, with a review list.
+- [ ] Workshop publish end-to-end (window + steamcmd hand-off exist; needs a real
+      tested submission).
 - **Done when:** decompile → edit → compile → play → publish, no step back to Valve's tools.
 
 ## Runs alongside (ships in small pieces on top of the active phase)

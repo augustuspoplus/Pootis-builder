@@ -4,6 +4,16 @@ Newest first. ROADMAP.md milestones A–H are spent; **PLAN.md** is the live pla
 (five gated phases to 1.0 + the UI plan).
 
 ## Phases + performance batch
+- **Phase 5 — ship it (started).** **Leak diagnostics**: `MapCompiler`
+  now detects the `.lin`/`.pts` pointfile vbsp drops next to the vmf on a
+  leak (`leakFile()`); the editor auto-loads it when a compile finishes
+  leaked, parses the x/y/z trace and draws it as a glowing magenta
+  polyline in every viewport with a "leaked entity" marker + a Map Check
+  section ("Frame the leak" aims the 3D cam down the first segment, "Load
+  pointfile…", "Clear"). `--leak-test`. **Map Check** gained real
+  compile-blocker checks: skyname-set-but-no-toolsskybox-brush, no
+  `env_cubemap`, one-team spawns (TeamNum), spawns-without-func_respawnroom,
+  displacement-face-on-a-brush-entity. `test.sh` 72/72.
 - **Phase 4 — one adaptive workspace (dial shipped).** `enum Mode {
   Simple, Pro }` → `{ Guided, Standard, Full }`. Guided = pure Build Kit;
   Standard = kit + the full tool strip + Textures / Contents / Map Check
