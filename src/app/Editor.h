@@ -314,6 +314,8 @@ private:
     map::History history_;
     int gizmoMode_ = 0;          // 0 move, 1 rotate, 2 scale
     bool gizmoUsing_ = false;
+    float gizmoSize_ = 0.17f;    // clip-space size passed to ImGuizmo (Options)
+    int gizmoStyle_ = 0;         // 0 = arrows (default), 1 = thick, 2 = fine
     bool docMeshDirty_ = false;
 
     // Bounding-box resize (Select tool, 2D views)

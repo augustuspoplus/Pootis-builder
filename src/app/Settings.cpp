@@ -50,6 +50,8 @@ Settings Settings::load() {
         else if (key == "autosave") s.autosave = b();
         else if (key == "autosave_mins") s.autosaveMins = fnum();
         else if (key == "shade_mode") s.shadeMode = inum();
+        else if (key == "gizmo_size") s.gizmoSize = fnum();
+        else if (key == "gizmo_style") s.gizmoStyle = inum();
         else if (key == "show_grid") s.showGrid = b();
         else if (key == "show_props") s.showProps = b();
         else if (key == "show_point_ents") s.showPointEntities = b();
@@ -79,6 +81,8 @@ void Settings::save() const {
     f << "autosave=" << (autosave ? 1 : 0) << "\n";
     f << "autosave_mins=" << autosaveMins << "\n";
     f << "shade_mode=" << shadeMode << "\n";
+    f << "gizmo_size=" << gizmoSize << "\n";
+    f << "gizmo_style=" << gizmoStyle << "\n";
     f << "show_grid=" << (showGrid ? 1 : 0) << "\n";
     f << "show_props=" << (showProps ? 1 : 0) << "\n";
     f << "show_point_ents=" << (showPointEntities ? 1 : 0) << "\n";

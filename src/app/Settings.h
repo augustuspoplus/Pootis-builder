@@ -20,6 +20,8 @@ struct Settings {
 
     // Viewport
     int shadeMode = 0;         // ShadeMode
+    float gizmoSize = 0.17f;   // move/rotate/scale handle size (clip space)
+    int gizmoStyle = 0;        // 0 normal, 1 bold, 2 fine
     bool showGrid = true;
     bool showProps = true;
     bool showPointEntities = false;

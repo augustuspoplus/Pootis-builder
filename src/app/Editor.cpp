@@ -102,6 +102,8 @@ void Editor::applyPrefs() {
     autosaveOn_ = prefs_.autosave;
     autosaveMins_ = prefs_.autosaveMins;
     settings_.shadeMode = static_cast<ShadeMode>(std::clamp(prefs_.shadeMode, 0, 3));
+    gizmoSize_ = std::clamp(prefs_.gizmoSize, 0.08f, 0.4f);
+    gizmoStyle_ = std::clamp(prefs_.gizmoStyle, 0, 2);
     settings_.showGrid = prefs_.showGrid;
     settings_.showProps = prefs_.showProps;
     settings_.showPointEntities = prefs_.showPointEntities;
@@ -1453,6 +1455,32 @@ void Editor::drawViewportPanel(ViewPanel& p, bool* pOpen) {
                            tl.y + (p.contentSize.y - ts.y) * 0.5f),
                     IM_COL32(180, 180, 185, 220), msg);
     }
+
+    // Move / Rotate / Scale gizmo switcher — floats top-left when something's
+    // selected (like Blender's header). W / E / R also switch.
+    if (hasDoc() && !selection_.empty() && tool_ == Tool::Select) {
+        ImGui::SetCursorScreenPos(ImVec2(tl.x + 8, tl.y + 26));
+        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(3, 3));
+        struct G { const char* ic; const char* tip; };
+        static const G gs[] = {{ICON_FA_UP_DOWN_LEFT_RIGHT, "Move  (W)"},
+                               {ICON_FA_ROTATE, "Rotate  (E)"},
+                               {ICON_FA_MAXIMIZE, "Scale  (R)"}};
+        for (int g = 0; g < 3; ++g) {
+            if (g) ImGui::SameLine();
+            const bool on = gizmoMode_ == g;
+            ImGui::PushStyleColor(ImGuiCol_Button,
+                                  on ? pb::ui::col::acc : pb::ui::col::bg2);
+            ImGui::PushStyleColor(ImGuiCol_Text,
+                                  on ? pb::ui::col::bg1 : pb::ui::col::tx);
+            ImGui::PushID(g);
+            if (ImGui::Button(gs[g].ic, ImVec2(pb::ui::dp(26.0f), pb::ui::dp(22.0f))))
+                gizmoMode_ = g;
+            ImGui::PopID();
+            ImGui::PopStyleColor(2);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", gs[g].tip);
+        }
+        ImGui::PopStyleVar();
+    }
     ImGui::End();
 }
 
@@ -1704,15 +1732,17 @@ void Editor::drawGizmo(ViewPanel& p, float aspect) {
     ImGuizmo::SetDrawlist();
     ImGuizmo::SetRect(p.contentMin.x, p.contentMin.y, p.contentSize.x, p.contentSize.y);
     ImGuizmo::SetID(static_cast<int>(p.kind));
-    ImGuizmo::SetGizmoSizeClipSpace(0.17f * pb::ui::g_scale);  // bigger than the ~0.1 default
+    ImGuizmo::SetGizmoSizeClipSpace(gizmoSize_ * pb::ui::g_scale);
     ImGuizmo::AllowAxisFlip(false);
     {
         ImGuizmo::Style& gs = ImGuizmo::GetStyle();
-        gs.TranslationLineThickness = 5.0f;
-        gs.TranslationLineArrowSize = 8.0f;
-        gs.RotationLineThickness = 4.0f;
-        gs.ScaleLineThickness = 5.0f;
-        gs.CenterCircleSize = 7.0f;
+        const float k = gizmoStyle_ == 1 ? 1.6f : gizmoStyle_ == 2 ? 0.6f : 1.0f;
+        gs.TranslationLineThickness = 5.0f * k;
+        gs.TranslationLineArrowSize = 8.0f * k;
+        gs.RotationLineThickness = 4.0f * k;
+        gs.ScaleLineThickness = 5.0f * k;
+        gs.HatchedAxisLineThickness = 6.0f * k;
+        gs.CenterCircleSize = 7.0f * (gizmoStyle_ == 2 ? 0.8f : 1.0f);
     }
 
     const glm::mat4 view = p.camera.view();
@@ -3701,6 +3731,20 @@ void Editor::drawSettingsWindow() {
                                "%.2f")) {
             meshOpts_.lightmapGain = prefs_.lightmapGain;
             if (hasMap()) buildAndUpload(meshOpts_);
+            dirty = true;
+        }
+        ImGui::Separator();
+        ImGui::TextUnformatted("Move / rotate / scale gizmo");
+        ImGui::SetNextItemWidth(dp(160));
+        if (ImGui::SliderFloat("Handle size", &prefs_.gizmoSize, 0.08f, 0.40f,
+                               "%.2f")) {
+            gizmoSize_ = prefs_.gizmoSize;
+            dirty = true;
+        }
+        const char* gstyles[] = {"Normal", "Bold", "Fine"};
+        ImGui::SetNextItemWidth(dp(160));
+        if (ImGui::Combo("Handle style", &prefs_.gizmoStyle, gstyles, 3)) {
+            gizmoStyle_ = prefs_.gizmoStyle;
             dirty = true;
         }
     }
