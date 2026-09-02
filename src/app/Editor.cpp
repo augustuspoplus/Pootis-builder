@@ -718,9 +718,9 @@ void Editor::drawTopBar() {
         const char* s = compact ? (snap_ ? ICON_FA_CHECK : ICON_FA_XMARK) : snapLabel;
         const char* pub = compact ? ICON_FA_CLOUD_ARROW_UP
                                   : ICON_FA_CLOUD_ARROW_UP "  Publish";
-        return bw(g) + gap + bw(s) + gap + bw(ICON_FA_GEAR) + gap + bw(ICON_FA_BARS) +
-               gap2 + bw(pub) + gap2 + bw(ICON_FA_PLAY "  Build & play") + padX +
-               dp(28.0f);
+        return bw(g) + gap + bw(s) + gap + bw(ICON_FA_MAGNET) + gap + bw(ICON_FA_GEAR) +
+               gap + bw(ICON_FA_BARS) + gap2 + bw(pub) + gap2 +
+               bw(ICON_FA_PLAY "  Build & play") + padX + dp(28.0f);
     };
     const bool compact = clusterW(false) > avail;
     ImGui::SetCursorPosX(std::max(curX + dp(12.0f),
@@ -742,6 +742,10 @@ void Editor::drawTopBar() {
     if (toolButton(compact ? (snap_ ? ICON_FA_CHECK : ICON_FA_XMARK) : snapLabel,
                    snap_, "Snap to grid"))
         snap_ = !snap_;
+    ImGui::SameLine(0, gap);
+    if (toolButton(ICON_FA_MAGNET, snapGeo_,
+                   "Snap to other brushes' corners while moving"))
+        snapGeo_ = !snapGeo_;
 
     ImGui::SameLine(0, gap);
     if (toolButton(ICON_FA_GEAR, showSettings_, "Options")) showSettings_ = !showSettings_;
@@ -1577,6 +1581,23 @@ void Editor::drawViewportPanel(ViewPanel& p, bool* pOpen) {
     drawSubObjectOverlay(p, aspect, dl);
     drawFaceOverlay(p, aspect, dl);
     drawClipOverlay(p, aspect, dl);
+    drawBlockOverlay(p, aspect, dl);
+
+    // Snap-to-geometry indicator: a ring on the vertex a move locked onto.
+    if (snapMarkOn_ && (moveDrag_ != 0 || mx_.op != 0)) {
+        const glm::mat4 vpm = p.camera.proj(aspect) * p.camera.view();
+        const glm::vec4 c = vpm * glm::vec4(snapMark_, 1.0f);
+        if (c.w > 1e-4f) {
+            const ImVec2 s(
+                p.contentMin.x + (c.x / c.w * 0.5f + 0.5f) * p.contentSize.x,
+                p.contentMin.y + (1.0f - (c.y / c.w * 0.5f + 0.5f)) * p.contentSize.y);
+            dl->AddCircle(s, pb::ui::dp(9.0f), IM_COL32(120, 220, 255, 255), 12, 2.0f);
+            dl->AddLine(ImVec2(s.x - 12, s.y), ImVec2(s.x + 12, s.y),
+                        IM_COL32(120, 220, 255, 200));
+            dl->AddLine(ImVec2(s.x, s.y - 12), ImVec2(s.x, s.y + 12),
+                        IM_COL32(120, 220, 255, 200));
+        }
+    }
     drawSelectionDims(p, aspect, dl);
     drawCordonOverlay(p, aspect, dl);
     drawRoadOverlay(p, aspect, dl);
@@ -2458,6 +2479,50 @@ void Editor::drawClipOverlay(ViewPanel& p, float aspect, ImDrawList* dl) {
     std::snprintf(msg, sizeof(msg), "Clip: %s   (Tab mode / Enter apply)", mode);
     dl->AddText(ImVec2(p.contentMin.x + 8, p.contentMin.y + 24),
                 IM_COL32(255, 150, 150, 255), msg);
+}
+
+// Block tool: a depth field + live drag dimensions, so you can lay a wall to
+// an exact size without touching the 3D view.
+void Editor::drawBlockOverlay(ViewPanel& p, float aspect, ImDrawList* dl) {
+    if (tool_ != Tool::Block || p.kind == ViewKind::Perspective) return;
+    (void)aspect;
+    const ImVec2 tl(p.contentMin.x + pb::ui::dp(8.0f),
+                    p.contentMin.y + pb::ui::dp(26.0f));
+    ImGui::SetCursorScreenPos(tl);
+    ImGui::PushItemWidth(pb::ui::dp(90.0f));
+    ImGui::PushStyleColor(ImGuiCol_FrameBg, IM_COL32(24, 27, 32, 235));
+    float d = newBrushDepth_;
+    if (ImGui::DragFloat("##blockdepth", &d, 4.0f, 8.0f, 4096.0f, "depth %.0f"))
+        newBrushDepth_ = snapF(std::max(8.0f, d));
+    ImGui::PopStyleColor();
+    ImGui::PopItemWidth();
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("How thick the new brush is on the axis you can't see "
+                          "in this view.");
+
+    if (blockDragging_ && p.kind == blockView_) {
+        const glm::vec3 a = snapVec(blockA_), b = snapVec(blockB_);
+        const glm::vec3 s = glm::abs(b - a);
+        const glm::vec3 rt = p.camera.orthoRightAxis(), up = p.camera.orthoUpAxis();
+        const float w = std::fabs(glm::dot(s, rt)), h = std::fabs(glm::dot(s, up));
+        const glm::mat4 vp = p.camera.proj(p.contentSize.x /
+                                           std::max(1.0f, p.contentSize.y)) *
+                             p.camera.view();
+        bool ok;
+        const ImVec2 mid = projectPt(p.kind, vp, p.contentMin, p.contentSize,
+                                     0.5f * (a + b), ok);
+        if (ok) {
+            char buf[64];
+            std::snprintf(buf, sizeof(buf), "%.0f x %.0f  (deep %.0f)", w, h,
+                          newBrushDepth_);
+            dl->AddRectFilled(ImVec2(mid.x + 10, mid.y - 8),
+                              ImVec2(mid.x + 14 + ImGui::CalcTextSize(buf).x,
+                                     mid.y + 10),
+                              IM_COL32(20, 22, 26, 230), 3.0f);
+            dl->AddText(ImVec2(mid.x + 12, mid.y - 6),
+                        IM_COL32(255, 235, 200, 255), buf);
+        }
+    }
 }
 
 void Editor::handleBlockTool(ViewPanel& p) {
@@ -3848,6 +3913,14 @@ void Editor::updateModalXform() {
             if (mx_.axis) delta = axv * glm::dot(delta, axv);
             if (snap_ && gridSize_ > 0)
                 delta = glm::round(delta / float(gridSize_)) * float(gridSize_);
+            if (!mx_.snap.empty()) {
+                glm::vec3 smn(1e30f), smx(-1e30f);
+                for (const auto& s : mx_.snap) {
+                    smn = glm::min(smn, s.boundsMin);
+                    smx = glm::max(smx, s.boundsMax);
+                }
+                geoSnapDelta(delta, smn, smx);
+            }
         }
         mx_.lastDelta = delta;
         mx_.lastVal = mx_.axis ? delta[mx_.axis - 1] : glm::length(delta);
@@ -5747,9 +5820,9 @@ void Editor::drawBrushInspector() {
     if (selection_.empty()) {
         ImGui::PushStyleColor(ImGuiCol_Text, pb::ui::col::faint);
         ImGui::TextWrapped(hasDoc()
-                               ? "Click a brush to select it. Drag the gizmo to move "
-                                 "it (W move / E rotate / R scale), or type exact "
-                                 "sizes below."
+                               ? "Click a brush to select it. Drag it, drag a corner "
+                                 "to resize, or press G / R / S then type an exact "
+                                 "amount."
                                : "Decompiling… the editable brushes appear here.");
         ImGui::PopStyleColor();
         return;
@@ -7995,6 +8068,53 @@ void Editor::updateHoverHighlight(ViewPanel& p) {
 
 // Grab anywhere on the selected object and drag it. 3D view moves along the
 // ground (hold Shift for up/down); the 2D views move in the view plane.
+// Adjust a proposed move delta so a corner of the selection's bounding box
+// lands exactly on the nearest vertex of some *other* brush. Returns true and
+// sets snapMark_ when it snapped.
+bool Editor::geoSnapDelta(glm::vec3& d, const glm::vec3& selMn,
+                          const glm::vec3& selMx) {
+    snapMarkOn_ = false;
+    if (!snapGeo_) return false;
+    // Candidate anchor points on the moved selection.
+    const glm::vec3 mn = selMn + d, mx = selMx + d;
+    const glm::vec3 anchors[9] = {
+        mn, mx, {mn.x, mn.y, mx.z}, {mx.x, mn.y, mn.z}, {mn.x, mx.y, mn.z},
+        {mx.x, mx.y, mn.z}, {mn.x, mx.y, mx.z}, {mx.x, mn.y, mx.z},
+        0.5f * (mn + mx)};
+    const float R = std::max(4.0f, float(gridSize_)) * 1.5f;  // world radius
+    float best = R * R;
+    glm::vec3 bestFix(0), bestPt(0);
+    auto consider = [&](const map::Solid& s, bool skip) {
+        if (skip || !s.valid) return;
+        for (const auto& f : s.faces)
+            for (const auto& v : f.verts)
+                for (const auto& a : anchors) {
+                    const glm::vec3 diff = v - a;
+                    const float q = glm::dot(diff, diff);
+                    if (q < best) { best = q; bestFix = diff; bestPt = v; }
+                }
+    };
+    // Skip the brushes being moved.
+    std::vector<const map::Solid*> moving;
+    for (const auto& r : selection_)
+        if (const map::Solid* s = doc_.resolve(r)) moving.push_back(s);
+    auto isMoving = [&](const map::Solid& s) {
+        for (auto* m : moving) if (m == &s) return true;
+        return false;
+    };
+    for (const auto& s : doc_.worldSolids()) consider(s, isMoving(s));
+    for (const auto& e : doc_.entities())
+        for (const auto& s : e.solids) consider(s, isMoving(s));
+
+    if (best < R * R) {
+        d += bestFix;
+        snapMark_ = bestPt;
+        snapMarkOn_ = true;
+        return true;
+    }
+    return false;
+}
+
 void Editor::handleSelectionMove(ViewPanel& p) {
     if (tool_ != Tool::Select || gizmoUsing_ || resizeHandle_ >= 0 ||
         resizeHot_ >= 0)
@@ -8109,6 +8229,14 @@ void Editor::handleSelectionMove(ViewPanel& p) {
         if (moveDrag_ == 1) d.z = 0.0f;
         else d = glm::vec3(0, 0, d.z);
         d = snapVec(d);
+        if (!moveIsEnt_ && !resizeSnap_.empty()) {
+            glm::vec3 smn(1e30f), smx(-1e30f);
+            for (const auto& s : resizeSnap_) {
+                smn = glm::min(smn, s.boundsMin);
+                smx = glm::max(smx, s.boundsMax);
+            }
+            geoSnapDelta(d, smn, smx);
+        }
         if (d != glm::vec3(0)) {
             if (moveIsEnt_) {
                 auto& e = doc_.entities()[selectedEntity_];
