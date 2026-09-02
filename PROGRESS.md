@@ -4,6 +4,20 @@ Newest first. ROADMAP.md milestones A–H are spent; **PLAN.md** is the live pla
 (five gated phases to 1.0 + the UI plan).
 
 ## Phases + performance batch
+- **Repo prep for public GitHub release.** Rewrote `README.md` — it still
+  described "milestone 1: BSP load + view" while the editor is now a full
+  decompile → edit → compile → playtest tool; the new one covers what
+  actually works (loading/rendering, Simple + Pro editing, transforms,
+  ship pipeline, QoL) plus build/run/layout and a third-party
+  acknowledgements section. Added `.gitattributes` (LF in repo, `eol=lf`
+  for `*.sh`, `eol=crlf` for `*.ps1`, binary rules for fonts/assets).
+  `gh` 2.99.0 installed to `%LOCALAPPDATA%\Programs\gh`; secret/email/abs-path
+  scan of tracked files is clean; `tools/` (BSPSource + JRE) and
+  `assets/mapping_resource_pack/` stay gitignored. Awaiting the user's
+  `gh auth login` before `gh repo create pootis-builder --public --push`.
+  Open decisions for the user: LICENSE file (none yet), and every commit is
+  authored `Pootis Builder <…@protonmail.com>` — that address goes public
+  with the push unless rewritten.
 - **Things list — icons + a lot more of them.** The Simple-mode ▸ Things tab
   had ~20 entries and every non-model item fell back to a generic bolt/cube
   glyph. `SE` now carries a per-item FontAwesome icon and a `group` header;
