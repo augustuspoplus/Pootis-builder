@@ -5933,49 +5933,66 @@ void Editor::drawModelGrid() {
         modelListBuilt_ = true;
         PB_INFO("model browser: %zu models", modelList_.size());
 
-        // Bucket models into plain-language groups by their top folder.
-        auto friendly = [](const std::string& seg) -> std::string {
-            static const std::unordered_map<std::string, std::string> M = {
-                {"props_2fort", "2Fort"}, {"props_farm", "Farm / Sawmill"},
-                {"props_gravel", "Gravel Pit"}, {"props_well", "Well"},
-                {"props_mining", "Mining"}, {"props_spytech", "Spytech"},
-                {"props_hydro", "Hydro"}, {"props_swamp", "Swamp"},
-                {"props_frontline", "Frontline"}, {"props_coldfront", "Coldfront"},
-                {"props_medieval", "Medieval"}, {"props_lakeside", "Lakeside"},
-                {"props_island", "Island"}, {"props_moonbase", "Moonbase"},
-                {"props_mvm", "Mann vs Machine"}, {"props_manor", "Manor"},
-                {"props_lights", "Lighting"}, {"lights", "Lighting"},
-                {"props_doors", "Doors & gates"}, {"doors", "Doors & gates"},
-                {"props_furniture", "Furniture & interiors"},
-                {"props_interiors", "Furniture & interiors"},
-                {"props_office", "Furniture & interiors"},
-                {"props_industrial", "Industrial"}, {"props_pipes", "Industrial"},
-                {"props_generic", "Industrial"}, {"props_urban", "Industrial"},
-                {"props_wasteland", "Industrial"},
-                {"props_nature", "Nature & terrain"}, {"nature", "Nature & terrain"},
-                {"props_foliage", "Nature & terrain"},
-                {"props_forest", "Nature & terrain"},
-                {"props_rocktile", "Nature & terrain"},
-                {"props_desert", "Nature & terrain"},
-                {"props_gameplay", "Gameplay markers"},
-                {"props_teamplay", "Gameplay markers"},
-                {"props_vehicles", "Vehicles"}, {"props_junk", "Junk & debris"},
-                {"props_debris", "Junk & debris"}, {"props_trashcan", "Junk & debris"},
-                {"props_signs", "Signs"}, {"props_skybox", "Skybox / 3D-sky"},
-                {"props_halloween", "Holiday / event"},
-                {"props_christmas", "Holiday / event"},
-                {"props_holiday", "Holiday / event"},
-                {"player", "Characters & items"}, {"bots", "Characters & items"},
-                {"weapons", "Characters & items"}, {"items", "Characters & items"},
-                {"class", "Characters & items"}, {"buildables", "Characters & items"},
-                {"effects", "Effects & decals"}, {"decals", "Effects & decals"},
-            };
-            auto it = M.find(seg);
-            if (it != M.end()) return it->second;
-            std::string s = seg;
+        // Bucket models into big, recognisable *theme* groups. Each rule maps a
+        // substring of the folder name to a theme; first match wins.
+        auto friendly = [](const std::string& segIn) -> std::string {
+            std::string s = segIn;
             if (s.rfind("props_", 0) == 0) s = s.substr(6);
-            if (!s.empty()) s[0] = (char)std::toupper((unsigned char)s[0]);
-            return s.empty() ? std::string("Other") : s;
+            auto has = [&](const char* k) { return s.find(k) != std::string::npos; };
+            struct R { const char* key; const char* theme; };
+            static const R rules[] = {
+                {"snow", "Winter & alpine"}, {"alpine", "Winter & alpine"},
+                {"ice", "Winter & alpine"}, {"frost", "Winter & alpine"},
+                {"cold", "Winter & alpine"}, {"xmas", "Holiday & event"},
+                {"christmas", "Holiday & event"}, {"halloween", "Holiday & event"},
+                {"hallow", "Holiday & event"}, {"holiday", "Holiday & event"},
+                {"pumpkin", "Holiday & event"}, {"desert", "Desert & badlands"},
+                {"badlands", "Desert & badlands"}, {"dust", "Desert & badlands"},
+                {"hoodoo", "Desert & badlands"}, {"mesa", "Desert & badlands"},
+                {"egypt", "Desert & badlands"}, {"mvm", "Desert & badlands"},
+                {"farm", "Farm & sawmill"}, {"sawmill", "Farm & sawmill"},
+                {"lumber", "Farm & sawmill"}, {"granary", "Farm & sawmill"},
+                {"barn", "Farm & sawmill"}, {"swamp", "Swamp & jungle"},
+                {"island", "Swamp & jungle"}, {"jungle", "Swamp & jungle"},
+                {"tropic", "Swamp & jungle"}, {"medieval", "Medieval"},
+                {"castle", "Medieval"}, {"degroot", "Medieval"},
+                {"spytech", "Spytech & sci-fi"}, {"moonbase", "Spytech & sci-fi"},
+                {"space", "Spytech & sci-fi"}, {"nucleus", "Spytech & sci-fi"},
+                {"door", "Doors & gates"}, {"gate", "Doors & gates"},
+                {"light", "Lighting"}, {"lamp", "Lighting"},
+                {"furniture", "Furniture & interiors"},
+                {"interior", "Furniture & interiors"},
+                {"office", "Furniture & interiors"}, {"chair", "Furniture & interiors"},
+                {"desk", "Furniture & interiors"}, {"sign", "Signs & posters"},
+                {"poster", "Signs & posters"}, {"billboard", "Signs & posters"},
+                {"vehicle", "Vehicles"}, {"car", "Vehicles"}, {"truck", "Vehicles"},
+                {"train", "Vehicles"}, {"cart", "Vehicles"},
+                {"gameplay", "Gameplay markers"}, {"teamplay", "Gameplay markers"},
+                {"trigger", "Gameplay markers"}, {"junk", "Junk & debris"},
+                {"debris", "Junk & debris"}, {"trash", "Junk & debris"},
+                {"rubble", "Junk & debris"}, {"skybox", "Skybox / 3D-sky"},
+                {"nature", "Nature & rock"}, {"foliage", "Nature & rock"},
+                {"forest", "Nature & rock"}, {"rock", "Nature & rock"},
+                {"tree", "Nature & rock"}, {"cliff", "Nature & rock"},
+                {"plant", "Nature & rock"}, {"industrial", "Industrial & urban"},
+                {"pipe", "Industrial & urban"}, {"urban", "Industrial & urban"},
+                {"wasteland", "Industrial & urban"}, {"factory", "Industrial & urban"},
+                {"generic", "Industrial & urban"}, {"metal", "Industrial & urban"},
+                {"warehouse", "Industrial & urban"},
+                {"c17", "Half-Life 2"}, {"combine", "Half-Life 2"},
+                {"weapon", "Characters & items"}, {"item", "Characters & items"},
+                {"class", "Characters & items"}, {"buildable", "Characters & items"},
+                {"gib", "Characters & items"}, {"effect", "Effects & decals"},
+                {"decal", "Effects & decals"}, {"particle", "Effects & decals"},
+                {"2fort", "Map packs"}, {"well", "Map packs"}, {"gravel", "Map packs"},
+                {"hydro", "Map packs"}, {"manor", "Map packs"}, {"lakeside", "Map packs"},
+                {"frontline", "Map packs"}, {"mining", "Map packs"},
+            };
+            for (const auto& r : rules)
+                if (has(r.key)) return r.theme;
+            if (s.empty()) return "Other";
+            s[0] = (char)std::toupper((unsigned char)s[0]);
+            return s;
         };
         // The nth '/'-separated segment of a path (0-based), or "".
         auto segAt = [](const std::string& m, int n) -> std::string {
@@ -6038,18 +6055,45 @@ void Editor::drawModelGrid() {
                              modelFilter_, sizeof(modelFilter_));
     std::string needlePre = modelFilter_;
 
+    // A themed icon per category name.
+    auto catIcon = [](const std::string& n) -> const char* {
+        if (n == "Winter & alpine")        return ICON_FA_SNOWFLAKE;
+        if (n == "Holiday & event")        return ICON_FA_GHOST;
+        if (n == "Desert & badlands")      return ICON_FA_SUN;
+        if (n == "Farm & sawmill")         return ICON_FA_TRACTOR;
+        if (n == "Swamp & jungle")         return ICON_FA_FROG;
+        if (n == "Medieval")               return ICON_FA_CHESS_ROOK;
+        if (n == "Spytech & sci-fi")       return ICON_FA_USER_SECRET;
+        if (n == "Doors & gates")          return ICON_FA_DOOR_OPEN;
+        if (n == "Lighting")               return ICON_FA_LIGHTBULB;
+        if (n == "Furniture & interiors")  return ICON_FA_COUCH;
+        if (n == "Signs & posters")        return ICON_FA_SIGN_HANGING;
+        if (n == "Vehicles")               return ICON_FA_TRUCK;
+        if (n == "Gameplay markers")       return ICON_FA_FLAG;
+        if (n == "Junk & debris")          return ICON_FA_TRASH_CAN;
+        if (n == "Skybox / 3D-sky")        return ICON_FA_CLOUD;
+        if (n == "Nature & rock")          return ICON_FA_TREE;
+        if (n == "Industrial & urban")     return ICON_FA_GEARS;
+        if (n == "Half-Life 2")            return ICON_FA_CITY;
+        if (n == "Characters & items")     return ICON_FA_PERSON;
+        if (n == "Effects & decals")       return ICON_FA_SPRAY_CAN;
+        if (n == "Cosmetics (hats)")       return ICON_FA_HAT_WIZARD;
+        if (n == "Map packs")              return ICON_FA_MAP;
+        return ICON_FA_CUBES;
+    };
+
     // Collapsible category list (always-visible, scrollable). Row 0 = all,
-    // row 1 = recently used, then one row per plain-language group.
+    // row 1 = recently used, then one row per theme group.
     modelCat_ = std::clamp(modelCat_, 0, (int)modelCats_.size() + 1);
     if (needlePre.empty() &&
         ImGui::CollapsingHeader("Categories", ImGuiTreeNodeFlags_DefaultOpen)) {
-        const float listH = pb::ui::dp(std::min(230.0f,
+        const float listH = pb::ui::dp(std::min(260.0f,
                                      56.0f + modelCats_.size() * 19.0f));
         if (ImGui::BeginChild("##mdlcats", ImVec2(0, listH), true)) {
             auto row = [&](int id, const char* icon, const std::string& name,
                            size_t n) {
                 char buf[96];
-                std::snprintf(buf, sizeof(buf), "%s %s  (%zu)", icon,
+                std::snprintf(buf, sizeof(buf), "%s  %s  (%zu)", icon,
                               name.c_str(), n);
                 if (ImGui::Selectable(buf, modelCat_ == id)) modelCat_ = id;
             };
@@ -6057,7 +6101,7 @@ void Editor::drawModelGrid() {
             row(1, ICON_FA_CLOCK, "Recently used", recentModels_.size());
             ImGui::Separator();
             for (int c = 0; c < (int)modelCats_.size(); ++c)
-                row(c + 2, ICON_FA_FOLDER, modelCats_[c].first,
+                row(c + 2, catIcon(modelCats_[c].first), modelCats_[c].first,
                     modelCats_[c].second.size());
         }
         ImGui::EndChild();
