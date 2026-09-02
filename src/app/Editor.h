@@ -350,6 +350,14 @@ private:
     std::vector<std::string> recentModels_;
     bool modelListBuilt_ = false;
     render::ModelThumbnailer modelThumbs_;
+
+    // Material browser: every materials/**.vmt, bucketed by theme like the models.
+    std::vector<std::string> materialList_;          // name without prefix/suffix
+    std::vector<std::pair<std::string, std::vector<int>>> materialCats_;
+    int materialCat_ = 1;                            // 0 All · 1 In this map · 2 Recent
+    std::vector<std::string> recentMaterials_;
+    bool materialListBuilt_ = false;
+    void applyBrowserMaterial(const std::string& mat);
     float flySpeed_ = 900.0f;
 
     std::vector<map::SolidRef> selection_;
