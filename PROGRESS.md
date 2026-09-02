@@ -4,6 +4,18 @@ Newest first. ROADMAP.md milestones A–H are spent; **PLAN.md** is the live pla
 (five gated phases to 1.0 + the UI plan).
 
 ## Phases + performance batch
+- **Phase 3 — Surfaces (core done).** Material browser rebuilt on the
+  model-browser pattern (30k VMTs themed into groups, All / In this map /
+  Recent, full search, click-to-apply to selected faces). Surface tool:
+  Alt-click eyedropper + "treat selection as one surface". **Displacements**:
+  (a) `BrushFace` keeps the raw `dispinfo` block so decompiled terrain
+  round-trips losslessly — before this, saving cp_badlands flattened all
+  1191 displacements; (b) `buildDocMesh` tessellates the disp grid so
+  terrain renders sculpted in the editor, backing faces hidden;
+  (c) `faceMakeDisplacement` (power 2/3/4) + `faceSculptDisplacement`
+  (smoothstep raise/lower) + a DISPLACEMENT panel section.
+  `--disp-test` 7/7, `test.sh` 71/71. Deferred: `$basetexture2` blend
+  paint, interactive drag-sculpt, sew / subdivide / alpha, smoothing-group UI.
 - **Repo prep for public GitHub release.** Rewrote `README.md` — it still
   described "milestone 1: BSP load + view" while the editor is now a full
   decompile → edit → compile → playtest tool; the new one covers what

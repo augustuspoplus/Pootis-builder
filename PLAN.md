@@ -56,16 +56,24 @@ Everyday editing feel. No way to say "move it exactly 64 on X".
 - **Done:** lay a wall to exact size via the block depth field + SIZE panel; move a
   brush corner exactly onto another with the magnet; `G X 64 ⏎`.
 
-### Phase 3 — Surfaces
-A map's look is 90% surfaces; the texture tool is rough and displacements are read-only.
-- Face-edit tool on a correct UV basis: world/face align that holds under rotation,
-  fit / centre / justify, per-face lightmap scale, smoothing groups, "treat as one".
-- Blend materials: paint `$basetexture2` alpha on a face or displacement, live preview.
-- Displacement editing: create from a face (power 2/3/4); raise / lower / smooth / noise
-  with falloff; sew to neighbours; paint alpha; subdivide. Sculpt in 3D, numeric in 2D.
-- Material browser filtered to in-map + full VMT search, themed grouping like the models.
-- **Done when:** retexture a room, blend two ground materials, reshape a hillside — all
-  in Pootis Builder.
+### Phase 3 — Surfaces  (core done)
+A map's look is 90% surfaces; the texture tool was rough and displacements read-only.
+- [x] Face-edit tool on a correct UV basis: world/face align, fit / centre / justify,
+      per-face lightmap scale, **"treat as one"** (continuous projection across a
+      multi-face selection), **Alt-click eyedropper** (lift a face's whole projection).
+- [x] Material browser: every `materials/**.vmt` themed into groups (Concrete, Metal,
+      Wood, …), All / In this map / Recently used, full-path search, click-to-apply
+      to the selected face(s).
+- [x] Displacements: preserved losslessly through load→save (was silently flattening
+      every decompiled hillside); rendered as real sculpted terrain in the editor;
+      **create** from any 4-sided face at power 2/3/4; **raise / lower** with a
+      smoothstep-falloff brush. `--disp-test` 7/7.
+- [ ] Blend materials (`$basetexture2` alpha paint) — deferred.
+- [ ] Interactive drag-sculpt in the 3D viewport, smooth/noise, sew, subdivide,
+      alpha paint; smoothing-group UI — deferred (panel raise/lower + create cover
+      the "reshape a hillside" bar).
+- **Done:** retexture a room, reshape a hillside — both in Pootis Builder. Blending
+  two ground materials still needs Hammer.
 
 ### Phase 4 — Simple ↔ Pro, one document
 Simple is expansive; the seam to Pro is abrupt and "everything previews" is half-true.
