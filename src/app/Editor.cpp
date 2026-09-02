@@ -1041,7 +1041,9 @@ void Editor::makeTurbine(const std::string& outPath) {
     Ws({hxm - T, -hy - T, GND - 64}, {hxx, hy + T, GND}, F);        // floor
     Ws({hxm - T, -hy - T, HALLC}, {hxx, hy + T, HALLC + T}, F);    // ceiling
     Ws({hxm - T, hy, GND}, {hxx, hy + T, HALLC}, Wm);              // +Y wall
-    Ws({hxm - T, -hy - T, GND}, {hxx, -hy, HALLC}, Wm);           // -Y wall
+    // -Y wall, with a gap x[-2000,-1640] into the flank room
+    Ws({hxm - T, -hy - T, GND}, {-2000, -hy, HALLC}, Wm);
+    Ws({-1640, -hy - T, GND}, {hxx, -hy, HALLC}, Wm);
     // vent mouth in the +Y hall wall
     Ws({-1900, hy, 96}, {-1772, hy + T, 224}, F);
 
@@ -1054,7 +1056,9 @@ void Editor::makeTurbine(const std::string& outPath) {
     Ws({-3150, 600, GND - 64}, {sxx, 860, GND}, F);
     Ws({sxm - T, sym - T, HALLC}, {sxx, syx + T, HALLC + T}, F);   // ceiling
     Ws({sxm - T, syx, GND}, {sxx, syx + T, HALLC}, Wm);           // +Y wall
-    Ws({sxm - T, sym - T, GND}, {sxx, sym, HALLC}, Wm);          // -Y wall (to hall gap handled by hall)
+    // -Y wall, with a gap x[-3400,-2900] down into the annex
+    Ws({sxm - T, sym - T, GND}, {-3400, sym, HALLC}, Wm);
+    Ws({-2900, sym - T, GND}, {sxx, sym, HALLC}, Wm);
     Ws({sxm - T, sym - T, GND}, {sxm, syx + T, HALLC}, Wm);      // -X back wall
     // east wall closes spawn above the hall opening (hall is y[-288,288])
     Ws({sxx, 300, GND}, {sxx + T, syx + T, HALLC}, Wm);
@@ -1071,6 +1075,23 @@ void Editor::makeTurbine(const std::string& outPath) {
         {{"TeamNum", "3"}}, "2");
     BEs("func_regenerate", {sxm, 360, GND}, {sxm + 96, 640, GND + 128},
         {{"associatedmodel", ""}}, nullptr);
+
+    // ---- Spawn annex: the base is deeper than one room (fills the wing) ----
+    // A southward extension of the spawn hub; sealed except the doorway up.
+    const float axm = -3550, axx = -2720, aym = -720, ayx = 96;
+    Ws({axm - T, aym - T, GND - 64}, {axx + T, ayx, GND}, F);        // floor
+    Ws({axm - T, aym - T, HALLC}, {axx + T, ayx, HALLC + T}, F);    // ceiling
+    Ws({axm - T, aym - T, GND}, {axx + T, aym, HALLC}, Wm);        // -Y wall
+    Ws({axm - T, aym - T, GND}, {axm, ayx, HALLC}, Wm);           // -X wall
+    Ws({axx, aym - T, GND}, {axx + T, ayx, HALLC}, Wm);          // +X wall (solid)
+
+    // ---- Flank room off the main hall (-Y side) — fills the wing --------
+    const float kxm = -2160, kxx = -1400, kym = -1000, kyx = -288;
+    Ws({kxm - T, kym - T, GND - 64}, {kxx + T, kyx, GND}, F);       // floor
+    Ws({kxm - T, kym - T, HALLC}, {kxx + T, kyx, HALLC + T}, F);   // ceiling
+    Ws({kxm - T, kym - T, GND}, {kxm, kyx, HALLC}, Wm);           // -X wall
+    Ws({kxm - T, kym - T, GND}, {kxx + T, kym, HALLC}, Wm);      // -Y wall
+    Ws({kxx, kym - T, GND}, {kxx + T, kyx, HALLC}, Wm);         // +X wall (solid — dead-end room)
 
     // ---- Stair room: spawn floor down to the flag room ------------------
     Ws({-3450 - T, -1180, FLRB - 48}, {-3000 + T, 96 + T, FLRB}, F);   // lower floor
