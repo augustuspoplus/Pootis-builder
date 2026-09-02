@@ -3,6 +3,35 @@
 Newest first. See ROADMAP.md for the plan. Q1 = auto-decompile .bsp on open.
 Q2 = Simple-mode kit builds new maps (prioritised). Also doing section G (QoL).
 
+## User-requested batch (editing UX)
+- **Reliable card drag + drop preview** (cb51c56): every Build card, Things
+  row, model tile and entity-catalog row now uses one manual drag mechanism
+  (press + drag-past-threshold → `dragPlace_`, dropped by `frame()` on the
+  viewport under the release). The Build cards were the worst — they wrapped
+  content in a child window and `BeginDragDropSource`'d *that*, so Wall etc.
+  often refused to drag. While a piece is armed or dragged, a green wireframe
+  ghost + `name (x y z)` label shows exactly where it'll land.
+- **Themed prop categories** (a2aea25): the 16k models bucket into ~20
+  recognisable themes with icons — Winter & alpine ❄, Desert & badlands ☀,
+  Farm & sawmill, Swamp & jungle 🐸, Medieval ♜, Spytech & sci-fi 🕵,
+  Holiday & event 👻, Industrial & urban ⚙, Nature & rock 🌳, Lighting,
+  Doors, Furniture, Vehicles, Signs, Gameplay, Junk, Skybox, Half-Life 2 🏙,
+  Cosmetics 🧙, Map packs 🗺. Substring match on the folder name.
+- **History tab in Simple mode** (bc3cc5d): `drawHistoryPanel` docks beside
+  Selection — full-width Undo/Redo, every step in plain language, current
+  step marked + auto-scrolled, undone steps dimmed, click to jump.
+- **3D-primary viewports** (77079ac): both modes start with only the 3D view;
+  top-bar "Top / Front / Side" toggles open each 2D view as a tab beside 3D
+  (own close button). Pro's fixed 2×2 removed.
+- **Gizmo switcher + options** (2b4bd1a): Blender-header-style
+  [move][rotate][scale] toolbar floats top-left of each viewport when a
+  brush is selected (W/E/R still work); Options > Viewport gains a gizmo
+  "Handle size" slider + Normal/Bold/Fine style, persisted.
+- **Whole-piece vs part selection** (a38c048): viewport toolbar toggle —
+  clicking a multi-brush piece (Dome, spawn room…) grabs the whole
+  func_detail, or just the one brush. Placing a multi-brush piece selects
+  the whole thing now.
+
 ## Overnight batch — Simple-mode expansion (latest)
 - **Phase 1 — model-less entities visible everywhere** (5215d28): any entity
   with no renderable model now draws a class-coloured diamond + label in the
