@@ -838,8 +838,324 @@ void Editor::makeTemplates(const std::string& outDir) {
     sun(glm::vec3(0, 0, 512));
     doc_.saveVmf(outDir + "/cp_push.vmf");
 
+    // 7. ctf_turbine layout reconstruction (its own builder).
+    makeTurbine(outDir + "/turbine_lookalike.vmf");
+
     reset("scratch");   // leave the editor on a clean blank doc
-    PB_INFO("wrote 6 templates to %s", outDir.c_str());
+    PB_INFO("wrote 7 templates to %s", outDir.c_str());
+}
+
+// ---------------------------------------------------------------------------
+// Turbine look-alike — a from-the-kit reconstruction of ctf_turbine's layout.
+// Built at true Hammer scale (base-to-base ~7200u along X, ~3500u wide) with
+// 180-degree rotational symmetry about Z, so the whole BLU half is authored
+// once and echoed to RED by (x,y) -> (-x,-y). Real spawn / flag / observer
+// coordinates are lifted straight from the decompiled map.
+// ---------------------------------------------------------------------------
+void Editor::makeTurbine(const std::string& outPath) {
+    bsp_ = BspFile();
+    doc_.newBlank("turbine");
+    doc_.worldExtra().set("skyname", "sky_upward");
+    history_.reset(doc_);
+    clearSelection();
+
+    const std::string F = "dev/dev_measuregeneric01b";   // floors / detail
+    const std::string Wm = "dev/dev_measurewall01a";     // walls
+    const std::string SK = "tools/toolsskybox";
+
+    // Height bands (Z, top-of-surface).
+    const float GND = 0.f, HALLC = 224.f, CEIL = 320.f, CAT = 160.f;
+    const float FLRB = -288.f, BASC = -32.f;
+    const float SKYB = -544.f, SKYT = 544.f;
+    const float T = 16.f;
+
+    auto rotMn = [](glm::vec3 mn, glm::vec3 mx) {
+        return glm::vec3(-mx.x, -mx.y, mn.z);
+    };
+    auto rotMx = [](glm::vec3 mn, glm::vec3 mx) {
+        return glm::vec3(-mn.x, -mn.y, mx.z);
+    };
+    auto W = [&](glm::vec3 mn, glm::vec3 mx, const std::string& m) {
+        map::Solid s = map::Solid::makeBox(mn, mx, m);
+        s.id = doc_.nextId();
+        if (s.valid) doc_.worldSolids().push_back(std::move(s));
+    };
+    // box + its 180-degree twin
+    auto Ws = [&](glm::vec3 mn, glm::vec3 mx, const std::string& m) {
+        W(mn, mx, m);
+        W(rotMn(mn, mx), rotMx(mn, mx), m);
+    };
+    // hollow tube (crawl vent): 4 thin slabs around an interior box
+    auto tube = [&](glm::vec3 mn, glm::vec3 mx) {
+        Ws({mn.x, mn.y, mn.z}, {mx.x, mx.y, mn.z + 8}, F);          // floor
+        Ws({mn.x, mn.y, mx.z - 8}, {mx.x, mx.y, mx.z}, F);          // ceiling
+        Ws({mn.x, mn.y, mn.z}, {mx.x, mn.y + 8, mx.z}, Wm);         // -Y wall
+        Ws({mn.x, mx.y - 8, mn.z}, {mx.x, mx.y, mx.z}, Wm);         // +Y wall
+    };
+    auto detail = [&](std::vector<map::Solid> pieces) {
+        map::MapEntity fd;
+        fd.id = doc_.nextId();
+        fd.classname = "func_detail";
+        fd.kv.set("classname", "func_detail");
+        for (auto& s : pieces) {
+            if (!s.valid) continue;
+            s.id = doc_.nextId();
+            fd.solids.push_back(std::move(s));
+        }
+        if (!fd.solids.empty()) doc_.entities().push_back(std::move(fd));
+    };
+    auto pos3 = [](glm::vec3 p) {
+        return std::to_string((int)p.x) + " " + std::to_string((int)p.y) + " " +
+               std::to_string((int)p.z);
+    };
+    auto P = [&](const char* cls, glm::vec3 at,
+                 std::initializer_list<std::pair<const char*, const char*>> kvs) {
+        map::MapEntity e;
+        e.id = doc_.nextId();
+        e.classname = cls;
+        e.origin = at;
+        e.kv.set("classname", cls);
+        e.kv.set("origin", pos3(at));
+        for (auto& kv : kvs)
+            if (kv.second && kv.second[0]) e.kv.set(kv.first, kv.second);
+        doc_.entities().push_back(std::move(e));
+    };
+    // point entity + twin; `yawKey` (if given) gets +180 on the twin
+    auto Ps = [&](const char* cls, glm::vec3 at,
+                  std::initializer_list<std::pair<const char*, const char*>> kvs,
+                  const char* twinTeam = nullptr) {
+        P(cls, at, kvs);
+        std::vector<std::pair<const char*, const char*>> t(kvs);
+        for (auto& kv : t)
+            if (twinTeam && std::string(kv.first) == "TeamNum") kv.second = twinTeam;
+        std::initializer_list<std::pair<const char*, const char*>> none{};
+        map::MapEntity e;
+        e.id = doc_.nextId();
+        e.classname = cls;
+        e.origin = glm::vec3(-at.x, -at.y, at.z);
+        e.kv.set("classname", cls);
+        e.kv.set("origin", pos3(e.origin));
+        for (auto& kv : t)
+            if (kv.second && kv.second[0]) e.kv.set(kv.first, kv.second);
+        (void)none;
+        doc_.entities().push_back(std::move(e));
+    };
+    auto BEs = [&](const char* cls, glm::vec3 mn, glm::vec3 mx,
+                   std::initializer_list<std::pair<const char*, const char*>> kvs,
+                   const char* twinTeam) {
+        for (int pass = 0; pass < 2; ++pass) {
+            glm::vec3 a = pass ? rotMn(mn, mx) : mn;
+            glm::vec3 b = pass ? rotMx(mn, mx) : mx;
+            map::MapEntity e;
+            e.id = doc_.nextId();
+            e.classname = cls;
+            e.origin = 0.5f * (a + b);
+            e.kv.set("classname", cls);
+            for (auto& kv : kvs) {
+                if (!kv.second || !kv.second[0]) continue;
+                if (pass && twinTeam && std::string(kv.first) == "TeamNum")
+                    e.kv.set(kv.first, twinTeam);
+                else
+                    e.kv.set(kv.first, kv.second);
+            }
+            map::Solid s = map::Solid::makeBox(a, b, "tools/toolstrigger");
+            s.id = doc_.nextId();
+            e.solids.push_back(std::move(s));
+            doc_.entities().push_back(std::move(e));
+        }
+    };
+
+    // ---- Sky shell (sealed box around the play space) -------------------
+    const float sxmn = -3680, sxmx = 3680, symn = -2080, symx = 2080;
+    W({sxmn - T, symn - T, SKYB - T}, {sxmx + T, symx + T, SKYB}, SK);   // ground
+    W({sxmn - T, symn - T, SKYT}, {sxmx + T, symx + T, SKYT + T}, SK);   // roof
+    W({sxmn - T, symn - T, SKYB}, {sxmx + T, symn, SKYT}, SK);
+    W({sxmn - T, symx, SKYB}, {sxmx + T, symx + T, SKYT}, SK);
+    W({sxmn - T, symn, SKYB}, {sxmn, symx, SKYT}, SK);
+    W({sxmx, symn, SKYB}, {sxmx + T, symx, SKYT}, SK);
+
+    // ---- Central turbine room ----------------------------------------------
+    const float cx = 1120, cy = 1216;                    // interior half-extents
+    W({-cx - T, -cy - T, GND - 64}, {cx + T, cy + T, GND}, F);       // floor
+    W({-cx - T, -cy - T, CEIL}, {cx + T, cy + T, CEIL + T}, F);      // ceiling
+    // +Y wall (twin makes the -Y wall); gap x[1120,1440] for the basement climb
+    Ws({-cx - T, cy, GND}, {1120, cy + T, CEIL}, Wm);
+    Ws({1440, cy, GND}, {cx + T, cy + T, CEIL}, Wm);
+    Ws({1120, cy, HALLC}, {1440, cy + T, CEIL}, Wm);                 // lintel
+    // -X wall (twin makes +X wall); central doorway y[-256,256] into the hall
+    Ws({-cx - T, -cy - T, GND}, {-cx, -256, CEIL}, Wm);
+    Ws({-cx - T, 256, GND}, {-cx, cy + T, CEIL}, Wm);
+    Ws({-cx - T, -256, HALLC + 32}, {-cx, 256, CEIL}, Wm);          // lintel
+
+    // Catwalk ring at CAT (open square in the middle = the turbine pit)
+    Ws({-cx, -cy, CAT}, {cx, -1040, CAT + T}, F);                    // +/-Y strips
+    Ws({-cx, -1040, CAT}, {-1040, 1040, CAT + T}, F);               // +/-X strips
+    // stair up to the catwalk, SW corner (mirrored to RED's NE corner)
+    {
+        std::vector<map::Solid> st;
+        for (int i = 0; i < 10; ++i) {
+            float z0 = GND + i * (CAT / 10.f);
+            float y0 = -cy + 40 + i * 40.f;
+            st.push_back(map::Solid::makeBox({-cx + 40, y0, GND},
+                                             {-cx + 200, y0 + 44, z0 + CAT / 10.f}, F));
+            st.push_back(map::Solid::makeBox(
+                glm::vec3(cx - 200, -y0 - 44, GND),
+                glm::vec3(cx - 40, -y0, z0 + CAT / 10.f), F));
+        }
+        detail(std::move(st));
+    }
+    // 4 support pillars
+    Ws({-672 - 48, -768 - 48, GND}, {-672 + 48, -768 + 48, CEIL}, Wm);
+    Ws({-672 - 48, 768 - 48, GND}, {-672 + 48, 768 + 48, CEIL}, Wm);
+    // pit rim on the floor
+    Ws({-470, -470, GND}, {470, -430, GND + 40}, F);
+    Ws({-470, 430, GND}, {470, 470, GND + 40}, F);
+    Ws({-470, -430, GND}, {-430, 430, GND + 40}, F);
+
+    // The turbine itself: stacked cylinders hung under the ceiling.
+    {
+        auto disc = [&](float rad, float z0, float z1, int sides) {
+            std::vector<std::pair<glm::vec3, float>> pl = {
+                {{0, 0, 1}, z1}, {{0, 0, -1}, -z0}};
+            for (int k = 0; k < sides; ++k) {
+                float a = (k / float(sides)) * 6.2831853f;
+                glm::vec3 n(std::cos(a), std::sin(a), 0);
+                pl.push_back({n, rad});
+            }
+            return map::Solid::fromPlanes(pl, Wm);
+        };
+        std::vector<map::Solid> t;
+        t.push_back(disc(380, CEIL - 48, CEIL, 16));       // housing
+        t.push_back(disc(150, CEIL - 150, CEIL - 48, 20)); // hub
+        detail(std::move(t));
+    }
+
+    // ---- Main hall (BLU; twin = RED) -------------------------------------
+    const float hxm = -2160, hxx = -1120, hy = 288;
+    Ws({hxm - T, -hy - T, GND - 64}, {hxx, hy + T, GND}, F);        // floor
+    Ws({hxm - T, -hy - T, HALLC}, {hxx, hy + T, HALLC + T}, F);    // ceiling
+    Ws({hxm - T, hy, GND}, {hxx, hy + T, HALLC}, Wm);              // +Y wall
+    Ws({hxm - T, -hy - T, GND}, {hxx, -hy, HALLC}, Wm);           // -Y wall
+    // vent mouth in the +Y hall wall
+    Ws({-1900, hy, 96}, {-1772, hy + T, 224}, F);
+
+    // ---- Spawn hub (BLU; twin = RED) -----------------------------------
+    const float sxm = -3550, sxx = -2160, sym = 96, syx = 928;
+    // floor in four pieces, leaving a stair hole x[-3450,-3150] y[600,860]
+    Ws({sxm - T, sym - T, GND - 64}, {sxx, 600, GND}, F);
+    Ws({sxm - T, 860, GND - 64}, {sxx, syx + T, GND}, F);
+    Ws({sxm - T, 600, GND - 64}, {-3450, 860, GND}, F);
+    Ws({-3150, 600, GND - 64}, {sxx, 860, GND}, F);
+    Ws({sxm - T, sym - T, HALLC}, {sxx, syx + T, HALLC + T}, F);   // ceiling
+    Ws({sxm - T, syx, GND}, {sxx, syx + T, HALLC}, Wm);           // +Y wall
+    Ws({sxm - T, sym - T, GND}, {sxx, sym, HALLC}, Wm);          // -Y wall (to hall gap handled by hall)
+    Ws({sxm - T, sym - T, GND}, {sxm, syx + T, HALLC}, Wm);      // -X back wall
+    // east wall closes spawn above the hall opening (hall is y[-288,288])
+    Ws({sxx, 300, GND}, {sxx + T, syx + T, HALLC}, Wm);
+
+    // spawn points (real team-3 coords, echoed to team 2)
+    for (int col = 0; col < 2; ++col)
+        for (int row = 0; row < 4; ++row) {
+            glm::vec3 p(-3400 + col * 120.f, 240 + row * 100.f, GND + 16);
+            Ps("info_player_teamspawn", p,
+               {{"TeamNum", "3"}, {"angles", "0 0 0"}}, "2");
+        }
+    // respawn room volume + resupply
+    BEs("func_respawnroom", {sxm, sym, GND}, {sxx, syx, HALLC},
+        {{"TeamNum", "3"}}, "2");
+    BEs("func_regenerate", {sxm, 360, GND}, {sxm + 96, 640, GND + 128},
+        {{"associatedmodel", ""}}, nullptr);
+
+    // ---- Stair room: spawn floor down to the flag room ------------------
+    Ws({-3450 - T, -1180, FLRB - 48}, {-3000 + T, 96 + T, FLRB}, F);   // lower floor
+    Ws({-3450 - T, -1180, GND}, {-3000 + T, 96 + T, GND + T}, F);       // its ceiling
+    Ws({-3450 - T, -1180, FLRB}, {-3450, 96 + T, GND}, Wm);            // -X wall
+    Ws({-3000, -1180, FLRB}, {-3000 + T, 96 + T, GND}, Wm);           // +X wall
+    {
+        std::vector<map::Solid> st;
+        for (int i = 0; i < 16; ++i) {
+            float z0 = GND - i * ((GND - FLRB) / 16.f);
+            float y0 = 40 - i * 70.f;
+            st.push_back(map::Solid::makeBox({-3400, y0 - 74, FLRB},
+                                             {-3050, y0, z0}, F));
+            st.push_back(map::Solid::makeBox(glm::vec3(3050, -y0, FLRB),
+                                             glm::vec3(3400, -y0 + 74, z0), F));
+        }
+        detail(std::move(st));
+    }
+
+    // ---- Flag room (basement) -----------------------------------------
+    const float fxm = -3550, fxx = -2650, fym = -1880, fyx = -1150;
+    Ws({fxm - T, fym - T, FLRB - 48}, {fxx + T, fyx + T, FLRB}, F);   // floor
+    Ws({fxm - T, fym - T, BASC}, {fxx + T, fyx + T, BASC + T}, F);    // ceiling
+    Ws({fxm - T, fym - T, FLRB}, {fxx + T, fym, BASC}, Wm);          // -Y wall
+    Ws({fxm - T, fym - T, FLRB}, {fxm, fyx + T, BASC}, Wm);          // -X wall
+    Ws({fxm - T, fyx, FLRB}, {-3450, fyx + T, BASC}, Wm);           // +Y wall (gap to stair room x[-3450,-3000])
+    Ws({-3000, fyx, FLRB}, {fxx + T, fyx + T, BASC}, Wm);
+    Ws({fxx, fym - T, FLRB}, {fxx + T, -1400, BASC}, Wm);           // +X wall, gap y[-1400,-1150] to mid route
+    // flag stand + intel (real origin)
+    Ws({-3080 - 72, -1520 - 72, FLRB}, {-3080 + 72, -1520 + 72, FLRB + 40}, F);
+    Ps("item_teamflag", glm::vec3(-3080, -1520, FLRB + 40),
+       {{"TeamNum", "3"}, {"targetname", "intel_blue"}, {"GameType", "1"},
+        {"ReturnTime", "60"}, {"flag_model", "models/flag/briefcase.mdl"},
+        {"flag_icon", "sd_intel_blue"}, {"trail_effect", "1"}, {"angles", "0 0 0"}},
+       "2");
+    BEs("func_capturezone", {-3400, -1780, FLRB}, {-3060, -1440, FLRB + 100},
+        {{"TeamNum", "3"}, {"targetname", "cap_blue"}, {"CapturePoint", "1"}}, "2");
+
+    // ---- Lower mid route: flag room -> centre-room SW ramp -------------
+    Ws({fxx, -1880, FLRB - 48}, {-1120, -1400, FLRB}, F);          // corridor floor
+    Ws({fxx, -1880, BASC}, {-1120, -1400, BASC + T}, F);          // corridor ceiling
+    Ws({fxx, -1880, FLRB}, {-1120, -1880 + T, BASC}, Wm);        // -Y wall
+    Ws({fxx, -1400, FLRB}, {-1440, -1400 + T, BASC}, Wm);       // +Y wall (stops before the climb)
+    {   // stepped climb up into the centre room through its -Y wall gap
+        std::vector<map::Solid> r;
+        const int steps = 12;
+        const float run = 40.f, rise = (GND - FLRB) / steps;
+        for (int i = 0; i < steps; ++i) {
+            const float x0 = -1600 + i * run;
+            const float z1 = FLRB + (i + 1) * rise;
+            r.push_back(map::Solid::makeBox({x0, -1400, FLRB},
+                                            {x0 + run + 1, -940, z1}, F));
+            r.push_back(map::Solid::makeBox(glm::vec3(-x0 - run - 1, 940, FLRB),
+                                            glm::vec3(-x0, 1400, z1), F));
+        }
+        detail(std::move(r));
+    }
+
+    // ---- Crawl vents (turbine's signature) ---------------------------
+    tube({-1920, 360, 96}, {-1180, 488, 224});     // along the hall
+    tube({-1308, 360, 96}, {-1180, 940, 224});     // turn toward mid
+    tube({-1308, 812, CAT}, {-1180, 940, 224});    // drop onto the catwalk
+
+    // ---- Upper gallery: high ground from the hall around the pit -----
+    Ws({-1120, -1040, CAT - 8}, {-928, -300, CAT + 8}, F);        // SW gallery arm
+    Ws({-1120, -1040, CAT + 8}, {-1104, -300, CAT + 88}, Wm);     // its guard rail
+
+    // ---- Lighting ---------------------------------------------------
+    P("light_environment", glm::vec3(0, 0, 440),
+      {{"_light", "251 244 227 380"}, {"_ambient", "74 84 104 120"},
+       {"pitch", "-42"}, {"angles", "0 315 0"}, {"SunSpreadAngle", "0"}});
+    P("light", glm::vec3(0, 0, 292), {{"_light", "255 244 224 500"},
+       {"_fifty_percent_distance", "260"}, {"_zero_percent_distance", "760"}});
+    Ps("light", glm::vec3(-1640, 0, 200), {{"_light", "255 238 214 320"},
+       {"_fifty_percent_distance", "180"}, {"_zero_percent_distance", "520"}});
+    Ps("light", glm::vec3(-2850, 512, 190), {{"_light", "255 238 214 300"},
+       {"_fifty_percent_distance", "170"}, {"_zero_percent_distance", "480"}});
+    Ps("light", glm::vec3(-3080, -1500, -110), {{"_light", "255 226 196 260"},
+       {"_fifty_percent_distance", "150"}, {"_zero_percent_distance", "420"}});
+    Ps("light", glm::vec3(-1900, -1640, -110), {{"_light", "255 226 196 240"},
+       {"_fifty_percent_distance", "150"}, {"_zero_percent_distance", "420"}});
+
+    // ---- Observer point (real) ------------------------------------
+    P("info_observer_point", glm::vec3(0, 712, 364), {{"angles", "12 270 0"}});
+
+    std::string err;
+    if (doc_.saveVmf(outPath, &err))
+        PB_INFO("wrote turbine look-alike: %s  (%zu solids, %zu entities)",
+                outPath.c_str(), doc_.worldSolids().size(), doc_.entities().size());
+    else
+        PB_ERROR("turbine save failed: %s", err.c_str());
 }
 
 void Editor::drawWelcome() {
@@ -931,6 +1247,7 @@ void Editor::drawWelcome() {
             {"payload", "Payload", "BLU to RED, working cart"},
             {"cp_push", "Attack / defend", "One point + a round timer"},
             {"trade_box", "Trade box", "A big room, both spawns"},
+            {"turbine_lookalike", "Turbine (greybox)", "ctf_turbine's layout, to scale"},
         };
         const float tw = (ImGui::GetContentRegionAvail().x - 20) / 3.0f;
         for (int i = 0; i < IM_ARRAYSIZE(tpls); ++i) {

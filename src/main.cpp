@@ -80,6 +80,7 @@ struct Options {
     bool palette = false;
     bool settings = false;
     std::string makeTpl;
+    std::string makeTurbine;
     std::string placePrefabPath;
     int subDemoMode = 0;
     bool workshop = false;
@@ -130,6 +131,7 @@ Options parseArgs(int argc, char** argv) {
         else if (a == "--palette") o.palette = true;
         else if (a == "--settings") o.settings = true;
         else if (a == "--make-templates") o.makeTpl = next("");
+        else if (a == "--make-turbine") o.makeTurbine = next("");
         else if (a == "--place-prefab") o.placePrefabPath = next("");
         else if (a == "--dump-props") o.dumpProps = true;
         else if (a == "--no-decompile") o.noDecompile = true;
@@ -189,6 +191,7 @@ int runHeadlessScreenshot(const Options& opt, GLFWwindow* window, float uiScale)
     if (opt.palette) editor.debugShowPalette();
     if (opt.settings) editor.debugShowSettings();
     if (!opt.makeTpl.empty()) editor.debugMakeTemplates(opt.makeTpl);
+    if (!opt.makeTurbine.empty()) editor.debugMakeTurbine(opt.makeTurbine);
     if (!opt.saveVmfPath.empty()) editor.saveVmf(opt.saveVmfPath);
     if (!opt.panel.empty()) editor.debugFocusPanel(opt.panel);
     if (opt.dumpProps) editor.debugDumpProps();
