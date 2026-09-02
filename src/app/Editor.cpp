@@ -1,10 +1,12 @@
 #include "app/Editor.h"
 
 #include <algorithm>
+#include <cstdio>
 #include <cstdlib>
 #include <chrono>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <functional>
 #include <initializer_list>
 #include <unordered_map>
@@ -365,6 +367,12 @@ void Editor::frameAllViews() {
 void Editor::frame() {
     pollDecompile();
     compiler_.poll();
+    // Compile just finished? If vbsp left a leak pointfile, load and show it.
+    if (compileWasRunning_ && !compiler_.running()) {
+        const std::string lf = compiler_.leakFile();
+        if (!lf.empty()) loadPointfile(lf);
+    }
+    compileWasRunning_ = compiler_.running();
     ImGuizmo::BeginFrame();
     docMeshDirty_ = false;
     ImGuiViewport* vp = ImGui::GetMainViewport();
@@ -1619,6 +1627,7 @@ void Editor::drawViewportPanel(ViewPanel& p, bool* pOpen) {
     drawSelectionDims(p, aspect, dl);
     drawCordonOverlay(p, aspect, dl);
     drawRoadOverlay(p, aspect, dl);
+    drawLeakOverlay(p, aspect, dl);
     drawPlacePreview(p, aspect, dl);
     drawModalXformHud(p, dl);
 
@@ -3405,6 +3414,92 @@ void Editor::drawRoadOverlay(ViewPanel& p, float aspect, ImDrawList* dl) {
     }
     dl->AddText(ImVec2(p.contentMin.x + 8, p.contentMin.y + 40), col,
                 "ROAD — click to add points, Enter to build");
+}
+
+void Editor::debugLeakTest() {
+    const std::string tmp =
+        (std::filesystem::temp_directory_path() / "pb_leak.lin").string();
+    {
+        std::ofstream f(tmp);
+        f << "0 0 0\n128 0 0\n128 256 0\n128 256 512\n";
+    }
+    const bool ok = loadPointfile(tmp) && leakLine_.size() == 4 &&
+                    std::fabs(leakLine_[2].y - 256.0f) < 0.01f &&
+                    std::fabs(leakLine_[3].z - 512.0f) < 0.01f;
+    PB_INFO("leak-test: %d passed, %d failed", ok ? 1 : 0, ok ? 0 : 1);
+}
+
+bool Editor::loadPointfile(const std::string& path) {
+    leakLine_.clear();
+    std::ifstream f(path);
+    if (!f) {
+        status_ = "No pointfile at " + path;
+        return false;
+    }
+    std::string line;
+    while (std::getline(f, line)) {
+        float x, y, z;
+        if (std::sscanf(line.c_str(), " %f %f %f", &x, &y, &z) == 3)
+            leakLine_.push_back({x, y, z});
+    }
+    if (leakLine_.empty()) {
+        status_ = "Pointfile had no points: " + path;
+        return false;
+    }
+    status_ = "Leak trace loaded — " + std::to_string(leakLine_.size()) +
+              " points. Follow the line to the hole.";
+    frameLeak();
+    return true;
+}
+
+void Editor::frameLeak() {
+    if (leakLine_.size() < 2) return;
+    // Aim at the first segment — the end of the trace nearest the leaked entity.
+    const glm::vec3 a = leakLine_.front();
+    const glm::vec3 b = leakLine_[std::min<size_t>(1, leakLine_.size() - 1)];
+    const glm::vec3 mid = 0.5f * (a + b);
+    for (auto& v : views_) {
+        if (v.kind == ViewKind::Perspective) {
+            glm::vec3 dir = glm::normalize(b - a + glm::vec3(0.001f));
+            v.camera.pos = mid - dir * 512.0f + glm::vec3(0, 0, 256.0f);
+            v.camera.yawDeg =
+                glm::degrees(std::atan2(dir.y, dir.x));
+            v.camera.pitchDeg = -22.0f;
+        } else {
+            v.camera.orthoCenter = mid;
+        }
+    }
+}
+
+void Editor::drawLeakOverlay(ViewPanel& p, float aspect, ImDrawList* dl) {
+    if (leakLine_.size() < 2) return;
+    const glm::mat4 vp = p.camera.proj(aspect) * p.camera.view();
+    auto pr = [&](const glm::vec3& w, bool& ok) {
+        return projectPt(p.kind, vp, p.contentMin, p.contentSize, w, ok);
+    };
+    const ImU32 col = IM_COL32(255, 70, 120, 240);
+    const ImU32 glow = IM_COL32(255, 70, 120, 70);
+    ImVec2 prev;
+    bool havePrev = false;
+    for (size_t i = 0; i < leakLine_.size(); ++i) {
+        bool ok;
+        const ImVec2 s = pr(leakLine_[i], ok);
+        if (!ok) { havePrev = false; continue; }
+        if (havePrev) {
+            dl->AddLine(prev, s, glow, 6.0f);
+            dl->AddLine(prev, s, col, 2.5f);
+        }
+        prev = s;
+        havePrev = true;
+    }
+    bool ok0;
+    const ImVec2 s0 = pr(leakLine_.front(), ok0);
+    if (ok0) {
+        dl->AddCircleFilled(s0, 5.0f, col);
+        dl->AddText(ImVec2(s0.x + 8, s0.y - 6), col, "leaked entity");
+    }
+    dl->AddText(ImVec2(p.contentMin.x + 8, p.contentMin.y + 40), col,
+                "LEAK — the line exits the map through the hole");
 }
 
 namespace {
@@ -7823,6 +7918,32 @@ void Editor::runMapCheck() {
 
 void Editor::drawMapCheckPanel() {
     ImGui::Begin("Map Check");
+
+    // Leak trace (from the last compile, or loaded by hand).
+    if (!leakLine_.empty()) {
+        ImGui::PushStyleColor(ImGuiCol_Text, pb::ui::col::warn);
+        ImGui::TextUnformatted(ICON_FA_CIRCLE_EXCLAMATION
+                               "  Leak — the map isn't sealed");
+        ImGui::PopStyleColor();
+        ImGui::TextDisabled("Trace: %zu points from the leaked entity to the void.",
+                            leakLine_.size());
+        if (ImGui::Button(ICON_FA_MAGNIFYING_GLASS "  Frame the leak", ImVec2(-1, 0)))
+            frameLeak();
+        if (ImGui::Button("Load a .lin / .pts pointfile…", ImVec2(-1, 0))) {
+            std::string p = openFileDialog(
+                "Load leak pointfile", "Pointfile\0*.lin;*.pts\0All files\0*.*\0");
+            if (!p.empty()) loadPointfile(p);
+        }
+        if (ImGui::Button("Clear leak trace", ImVec2(-1, 0))) leakLine_.clear();
+        ImGui::Separator();
+    } else if (hasDoc()) {
+        if (ImGui::SmallButton("Load leak pointfile…")) {
+            std::string p = openFileDialog(
+                "Load leak pointfile", "Pointfile\0*.lin;*.pts\0All files\0*.*\0");
+            if (!p.empty()) loadPointfile(p);
+        }
+    }
+
     if (ImGui::Button(ICON_FA_STETHOSCOPE "  Run check", ImVec2(-1, 0))) runMapCheck();
     if (!mapCheckRan_) {
         ImGui::TextDisabled("Checks spawns, lights, skybox, invalid brushes, "

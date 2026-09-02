@@ -64,6 +64,8 @@ public:
     void debugPhase1Test();  // exercise entity-brush edit ops on the loaded doc
     void debugModalXform();  // G/R/S numeric transform round-trip check
     void debugDispTest();    // make + sculpt + VMF round-trip a displacement
+    void debugLeakTest();    // write a synthetic .lin, load it, verify the trace
+    void debugLeakLoad(const std::string& p) { loadPointfile(p); }
     void debugArmKit(const std::string& piece) {  // arm + force the ghost preview
         if (!doc_.active()) { doc_.newBlank("kittest"); history_.reset(doc_); }
         placing_ = piece; debugPreviewAtCenter_ = true; showWelcome_ = false;
@@ -271,6 +273,9 @@ private:
     void placePiece(const std::string& piece, const glm::vec3& at);
     void finalizeRoad();
     void drawRoadOverlay(ViewPanel& p, float aspect, ImDrawList* dl);
+    void drawLeakOverlay(ViewPanel& p, float aspect, ImDrawList* dl);
+    bool loadPointfile(const std::string& path);  // vbsp .lin / .pts leak trace
+    void frameLeak();
     void drawPlacePreview(ViewPanel& p, float aspect, ImDrawList* dl);
     void placeFgdEntity(const std::string& cls, const glm::vec3& at);
     void tieSelectionToEntity(const std::string& cls);
@@ -495,6 +500,11 @@ private:
     // Curvy-road spline tool
     std::vector<glm::vec3> roadPts_;
     bool roadActive_ = false;
+
+    // Leak diagnostics: the vbsp pointfile trace, drawn in every viewport
+    // until cleared. Auto-loaded when a compile leaks.
+    std::vector<glm::vec3> leakLine_;
+    bool compileWasRunning_ = false;
     float roadWidth_ = 192.0f, roadThick_ = 16.0f;
 
     // Background BSP -> VMF decompile.
