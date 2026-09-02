@@ -101,3 +101,69 @@ The compile-test loop and content pipeline aren't fast/trustworthy enough yet.
 ## The 1.0 bar (one sentence)
 Decompile `cp_process_final`, fix a sightline, retexture a room, adjust a displacement,
 pack it, compile it, and **play it** — without opening Hammer once.
+
+---
+
+# UI plan — one workspace
+
+Companion to the phases above. Shareable version (with layout diagrams):
+https://claude.ai/code/artifact/e26c3dca-fabd-4152-8425-82ffd9053980
+
+Today Simple and Pro are two different apps on one engine — different panels, different
+layout, jarring switch. Every phase above would be built twice or pick a side. Fix:
+**one adaptive workspace with a complexity dial, not a mode switch.**
+
+## Foundation (do first — gates every phase)
+- **One inspector component.** World brush, entity, face, kit piece, displacement — all
+  render in the same panel: identity header (+ `part of: func_detail #12` line), context
+  sections, every field typed (reuse `app/PropWidgets` as the universal field kit),
+  promoted/advanced split, live viewport preview. Nothing removed.
+- **Panel grammar.** Every panel = header (title + overflow) · optional filter row ·
+  scroll body · optional footer action. The floating windows (Options, Compile, Publish,
+  Import) become docked panels under this grammar.
+- **Semantic colour, separate from the orange accent.** good / warning / critical triad
+  for map-check severity, field validation, compile status — encoded by shape + label too.
+- **Shortcut registry.** Every control shows its key (tooltip min); F1 sheet + command
+  palette generated from the same registry so they can't drift.
+
+## One workspace (the core move — ships with Phase 4)
+- **3-stop complexity dial:** Guided · Standard · Full. Shows/hides panels + advanced
+  fields; does NOT load a different app. Map, selection, camera, undo untouched on change.
+  Guided ≈ today's Simple, Full ≈ today's Pro, middle is continuous.
+- **Left tool rail** (always visible): Select · Draw brush · Vertex/Edge/Face · Clip ·
+  Surface · Displacement · Entity · Measure. Replaces the Pro-only top-bar tool strip +
+  scattered viewport toggles. Active tool's params in a context bar under it.
+- **Kit / asset panel** — Build Kit + models + prefabs + entity catalogue, one tabbed
+  browser, available at every dial stop.
+- **Inspector + Outliner / History / Map Check** as sibling tabs, one click away always.
+
+## UI work per phase
+- **P1 brush-entity:** Outliner → primary tab; "part of / select siblings / tie / untie"
+  in the selection header with a class picker; real combined-state fields for mixed
+  selections (replace the greyed-out apology).
+- **P2 precise transform:** transform HUD (G/R/S overlay, axis lit in its colour, live
+  value + text cursor); 2D rulers + dimension-entry field on every drag; snap-target
+  picker (grid/vertex/edge-mid/face-centre) + in-range dot; movable pivot marker.
+- **P3 surfaces:** Surface tool + context bar (themed material picker, visual UV grid,
+  lightmap stepper, align toggle, treat-as-one); displacement brush palette
+  (raise/lower/smooth/noise/alpha) + falloff-curve editor + radius/strength readout;
+  blend-material paint shows both source textures + alpha under cursor.
+- **P4 continuity:** the dial ships (Simple/Pro merge); kit pieces = first-class Outliner
+  objects with re-openable option panels until "bake to brushes"; finish preview-
+  everywhere (entity/prefab/preset thumbnails, hover previews, mini-3D kit cards);
+  guided first map = dismissible coach-marks on the real workspace.
+- **P5 ship:** compile → a "run bar" (profile · est. time · one button · progress ·
+  "reload in game"), log one expand away; Map Check → review surface (grouped by
+  severity, expand-to-fix, "fix all safe", jump-to-problem, leak drawn as a line to the
+  hole); Publish → 3-step wizard (identity · preview+packing list · notes).
+
+## Cross-cutting
+- Toasts for async results; inline field validation; one shared "busy" affordance.
+- Command palette = universal entry point, shortcuts shown; empty-viewport state points
+  to it.
+- Every panel has a useful empty state.
+- Visible focus ring everywhere; severity by shape+label; reduced-motion honoured;
+  `dp()` scaling honest 100–200%.
+
+## UI bar (one sentence)
+A new user and a veteran use the **same screen** — the veteran just turned the dial up.
