@@ -1456,28 +1456,42 @@ void Editor::drawViewportPanel(ViewPanel& p, bool* pOpen) {
                     IM_COL32(180, 180, 185, 220), msg);
     }
 
-    // Move / Rotate / Scale gizmo switcher — floats top-left when something's
-    // selected (like Blender's header). W / E / R also switch.
-    if (hasDoc() && !selection_.empty() && tool_ == Tool::Select) {
+    // Floating top-left toolbar (like Blender's header): pick mode always,
+    // plus the Move/Rotate/Scale switcher once something is selected.
+    if (hasDoc() && tool_ == Tool::Select) {
         ImGui::SetCursorScreenPos(ImVec2(tl.x + 8, tl.y + 26));
         ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(3, 3));
-        struct G { const char* ic; const char* tip; };
-        static const G gs[] = {{ICON_FA_UP_DOWN_LEFT_RIGHT, "Move  (W)"},
-                               {ICON_FA_ROTATE, "Rotate  (E)"},
-                               {ICON_FA_MAXIMIZE, "Scale  (R)"}};
-        for (int g = 0; g < 3; ++g) {
-            if (g) ImGui::SameLine();
-            const bool on = gizmoMode_ == g;
+        const ImVec2 bsz(pb::ui::dp(26.0f), pb::ui::dp(22.0f));
+        auto tbtn = [&](const char* ic, bool on, const char* tip, int id) {
             ImGui::PushStyleColor(ImGuiCol_Button,
                                   on ? pb::ui::col::acc : pb::ui::col::bg2);
             ImGui::PushStyleColor(ImGuiCol_Text,
                                   on ? pb::ui::col::bg1 : pb::ui::col::tx);
-            ImGui::PushID(g);
-            if (ImGui::Button(gs[g].ic, ImVec2(pb::ui::dp(26.0f), pb::ui::dp(22.0f))))
-                gizmoMode_ = g;
+            ImGui::PushID(id);
+            const bool hit = ImGui::Button(ic, bsz);
             ImGui::PopID();
             ImGui::PopStyleColor(2);
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", gs[g].tip);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tip);
+            return hit;
+        };
+        if (tbtn(ICON_FA_OBJECT_GROUP, selectWholePiece_,
+                 "Pick the whole piece", 20))
+            selectWholePiece_ = true;
+        ImGui::SameLine();
+        if (tbtn(ICON_FA_OBJECT_UNGROUP, !selectWholePiece_,
+                 "Pick one part at a time", 21))
+            selectWholePiece_ = false;
+
+        if (!selection_.empty()) {
+            ImGui::SameLine(0, pb::ui::dp(10.0f));
+            struct G { const char* ic; const char* tip; };
+            static const G gs[] = {{ICON_FA_UP_DOWN_LEFT_RIGHT, "Move  (W)"},
+                                   {ICON_FA_ROTATE, "Rotate  (E)"},
+                                   {ICON_FA_MAXIMIZE, "Scale  (R)"}};
+            for (int g = 0; g < 3; ++g) {
+                if (g) ImGui::SameLine();
+                if (tbtn(gs[g].ic, gizmoMode_ == g, gs[g].tip, g)) gizmoMode_ = g;
+            }
         }
         ImGui::PopStyleVar();
     }
@@ -2913,8 +2927,9 @@ void Editor::placePiece(const std::string& piece, const glm::vec3& atRaw) {
             fd.solids.push_back(std::move(s));
         }
         doc_.entities().push_back(std::move(fd));
-        selection_.push_back(
-            {static_cast<int>(doc_.entities().size()) - 1, 0});
+        const int ei = static_cast<int>(doc_.entities().size()) - 1;
+        const int ns = static_cast<int>(doc_.entities()[ei].solids.size());
+        for (int i = 0; i < ns; ++i) selection_.push_back({ei, i});
     } else {
         for (auto& s : made) {
             s.id = doc_.nextId();
@@ -3414,14 +3429,25 @@ void Editor::pickAt(ViewPanel& p, const glm::vec2& px, bool additive) {
         if (!additive) clearSelection();
         return;
     }
+    // "Whole piece" mode: clicking any brush of a multi-brush piece
+    // (func_detail, a tied entity) grabs all of its brushes.
+    std::vector<map::SolidRef> hitSet{best};
+    if (selectWholePiece_ && best.entity >= 0) {
+        hitSet.clear();
+        const int n = (int)doc_.entities()[best.entity].solids.size();
+        for (int i = 0; i < n; ++i) hitSet.push_back({best.entity, i});
+    }
     if (additive) {
-        auto it = std::find(selection_.begin(), selection_.end(), best);
-        if (it != selection_.end())
-            selection_.erase(it);
-        else
-            selection_.push_back(best);
+        // Toggle the hit set as a unit.
+        const bool present = std::find(selection_.begin(), selection_.end(),
+                                       best) != selection_.end();
+        for (const auto& r : hitSet) {
+            auto it = std::find(selection_.begin(), selection_.end(), r);
+            if (present && it != selection_.end()) selection_.erase(it);
+            else if (!present && it == selection_.end()) selection_.push_back(r);
+        }
     } else {
-        selection_ = {best};
+        selection_ = hitSet;
     }
     expandSelectionToGroups();
     syncSelectedEntity();
