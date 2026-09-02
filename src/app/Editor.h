@@ -430,6 +430,8 @@ private:
     // Texture tool: faces picked for texturing (SolidRef + face index).
     std::vector<std::pair<map::SolidRef, int>> texFaces_;
     char texMaterial_[128] = "dev/dev_measuregeneric01b";
+    map::BrushFace texClip_;        // projection lifted by Alt-click (the eyedropper)
+    bool texClipSet_ = false;
 
     // Cordon: compile / preview only a boxed region.
     bool cordonOn_ = false;
