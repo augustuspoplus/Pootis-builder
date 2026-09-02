@@ -2698,6 +2698,36 @@ void Editor::placePiece(const std::string& piece, const glm::vec3& atRaw) {
         ent("team_round_timer", at + glm::vec3(0, 0, 16),
             {{"targetname", "round_timer"}, {"timer_length", "600"},
              {"show_in_hud", "1"}, {"StartDisabled", "0"}});
+    } else if (piece == "Arena logic") {
+        // Arena mode: the rules entity + a centre point that unlocks mid-round.
+        ent("tf_logic_arena", at + glm::vec3(0, 0, 64),
+            {{"targetname", "arena_logic"}, {"CapEnableDelay", "60"}});
+        ent("team_control_point", at + glm::vec3(0, 0, 8),
+            {{"targetname", "arena_cap"}, {"point_printname", "Arena Point"},
+             {"point_default_owner", "0"}, {"point_index", "0"}});
+        ent("team_control_point_master", at + glm::vec3(64, 0, 64),
+            {{"targetname", "master_control_point"}, {"StartDisabled", "0"}});
+        brushEnt("trigger_capture_area", {at.x - 128, at.y - 128, at.z},
+                 {at.x + 128, at.y + 128, at.z + 128},
+                 {{"area_cap_point", "arena_cap"}, {"team_cancap_2", "1"},
+                  {"team_cancap_3", "1"}, {"team_numcap_2", "1"},
+                  {"team_numcap_3", "1"}, {"area_time_to_cap", "4"}});
+        box({at.x - 128, at.y - 128, at.z - 16}, {at.x + 128, at.y + 128, at.z},
+            floorMat);
+    } else if (piece == "Moving platform") {
+        // A platform that slides sideways between two points, on a button.
+        char dist[16];
+        std::snprintf(dist, sizeof(dist), "%d", (int)std::max(128.0f, elevTravel_));
+        brushEnt("func_movelinear", {at.x - 96, at.y - 96, at.z},
+                 {at.x + 96, at.y + 96, at.z + 16},
+                 {{"targetname", "platform"}, {"movedir", "0 0 0"},
+                  {"speed", "75"}, {"spawnflags", "8"}, {"movedistance", dist},
+                  {"blockdamage", "0"}});
+        auto& btn = brushEnt("func_button", {at.x - 108, at.y - 12, at.z + 40},
+                             {at.x - 100, at.y + 12, at.z + 72},
+                             {{"speed", "5"}, {"wait", "8"}});
+        btn.connections.push_back({"OnPressed", "platform,Open,,0,-1"});
+        btn.connections.push_back({"OnPressed", "platform,Close,,6,-1"});
     } else if (piece == "One spawn point") {
         ent("info_player_teamspawn", at + glm::vec3(0, 0, 8),
             {{"TeamNum", "0"}, {"angles", "0 0 0"}});
@@ -4692,6 +4722,7 @@ void Editor::drawBuildKit() {
                 {ICON_FA_TRAIN, "Payload track", "Working cart + path + point"},
                 {ICON_FA_FLAG, "CTF setup", "Both flags + capture zones"},
                 {ICON_FA_CLOCK, "Round timer", "Countdown for the round"},
+                {ICON_FA_TROPHY, "Arena logic", "Arena rules + a mid point"},
                 {ICON_FA_BOX_OPEN, "Resupply", "Regenerate locker"},
                 {ICON_FA_KIT_MEDICAL, "Health / ammo", "A medkit + ammo pack"},
             };
@@ -4705,6 +4736,7 @@ void Editor::drawBuildKit() {
                 {ICON_FA_DOOR_CLOSED, "Spawn door", "Team-only one-way spawn wall"},
                 {ICON_FA_HAND_POINTER, "Button", "Press to trigger things"},
                 {ICON_FA_ELEVATOR, "Elevator", "Platform + call button"},
+                {ICON_FA_ARROWS_LEFT_RIGHT, "Moving platform", "Slides on a button"},
                 {ICON_FA_FAN, "Fan / rotating", "A spinning brush"},
                 {ICON_FA_RIGHT_LEFT, "Teleport pair", "Trigger + destination"},
                 {ICON_FA_BOX, "Breakable crate", "Breaks when shot"},
