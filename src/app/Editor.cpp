@@ -2379,13 +2379,19 @@ void Editor::applyClip() {
     const float d = glm::dot(n, clipA_);
     const std::string mat = blockMaterial_;
 
-    std::vector<map::Solid> added;
+    // "Both" back-halves go back into the same container as their front half.
+    std::vector<map::Solid> addedWorld;
+    std::map<int, std::vector<map::Solid>> addedEnt;
     for (const auto& r : selection_) {
         map::Solid* s = doc_.resolve(r);
         if (!s) continue;
         if (clipMode_ == 2) {
             map::Solid back = *s;
-            if (back.clip(-n, -d, mat)) { back.id = doc_.nextId(); added.push_back(std::move(back)); }
+            if (back.clip(-n, -d, mat)) {
+                back.id = doc_.nextId();
+                if (r.entity < 0) addedWorld.push_back(std::move(back));
+                else addedEnt[r.entity].push_back(std::move(back));
+            }
             if (!s->clip(n, d, mat)) *s = map::Solid();  // front gone
         } else if (clipMode_ == 0) {
             s->clip(n, d, mat);
@@ -2393,12 +2399,23 @@ void Editor::applyClip() {
             s->clip(-n, -d, mat);
         }
     }
-    // Drop any solids the cut removed entirely; append the "both" back-halves.
-    auto& ws = doc_.worldSolids();
-    ws.erase(std::remove_if(ws.begin(), ws.end(),
-                            [](const map::Solid& s) { return s.faces.empty(); }),
-             ws.end());
-    for (auto& s : added) ws.push_back(std::move(s));
+
+    auto dropEmpty = [](std::vector<map::Solid>& v) {
+        v.erase(std::remove_if(v.begin(), v.end(),
+                               [](const map::Solid& s) { return s.faces.empty(); }),
+                v.end());
+    };
+    dropEmpty(doc_.worldSolids());
+    for (auto& s : addedWorld) doc_.worldSolids().push_back(std::move(s));
+    for (auto& [ei, halves] : addedEnt)
+        if (ei >= 0 && ei < (int)doc_.entities().size())
+            for (auto& h : halves) doc_.entities()[ei].solids.push_back(std::move(h));
+    for (int i = (int)doc_.entities().size() - 1; i >= 0; --i) {
+        auto& e = doc_.entities()[i];
+        if (e.solids.empty()) continue;  // point entity — leave it
+        dropEmpty(e.solids);
+        if (e.solids.empty()) doc_.entities().erase(doc_.entities().begin() + i);
+    }
 
     selection_.clear();
     clearSelection();
@@ -5461,6 +5478,28 @@ void Editor::drawBrushInspector() {
             ImGui::PopStyleColor();
             if (ImGui::SmallButton("Untie entity brushes to world"))
                 untieSelectionToWorld();
+        } else if (entOf == -1) {
+            // All world brushes — offer to tie them into a brush entity.
+            if (ImGui::SmallButton(ICON_FA_LINK "  Make it a…"))
+                ImGui::OpenPopup("##tieto");
+            if (ImGui::BeginPopup("##tieto")) {
+                struct T { const char* cls; const char* label; };
+                static const T ts[] = {
+                    {"func_detail", "Detail  (func_detail — no vis cost)"},
+                    {"func_brush", "Toggleable brush  (func_brush)"},
+                    {"func_door", "Sliding door  (func_door)"},
+                    {"func_rotating", "Spinning brush  (func_rotating)"},
+                    {"func_breakable", "Breakable  (func_breakable)"},
+                    {"func_illusionary", "Walk-through  (func_illusionary)"},
+                    {"trigger_multiple", "Trigger  (trigger_multiple)"},
+                    {"trigger_hurt", "Hurt zone  (trigger_hurt)"},
+                    {"func_nobuild", "No-build zone  (func_nobuild)"},
+                    {"func_respawnroom", "Respawn room  (func_respawnroom)"},
+                };
+                for (const auto& t : ts)
+                    if (ImGui::Selectable(t.label)) tieSelectionToEntity(t.cls);
+                ImGui::EndPopup();
+            }
         }
     }
 
