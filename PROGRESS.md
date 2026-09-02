@@ -63,8 +63,22 @@ Q2 = Simple-mode kit builds new maps (prioritised). Also doing section G (QoL).
     delete round-trip) passes 5/5.
 - **More Simple pieces** (post-sweep): Window, Spiral stairs, Fence,
   Crate stack (Build); Spawn door = `func_respawnroomvisualizer` (Moving);
-  Death pit, No-build zone (Zones); Spectator camera (Things). Kit is now
-  ~50 pieces across Build / Play / Moving / Zones / Things / Props / Light.
+  Death pit, No-build zone (Zones); Spectator camera (Things).
+- **Second hardening pass**:
+  - `Skybox seal` now also encloses every point-entity origin, and
+    `makeTemplates()` seals *after* placing the sun (z=192) — the
+    payload/arena/ctf/cp templates were still leaking a high
+    `light_environment`; now all 7 vbsp leak-free (verified standalone).
+  - `path_track` / `path_corner` labels show just the targetname and
+    stagger vertically, so a payload spine reads cleanly in 2D and 3D.
+  - Added **Arena logic** (`tf_logic_arena` + mid point + master, Play)
+    and **Moving platform** (`func_movelinear` on a button, Moving).
+  - Decompile sweep: ctf_2fort / koth_viaduct / cp_gravelpit / pl_upward
+    run the full BSPSource → editable-VMF path (1.3k–3.6k solids,
+    4.7k–5.9k entities) and render textured with props.
+  - Options persistence confirmed: all 16 keys + the recent-files MRU
+    round-trip through `%LOCALAPPDATA%\PootisBuilder\pootis.ini`.
+  - Full 52-piece kit re-sweep: 0 empty, 0 crashes.
 
 ## Visual fidelity (done)
 - **prop_static models**: `model/StudioModel` parses MDL + VVD + VTX (LOD 0,
