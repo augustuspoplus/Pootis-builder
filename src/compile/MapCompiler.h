@@ -55,6 +55,9 @@ public:
     std::string mapName() const;
     std::vector<std::string> log() const;
     double elapsedSeconds() const;
+    // Path to the vbsp leak pointfile (`<name>.lin`) if the last compile
+    // leaked, otherwise empty. Cleared at the start of each compile.
+    std::string leakFile() const;
 
 private:
     void run(std::string vmfPath, CompileOptions opts, GamePaths paths);
@@ -65,6 +68,7 @@ private:
     std::vector<std::string> log_;
     std::string stage_;
     std::string mapName_;
+    std::string leakFile_;
     std::thread thread_;
     std::atomic<bool> running_{false};
     std::atomic<bool> finished_{false};

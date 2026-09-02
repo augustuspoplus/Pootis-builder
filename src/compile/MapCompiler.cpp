@@ -88,6 +88,11 @@ std::string MapCompiler::mapName() const {
     return mapName_;
 }
 
+std::string MapCompiler::leakFile() const {
+    std::lock_guard<std::mutex> lk(mtx_);
+    return leakFile_;
+}
+
 std::vector<std::string> MapCompiler::log() const {
     std::lock_guard<std::mutex> lk(mtx_);
     return log_;
@@ -114,6 +119,7 @@ void MapCompiler::start(const std::string& vmfPath, const CompileOptions& opts,
         std::lock_guard<std::mutex> lk(mtx_);
         log_.clear();
         stage_.clear();
+        leakFile_.clear();
         mapName_ = fs::path(vmfPath).stem().string();
     }
     cancel_ = false;
@@ -222,6 +228,21 @@ void MapCompiler::run(std::string vmfPath, CompileOptions opts, GamePaths paths)
         endMs_ = nowMs();
         return;
     }
+
+    // vbsp returns 0 even on a leak (it still writes the .bsp). The tell is the
+    // pointfile it drops next to the vmf — grab it so the editor can draw the
+    // trace from the leaked entity out to the void.
+    for (const char* ext : {".lin", ".pts"}) {
+        const fs::path pf = workDir / (name + ext);
+        if (fs::exists(pf, ec)) {
+            std::lock_guard<std::mutex> lk(mtx_);
+            leakFile_ = pf.string();
+            break;
+        }
+    }
+    if (!leakFile_.empty())
+        put("\n** LEAK ** — pointfile written; load it in Map Check to see the "
+            "trace.");
 
     // ---- vvis -----------------------------------------------------------
     if (opts.runVvis) {

@@ -75,6 +75,10 @@ else
   echo "  (no decompiled disp map cached — skipped)"
 fi
 
+echo "== phase 5: leak pointfile =="
+"$RUN" --leak-test --screenshot /dev/null --width 32 --height 32 2>&1 \
+  | grep -q 'leak-test: 1 passed, 0 failed' && ok || bad "leak-test (pointfile parse)"
+
 echo "== templates =="
 for f in "$ROOT"/assets/templates/*.vmf; do
   [ -e "$f" ] || continue
