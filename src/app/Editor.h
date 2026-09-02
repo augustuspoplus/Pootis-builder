@@ -368,6 +368,16 @@ private:
     void placeFromPayload(const std::string& payload, const glm::vec3& at);
     float hillRadius_ = 384.0f, hillHeight_ = 320.0f, hillRough_ = 0.32f;
     int hillLayers_ = 7;
+    // Parametric shape options (shown while the piece is armed).
+    int stairSteps_ = 8;
+    float stairRise_ = 16.0f, stairRun_ = 24.0f, stairWidth_ = 128.0f;
+    int cylSides_ = 12;
+    float cylRadius_ = 96.0f, cylHeight_ = 192.0f;
+    int archSegs_ = 8;
+    float archRadius_ = 256.0f, archSpan_ = 180.0f, archThick_ = 32.0f,
+          archHeight_ = 128.0f;
+    float doorOpenDir_ = 0.0f;   // 0=up, 90/180/270 slide directions
+    float elevTravel_ = 256.0f;
     // Curvy-road spline tool
     std::vector<glm::vec3> roadPts_;
     bool roadActive_ = false;
