@@ -390,10 +390,13 @@ void Editor::frame() {
     ImGui::DockSpace(dockId, ImVec2(0, 0), ImGuiDockNodeFlags_PassthruCentralNode);
     ImGui::End();
 
+    // A modal G/R/S transform owns the keyboard until it commits or cancels.
+    updateModalXform();
+
     // ---- global keyboard shortcuts -------------------------------------------
     // Raw key state (not ImGui's focus-routed chords) so they fire no matter
     // which panel has focus. Suppressed only while typing in a text field.
-    {
+    if (mx_.op == 0) {
         ImGuiIO& io = ImGui::GetIO();
         const bool ctrl = io.KeyCtrl;
         const bool shift = io.KeyShift;
@@ -431,13 +434,19 @@ void Editor::frame() {
         }
         if (pk(ImGuiKey_LeftBracket)) rotateSelection(2, shift ? 15.0f : -15.0f);
         if (pk(ImGuiKey_RightBracket)) rotateSelection(2, shift ? -15.0f : 15.0f);
-        // Pro gizmo mode: W move / E rotate / R scale — only with a selection
-        // and not while RMB-flying (so WASD nav isn't hijacked).
-        if (mode_ == Mode::Pro && !typing && !ctrl && !selection_.empty() &&
+        // Blender-style modal transform: G move / R rotate / S scale — with a
+        // selection, not while RMB-flying, not while typing.
+        if (hasDoc() && !typing && !ctrl && !selection_.empty() &&
+            tool_ == Tool::Select &&
             !ImGui::IsMouseDown(ImGuiMouseButton_Right)) {
-            if (tap(ImGuiKey_W)) gizmoMode_ = 0;
-            if (tap(ImGuiKey_E)) gizmoMode_ = 1;
-            if (tap(ImGuiKey_R)) gizmoMode_ = 2;
+            if (tap(ImGuiKey_G)) beginModalXform(1);
+            if (tap(ImGuiKey_R)) beginModalXform(2);
+            if (tap(ImGuiKey_S)) beginModalXform(3);
+            // Pro gizmo mode still on W/E/R.
+            if (mode_ == Mode::Pro) {
+                if (tap(ImGuiKey_W)) gizmoMode_ = 0;
+                if (tap(ImGuiKey_E)) gizmoMode_ = 1;
+            }
         }
     }
 
@@ -499,7 +508,8 @@ void Editor::frame() {
     // Live preview while dragging (gizmo, bbox handles, body-move, sub-object).
     // History is recorded once on release.
     const bool dragging =
-        gizmoUsing_ || resizeHandle_ >= 0 || moveDrag_ != 0 || subDragging_;
+        gizmoUsing_ || resizeHandle_ >= 0 || moveDrag_ != 0 || subDragging_ ||
+        mx_.op != 0;
     if (docMeshDirty_ && dragging) {
         // Heavy map: the selection wireframe follows the cursor every frame, but
         // the solid mesh only rebuilds on release — a full rebuild per frame is
@@ -1571,6 +1581,7 @@ void Editor::drawViewportPanel(ViewPanel& p, bool* pOpen) {
     drawCordonOverlay(p, aspect, dl);
     drawRoadOverlay(p, aspect, dl);
     drawPlacePreview(p, aspect, dl);
+    drawModalXformHud(p, dl);
 
     if (!hasMap() && p.kind == ViewKind::Perspective) {
         const char* msg = "Open a .bsp  —  File > Open BSP  (Ctrl+O)  or drag one in";
@@ -3740,6 +3751,197 @@ void Editor::nudgeSelection(const glm::vec3& d) {
     status_ = "Moved selection";
 }
 
+// --------------------------------------------------------------------------
+// Modal keyboard transform — G / R / S  then  X/Y/Z  then  a number
+// --------------------------------------------------------------------------
+void Editor::beginModalXform(int op) {
+    if (selection_.empty()) return;
+    ViewPanel* hv = nullptr;
+    for (auto& v : views_) if (v.hovered) hv = &v;
+    if (!hv) hv = &views_[0];
+    mx_ = {};
+    mx_.op = op;
+    mx_.view = hv->kind;
+    const ImVec2 m = ImGui::GetMousePos();
+    mx_.startMouse = {m.x - hv->contentMin.x, m.y - hv->contentMin.y};
+    mx_.pivot = selectionCenter();
+    for (const auto& r : selection_)
+        if (const map::Solid* s = doc_.resolve(r)) {
+            mx_.snap.push_back(*s);
+            mx_.refs.push_back(r);
+        }
+    status_ = op == 1 ? "Move — X/Y/Z to lock, type an amount, Enter"
+            : op == 2 ? "Rotate — X/Y/Z axis, type degrees, Enter"
+                      : "Scale — X/Y/Z axis, type a factor, Enter";
+}
+
+void Editor::updateModalXform() {
+    if (mx_.op == 0) return;
+    ImGuiIO& io = ImGui::GetIO();
+    auto tap = [&](ImGuiKey k) { return ImGui::IsKeyPressed(k, false); };
+
+    // Cancel / commit.
+    const bool cancel = tap(ImGuiKey_Escape) ||
+                        ImGui::IsMouseClicked(ImGuiMouseButton_Right);
+    const bool commit = tap(ImGuiKey_Enter) || tap(ImGuiKey_KeypadEnter) ||
+                        ImGui::IsMouseClicked(ImGuiMouseButton_Left);
+
+    // Axis lock (press the held axis again → free).
+    auto axisKey = [&](ImGuiKey k, int a) { if (tap(k)) mx_.axis = mx_.axis == a ? 0 : a; };
+    axisKey(ImGuiKey_X, 1);
+    axisKey(ImGuiKey_Y, 2);
+    axisKey(ImGuiKey_Z, 3);
+
+    // Numeric buffer.
+    for (int d = 0; d <= 9; ++d)
+        if (tap((ImGuiKey)(ImGuiKey_0 + d)) || tap((ImGuiKey)(ImGuiKey_Keypad0 + d)))
+            mx_.num += char('0' + d);
+    if (tap(ImGuiKey_Period) || tap(ImGuiKey_KeypadDecimal)) mx_.num += '.';
+    if ((tap(ImGuiKey_Minus) || tap(ImGuiKey_KeypadSubtract))) {
+        if (!mx_.num.empty() && mx_.num[0] == '-') mx_.num.erase(0, 1);
+        else mx_.num.insert(mx_.num.begin(), '-');
+    }
+    if (tap(ImGuiKey_Backspace) && !mx_.num.empty()) mx_.num.pop_back();
+
+    const bool haveNum = !mx_.num.empty() && mx_.num != "-" && mx_.num != ".";
+    const float numv = haveNum ? std::strtof(mx_.num.c_str(), nullptr) : 0.0f;
+
+    // Where is the cursor, in the op's viewport?
+    ViewPanel* vp = nullptr;
+    for (auto& v : views_) if (v.kind == mx_.view) vp = &v;
+    if (!vp) { mx_.op = 0; return; }
+    const ImVec2 mAbs = ImGui::GetMousePos();
+    const glm::vec2 mNow(mAbs.x - vp->contentMin.x, mAbs.y - vp->contentMin.y);
+    const float aspect = vp->contentSize.x / std::max(1.0f, vp->contentSize.y);
+    const glm::mat4 vpMat = vp->camera.proj(aspect) * vp->camera.view();
+    auto toScreen = [&](const glm::vec3& w) {
+        glm::vec4 c = vpMat * glm::vec4(w, 1.0f);
+        if (c.w <= 1e-5f) return glm::vec2(mx_.startMouse);
+        return glm::vec2((c.x / c.w * 0.5f + 0.5f) * vp->contentSize.x,
+                         (1.0f - (c.y / c.w * 0.5f + 0.5f)) * vp->contentSize.y);
+    };
+
+    glm::mat4 xform(1.0f);
+    glm::vec3 axv(0);
+    if (mx_.axis) axv[mx_.axis - 1] = 1.0f;
+
+    if (mx_.op == 1) {  // ---- MOVE ----
+        glm::vec3 delta(0);
+        if (haveNum && mx_.axis) {
+            delta = axv * numv;
+        } else {
+            // Mouse: world point on the view plane (ortho) or ground/pivot
+            // plane (persp), minus the same at the start.
+            auto worldAt = [&](const glm::vec2& px) {
+                glm::vec3 ro, rd;
+                vp->camera.pixelRay({px.x, px.y}, vp->contentSize, ro, rd);
+                glm::vec3 n = vp->kind == ViewKind::Perspective
+                                  ? -vp->camera.forward()
+                                  : vp->camera.orthoForwardAxis();
+                const float dn = glm::dot(n, rd);
+                const float t = std::fabs(dn) > 1e-6f
+                                    ? (glm::dot(n, mx_.pivot) - glm::dot(n, ro)) / dn
+                                    : 0.0f;
+                return ro + rd * t;
+            };
+            delta = worldAt(mNow) - worldAt(mx_.startMouse);
+            if (mx_.axis) delta = axv * glm::dot(delta, axv);
+            if (snap_ && gridSize_ > 0)
+                delta = glm::round(delta / float(gridSize_)) * float(gridSize_);
+        }
+        mx_.lastDelta = delta;
+        mx_.lastVal = mx_.axis ? delta[mx_.axis - 1] : glm::length(delta);
+        xform = glm::translate(glm::mat4(1.0f), delta);
+    } else if (mx_.op == 2) {  // ---- ROTATE ----
+        glm::vec3 rax = mx_.axis ? axv
+                       : (vp->kind == ViewKind::Perspective
+                              ? glm::normalize(vp->camera.forward())
+                              : vp->camera.orthoForwardAxis());
+        float deg;
+        if (haveNum) {
+            deg = numv;
+        } else {
+            const glm::vec2 ps = toScreen(mx_.pivot);
+            const float a0 = std::atan2(mx_.startMouse.y - ps.y, mx_.startMouse.x - ps.x);
+            const float a1 = std::atan2(mNow.y - ps.y, mNow.x - ps.x);
+            deg = glm::degrees(a1 - a0);
+            if (snap_) deg = std::round(deg / 5.0f) * 5.0f;
+        }
+        mx_.lastVal = deg;
+        xform = glm::translate(glm::mat4(1.0f), mx_.pivot);
+        xform = glm::rotate(xform, glm::radians(deg), rax);
+        xform = glm::translate(xform, -mx_.pivot);
+    } else {  // ---- SCALE ----
+        float f;
+        if (haveNum) {
+            f = numv;
+        } else {
+            const glm::vec2 ps = toScreen(mx_.pivot);
+            const float d0 = std::max(4.0f, glm::length(mx_.startMouse - ps));
+            const float d1 = glm::length(mNow - ps);
+            f = d1 / d0;
+            if (snap_) f = std::round(f * 20.0f) / 20.0f;
+        }
+        if (f < 0.01f) f = 0.01f;
+        mx_.lastVal = f;
+        glm::vec3 sc = mx_.axis ? glm::vec3(1) + axv * (f - 1.0f) : glm::vec3(f);
+        xform = glm::translate(glm::mat4(1.0f), mx_.pivot);
+        xform = glm::scale(xform, sc);
+        xform = glm::translate(xform, -mx_.pivot);
+    }
+
+    // Restore the snapshot, then apply — keeps the op non-cumulative.
+    for (size_t i = 0; i < mx_.refs.size(); ++i)
+        if (map::Solid* s = doc_.resolve(mx_.refs[i])) {
+            *s = mx_.snap[i];
+            s->transform(xform);
+        }
+    docMeshDirty_ = true;
+    rebuildSelectionWire();
+
+    if (cancel) {
+        for (size_t i = 0; i < mx_.refs.size(); ++i)
+            if (map::Solid* s = doc_.resolve(mx_.refs[i])) *s = mx_.snap[i];
+        buildAndUpload(meshOpts_);
+        rebuildSelectionWire();
+        status_ = "Cancelled";
+        mx_.op = 0;
+    } else if (commit) {
+        const char* lbl = mx_.op == 1 ? "Move" : mx_.op == 2 ? "Rotate" : "Scale";
+        afterEdit(lbl);
+        status_ = lbl;
+        mx_.op = 0;
+    }
+}
+
+void Editor::drawModalXformHud(ViewPanel& p, ImDrawList* dl) {
+    if (mx_.op == 0 || p.kind != mx_.view) return;
+    const char* opn = mx_.op == 1 ? "MOVE" : mx_.op == 2 ? "ROTATE" : "SCALE";
+    const char* axn = mx_.axis == 1 ? " X" : mx_.axis == 2 ? " Y"
+                    : mx_.axis == 3 ? " Z" : "";
+    char buf[96];
+    if (mx_.op == 1)
+        std::snprintf(buf, sizeof(buf), "%s%s  %s%.0f",
+                      opn, axn, mx_.num.empty() ? "" : "= ",
+                      mx_.num.empty() ? mx_.lastVal : std::strtof(mx_.num.c_str(), 0));
+    else
+        std::snprintf(buf, sizeof(buf), "%s%s  %s%.2f",
+                      opn, axn, mx_.num.empty() ? "" : "= ",
+                      mx_.num.empty() ? mx_.lastVal : std::strtof(mx_.num.c_str(), 0));
+    const ImVec2 at(p.contentMin.x + p.contentSize.x * 0.5f - pb::ui::dp(70.0f),
+                    p.contentMin.y + pb::ui::dp(30.0f));
+    dl->AddRectFilled(ImVec2(at.x - 8, at.y - 4),
+                      ImVec2(at.x + pb::ui::dp(190.0f), at.y + ImGui::GetTextLineHeight() + 4),
+                      IM_COL32(20, 22, 26, 235), 4.0f);
+    dl->AddRect(ImVec2(at.x - 8, at.y - 4),
+                ImVec2(at.x + pb::ui::dp(190.0f), at.y + ImGui::GetTextLineHeight() + 4),
+                IM_COL32(230, 150, 70, 235), 4.0f);
+    dl->AddText(at, IM_COL32(240, 240, 245, 255), buf);
+    dl->AddText(ImVec2(at.x, at.y + ImGui::GetTextLineHeight() + 8),
+                IM_COL32(150, 155, 165, 220),
+                "X/Y/Z lock · type amount · Enter · Esc");
+}
+
 void Editor::deleteSelection() {
     // A selected point entity (e.g. a dropped prop) deletes on its own.
     if (selection_.empty() && selectedEntity_ >= 0 &&
@@ -4083,9 +4285,11 @@ void Editor::drawKeysOverlay() {
             {"Ctrl+A", "Select all brushes"},
             {"Delete / Backspace", "Delete selection"},
             {"[ / ]", "Rotate selection about Z  (Shift = other way)"},
+            {"G / R / S", "Move / rotate / scale — then X/Y/Z to lock an axis, "
+                          "type an amount, Enter (Esc cancels)"},
             {"drag the object", "Move it — 3D drags on the ground, Shift = up/down"},
             {"drag a corner box", "Resize that side / corner"},
-            {"W / E / R", "Move / rotate / scale gizmo  (Pro, with a selection)"},
+            {"W / E", "Move / rotate gizmo mode  (Pro)"},
             {"F", "Frame the map / selection"},
             {"Esc", "Cancel placement / clear selection"},
             {"Ctrl+K", "Command palette"},
@@ -4122,6 +4326,80 @@ void Editor::redo() {
         buildAndUpload(meshOpts_);
         status_ = "Redo";
     }
+}
+
+void Editor::debugModalXform() {
+    bsp_ = BspFile();
+    doc_.newBlank("mxtest");
+    history_.reset(doc_);
+    clearSelection();
+    placePiece("Wall", glm::vec3(0, 0, 0));           // 1 world solid, selected
+    if (selection_.empty()) { PB_ERROR("mx-test: nothing placed"); return; }
+    int pass = 0, fail = 0;
+    auto ck = [&](const char* w, bool ok) {
+        if (ok) ++pass; else { ++fail; PB_ERROR("mx-test FAIL: %s", w); }
+    };
+    auto solid = [&]() -> map::Solid* { return doc_.resolve(selection_[0]); };
+
+    // MOVE +128 on X via the numeric path (no mouse).
+    const glm::vec3 c0 = solid()->center();
+    beginModalXform(1);
+    mx_.axis = 1; mx_.num = "128";
+    // emulate the per-frame apply + commit
+    {
+        glm::mat4 x = glm::translate(glm::mat4(1.0f), glm::vec3(128, 0, 0));
+        for (size_t i = 0; i < mx_.refs.size(); ++i)
+            if (map::Solid* s = doc_.resolve(mx_.refs[i])) { *s = mx_.snap[i]; s->transform(x); }
+        afterEdit("Move"); mx_.op = 0;
+    }
+    ck("move +128 X", std::fabs((solid()->center() - c0).x - 128.0f) < 0.5f &&
+                      std::fabs((solid()->center() - c0).y) < 0.5f);
+
+    // SCALE x2 on Z.
+    const glm::vec3 sz0 = solid()->boundsMax - solid()->boundsMin;
+    beginModalXform(3);
+    mx_.axis = 3; mx_.num = "2";
+    {
+        glm::vec3 piv = mx_.pivot;
+        glm::mat4 x = glm::translate(glm::mat4(1.0f), piv);
+        x = glm::scale(x, glm::vec3(1, 1, 2));
+        x = glm::translate(x, -piv);
+        for (size_t i = 0; i < mx_.refs.size(); ++i)
+            if (map::Solid* s = doc_.resolve(mx_.refs[i])) { *s = mx_.snap[i]; s->transform(x); }
+        afterEdit("Scale"); mx_.op = 0;
+    }
+    const glm::vec3 sz1 = solid()->boundsMax - solid()->boundsMin;
+    ck("scale z x2", std::fabs(sz1.z - sz0.z * 2.0f) < 1.0f &&
+                     std::fabs(sz1.x - sz0.x) < 1.0f);
+
+    // ROTATE 90 about Z — width/depth swap.
+    beginModalXform(2);
+    mx_.axis = 3; mx_.num = "90";
+    {
+        glm::vec3 piv = mx_.pivot;
+        glm::mat4 x = glm::translate(glm::mat4(1.0f), piv);
+        x = glm::rotate(x, glm::radians(90.0f), glm::vec3(0, 0, 1));
+        x = glm::translate(x, -piv);
+        for (size_t i = 0; i < mx_.refs.size(); ++i)
+            if (map::Solid* s = doc_.resolve(mx_.refs[i])) { *s = mx_.snap[i]; s->transform(x); }
+        afterEdit("Rotate"); mx_.op = 0;
+    }
+    const glm::vec3 sz2 = solid()->boundsMax - solid()->boundsMin;
+    ck("rotate 90 z swaps w/d", std::fabs(sz2.x - sz1.y) < 1.0f &&
+                                std::fabs(sz2.y - sz1.x) < 1.0f);
+
+    // CANCEL restores.
+    const glm::vec3 c1 = solid()->center();
+    beginModalXform(1);
+    glm::mat4 x = glm::translate(glm::mat4(1.0f), glm::vec3(500, 0, 0));
+    for (size_t i = 0; i < mx_.refs.size(); ++i)
+        if (map::Solid* s = doc_.resolve(mx_.refs[i])) { *s = mx_.snap[i]; s->transform(x); }
+    for (size_t i = 0; i < mx_.refs.size(); ++i)
+        if (map::Solid* s = doc_.resolve(mx_.refs[i])) *s = mx_.snap[i];  // cancel
+    mx_.op = 0;
+    ck("cancel restores", glm::length(solid()->center() - c1) < 0.5f);
+
+    PB_INFO("mx-test: %d passed, %d failed", pass, fail);
 }
 
 void Editor::debugPhase1Test() {

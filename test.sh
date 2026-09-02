@@ -57,6 +57,10 @@ P1="$LOCALAPPDATA/PootisBuilder/decompiled/cp_process_final.vmf"
 "$RUN" "$P1" --phase1-test --screenshot /dev/null --width 32 --height 32 2>&1 \
   | grep -q 'phase1-test.*: 4 passed, 0 failed' && ok || bad "phase1-test"
 
+echo "== phase 2: modal G/R/S transform =="
+"$RUN" --mx-test --screenshot /dev/null --width 32 --height 32 2>&1 \
+  | grep -q 'mx-test: 4 passed, 0 failed' && ok || bad "mx-test"
+
 echo "== templates =="
 for f in "$ROOT"/assets/templates/*.vmf; do
   [ -e "$f" ] || continue
