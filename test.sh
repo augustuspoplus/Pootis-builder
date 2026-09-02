@@ -61,7 +61,9 @@ echo "== phase 2: modal G/R/S transform =="
 "$RUN" --mx-test --screenshot /dev/null --width 32 --height 32 2>&1 \
   | grep -q 'mx-test: 4 passed, 0 failed' && ok || bad "mx-test"
 
-echo "== phase 3: displacement VMF round-trip =="
+echo "== phase 3: displacements =="
+"$RUN" --disp-test --screenshot /dev/null --width 32 --height 32 2>&1 \
+  | grep -q 'disp-test: 7 passed, 0 failed' && ok || bad "disp-test (make + sculpt + round-trip)"
 DISP="$LOCALAPPDATA/PootisBuilder/decompiled/cp_badlands.vmf"
 [ -f "$DISP" ] || DISP="$LOCALAPPDATA/PootisBuilder/decompiled/cp_process_final.vmf"
 if [ -f "$DISP" ]; then

@@ -93,4 +93,17 @@ void faceRotateUV(BrushFace& f, float deltaDeg);
 // 3 left, 4 right, 5 center. texW/texH are the material's pixel size.
 void faceJustifyUV(BrushFace& f, int texW, int texH, int mode);
 
+// --- Displacements --------------------------------------------------------
+// Build a valid, flat "dispinfo" block for `f` at the given power (2..4):
+// every normal points along the face normal, every distance is 0. Sets
+// f.dispInfo / f.hasDisp. The face must already be polygonised with 4 verts.
+void faceMakeDisplacement(BrushFace& f, int power);
+
+// Raise/lower the displacement: add `amount` (world units, along each vertex
+// normal) to every grid vertex within `radius` of `worldPt`, with a smooth
+// falloff. Returns false if `f` has no usable dispinfo. Rewrites the
+// "distances" rows in place.
+bool faceSculptDisplacement(BrushFace& f, const glm::vec3& worldPt, float radius,
+                            float amount);
+
 }  // namespace pb::map

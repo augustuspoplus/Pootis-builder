@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <sstream>
 
 #include <glm/gtc/matrix_inverse.hpp>
 #include <glm/gtc/matrix_transform.hpp>
@@ -394,6 +395,153 @@ void faceJustifyUV(BrushFace& f, int texW, int texH, int mode) {
             break;
         default: break;
     }
+}
+
+// --- Displacements -----------------------------------------------------------
+namespace {
+
+// The four base-quad corners of a disp face, corner 0 nearest `start`, walked
+// CCW (matching MapMesh::emitDispFace). B = col/u axis end, D = row/v axis end.
+void dispCorners(const BrushFace& f, const glm::vec3& start, glm::vec3& A,
+                 glm::vec3& B, glm::vec3& C, glm::vec3& D) {
+    int c0 = 0;
+    float best = 1e30f;
+    for (int k = 0; k < 4; ++k) {
+        const float d = glm::distance(f.verts[k], start);
+        if (d < best) { best = d; c0 = k; }
+    }
+    A = f.verts[c0];
+    B = f.verts[(c0 + 1) % 4];
+    C = f.verts[(c0 + 2) % 4];
+    D = f.verts[(c0 + 3) % 4];
+}
+
+bool readRows(const KvNode* blk, int gn, int comp, std::vector<float>& out) {
+    if (!blk) return false;
+    out.assign(static_cast<size_t>(gn) * gn * comp, 0.0f);
+    for (int r = 0; r < gn; ++r) {
+        char key[16];
+        std::snprintf(key, sizeof(key), "row%d", r);
+        const std::string s = blk->get(key);
+        if (s.empty()) return false;
+        std::istringstream is(s);
+        for (int i = 0; i < gn * comp; ++i)
+            if (!(is >> out[static_cast<size_t>(r) * gn * comp + i])) return false;
+    }
+    return true;
+}
+
+void writeRows(KvNode& blk, int gn, int comp, const std::vector<float>& in) {
+    blk.pairs.clear();
+    blk.children.clear();
+    for (int r = 0; r < gn; ++r) {
+        std::ostringstream os;
+        for (int i = 0; i < gn * comp; ++i) {
+            if (i) os << ' ';
+            os << in[static_cast<size_t>(r) * gn * comp + i];
+        }
+        char key[16];
+        std::snprintf(key, sizeof(key), "row%d", r);
+        blk.set(key, os.str());
+    }
+}
+
+KvNode* childOrAdd(KvNode& p, const char* name) {
+    for (auto& c : p.children)
+        if (c.name == name) return &c;
+    KvNode n;
+    n.name = name;
+    p.children.push_back(std::move(n));
+    return &p.children.back();
+}
+
+}  // namespace
+
+void faceMakeDisplacement(BrushFace& f, int power) {
+    if (f.verts.size() != 4) return;
+    power = std::clamp(power, 2, 4);
+    const int gn = (1 << power) + 1;
+
+    KvNode di;
+    di.name = "dispinfo";
+    di.set("power", std::to_string(power));
+    char buf[64];
+    std::snprintf(buf, sizeof(buf), "[%g %g %g]", f.verts[0].x, f.verts[0].y,
+                  f.verts[0].z);
+    di.set("startposition", buf);
+    di.set("flags", "0");
+    di.set("elevation", "0");
+    di.set("subdiv", "0");
+
+    std::vector<float> nrm(static_cast<size_t>(gn) * gn * 3, 0.0f);
+    std::vector<float> zero3(static_cast<size_t>(gn) * gn * 3, 0.0f);
+    std::vector<float> zero1(static_cast<size_t>(gn) * gn, 0.0f);
+    for (int i = 0; i < gn * gn; ++i) {
+        nrm[i * 3] = f.planeN.x;
+        nrm[i * 3 + 1] = f.planeN.y;
+        nrm[i * 3 + 2] = f.planeN.z;
+    }
+    writeRows(*childOrAdd(di, "normals"), gn, 3, nrm);
+    writeRows(*childOrAdd(di, "distances"), gn, 1, zero1);
+    writeRows(*childOrAdd(di, "offsets"), gn, 3, zero3);
+    writeRows(*childOrAdd(di, "offset_normals"), gn, 3, nrm);
+    writeRows(*childOrAdd(di, "alphas"), gn, 1, zero1);
+
+    // triangle_tags: (gn-1) rows of 2*(gn-1) ints, all 9 (walkable).
+    KvNode& tt = *childOrAdd(di, "triangle_tags");
+    for (int r = 0; r < gn - 1; ++r) {
+        std::ostringstream os;
+        for (int i = 0; i < 2 * (gn - 1); ++i) os << (i ? " 9" : "9");
+        char key[16];
+        std::snprintf(key, sizeof(key), "row%d", r);
+        tt.set(key, os.str());
+    }
+    KvNode& av = *childOrAdd(di, "allowed_verts");
+    av.set("10", "-1 -1 -1 -1 -1 -1 -1 -1 -1 -1");
+
+    f.dispInfo = std::move(di);
+    f.hasDisp = true;
+}
+
+bool faceSculptDisplacement(BrushFace& f, const glm::vec3& worldPt, float radius,
+                            float amount) {
+    if (!f.hasDisp || f.verts.size() != 4) return false;
+    const int power = f.dispInfo.getInt("power");
+    if (power < 2 || power > 4) return false;
+    const int gn = (1 << power) + 1;
+
+    std::vector<float> nrm, dst;
+    if (!readRows(f.dispInfo.child("normals"), gn, 3, nrm)) return false;
+    if (!readRows(f.dispInfo.child("distances"), gn, 1, dst)) return false;
+
+    glm::vec3 start(0.0f);
+    std::sscanf(f.dispInfo.get("startposition").c_str(), " [ %f %f %f ]", &start.x,
+                &start.y, &start.z);
+    glm::vec3 A, B, C, D;
+    dispCorners(f, start, A, B, C, D);
+
+    const float r2 = radius * radius;
+    bool touched = false;
+    for (int row = 0; row < gn; ++row) {
+        const float tb = float(row) / (gn - 1);
+        const glm::vec3 e0 = A + (D - A) * tb;
+        const glm::vec3 e1 = B + (C - B) * tb;
+        for (int col = 0; col < gn; ++col) {
+            const int i = row * gn + col;
+            const float ta = float(col) / (gn - 1);
+            const glm::vec3 base = e0 + (e1 - e0) * ta;
+            const glm::vec3 nv(nrm[i * 3], nrm[i * 3 + 1], nrm[i * 3 + 2]);
+            const glm::vec3 cur = base + nv * dst[i];
+            const float d2 = glm::dot(cur - worldPt, cur - worldPt);
+            if (d2 > r2) continue;
+            const float fall = 1.0f - std::sqrt(d2) / radius;  // 1 at centre -> 0
+            dst[i] += amount * fall * fall * (3.0f - 2.0f * fall);  // smoothstep
+            touched = true;
+        }
+    }
+    if (!touched) return false;
+    writeRows(*childOrAdd(f.dispInfo, "distances"), gn, 1, dst);
+    return true;
 }
 
 KvNode solidToKv(const Solid& s) {

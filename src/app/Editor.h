@@ -58,6 +58,7 @@ public:
     }
     void debugPhase1Test();  // exercise entity-brush edit ops on the loaded doc
     void debugModalXform();  // G/R/S numeric transform round-trip check
+    void debugDispTest();    // make + sculpt + VMF round-trip a displacement
     void debugArmKit(const std::string& piece) {  // arm + force the ghost preview
         if (!doc_.active()) { doc_.newBlank("kittest"); history_.reset(doc_); }
         placing_ = piece; debugPreviewAtCenter_ = true; showWelcome_ = false;
@@ -432,6 +433,9 @@ private:
     char texMaterial_[128] = "dev/dev_measuregeneric01b";
     map::BrushFace texClip_;        // projection lifted by Alt-click (the eyedropper)
     bool texClipSet_ = false;
+    float dispRadius_ = 256.0f;     // displacement sculpt brush
+    float dispAmount_ = 64.0f;
+    void sculptSelectedDisp(float amount);
 
     // Cordon: compile / preview only a boxed region.
     bool cordonOn_ = false;
