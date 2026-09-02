@@ -51,6 +51,10 @@ public:
         if (!doc_.active()) { doc_.newBlank("kittest"); history_.reset(doc_); }
         placePiece(piece, glm::vec3(0)); showWelcome_ = false; frameAllViews();
     }
+    void debugArmKit(const std::string& piece) {  // arm + force the ghost preview
+        if (!doc_.active()) { doc_.newBlank("kittest"); history_.reset(doc_); }
+        placing_ = piece; debugPreviewAtCenter_ = true; showWelcome_ = false;
+    }
     void debugDropModel(const std::string& mdl) {
         if (!doc_.active()) { doc_.newBlank("mdltest"); history_.reset(doc_); }
         placeFgdEntity("prop_static", glm::vec3(0));
@@ -226,6 +230,7 @@ private:
     void placePiece(const std::string& piece, const glm::vec3& at);
     void finalizeRoad();
     void drawRoadOverlay(ViewPanel& p, float aspect, ImDrawList* dl);
+    void drawPlacePreview(ViewPanel& p, float aspect, ImDrawList* dl);
     void placeFgdEntity(const std::string& cls, const glm::vec3& at);
     void tieSelectionToEntity(const std::string& cls);
     glm::vec3 viewPlanePoint(ViewPanel& p, const ImVec2& mouse) const;
@@ -368,6 +373,7 @@ private:
     int gridSize_ = 64;
     bool snap_ = true;
     int kitTab_ = 0;
+    bool debugPreviewAtCenter_ = false;  // headless: draw the ghost w/o a mouse
     std::string placing_;
     std::string dragPlace_;   // payload of an in-progress menu->viewport drag
     void placeFromPayload(const std::string& payload, const glm::vec3& at);
