@@ -42,16 +42,17 @@ Real maps are 60%+ brush entities; right now they're second-class.
 - **Done:** open decompiled `cp_process_final`, move / reshape / duplicate / untie a
   func_* brush — no dead ends.
 
-### Phase 2 — Precise transforms
+### Phase 2 — Precise transforms  (in progress)
 Everyday editing feel. No way to say "move it exactly 64 on X".
-- Keyboard ops: `G`/`R`/`S`, then `X`/`Y`/`Z` to constrain (Shift+axis = plane), type a
-  number, Enter commits, Esc cancels. Thin op layer over the existing transform code.
-- Live numeric readout during any drag (delta + absolute), editable inline.
-- Snap targets: grid (have it) + vertex / edge-midpoint / face-centre of other brushes;
-  "snap selection to grid".
-- 2D views as first-class editing surfaces: draw a brush by corners with live dims, drag
-  an edge to a typed value, box-select, typed block-tool depth.
-- Rotate/scale about a chosen pivot (selection centre / cursor / picked point).
+- [x] Keyboard ops: `G`/`R`/`S`, then `X`/`Y`/`Z` to lock an axis, type a number,
+      Enter commits, Esc cancels. HUD shows op/axis/value. `--mx-test` 4/4.
+- [x] "Snap selection to grid" button.
+- [x] Live readout while dragging in 2D: centre, and the "d +x +y +z" delta on a move.
+- [ ] Snap targets: vertex / edge-midpoint / face-centre of other brushes, with an
+      in-range indicator.
+- [ ] 2D views as first-class editing surfaces: draw a brush by corners with live dims,
+      drag an edge to a typed value, typed block-tool depth.
+- [ ] Rotate/scale about a chosen pivot (cursor / picked point), not just centre.
 - **Done when:** build a room to exact dimensions entirely in the 2D views.
 
 ### Phase 3 — Surfaces
