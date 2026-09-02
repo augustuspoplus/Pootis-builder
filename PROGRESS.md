@@ -55,6 +55,16 @@ Q2 = Simple-mode kit builds new maps (prioritised). Also doing section G (QoL).
     payload, cp_push) leaked — no walls/ceiling. Added a trailing
     `Skybox seal` pass + dropped the sun to z=384; all 7 now compile
     leak-free through vbsp.
+  - **Undo bug found + fixed**: `map::History` only snapshotted brush
+    geometry, never the entity list — so undoing a kit piece that places
+    entities (spawns, points, lights, props) orphaned them, and
+    moving / re-keying a point entity couldn't be undone at all. History
+    now snapshots the full entity list. `--undo-test` (place / rotate /
+    delete round-trip) passes 5/5.
+- **More Simple pieces** (post-sweep): Window, Spiral stairs, Fence,
+  Crate stack (Build); Spawn door = `func_respawnroomvisualizer` (Moving);
+  Death pit, No-build zone (Zones); Spectator camera (Things). Kit is now
+  ~50 pieces across Build / Play / Moving / Zones / Things / Props / Light.
 
 ## Visual fidelity (done)
 - **prop_static models**: `model/StudioModel` parses MDL + VVD + VTX (LOD 0,
