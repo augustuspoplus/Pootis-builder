@@ -4,6 +4,16 @@ Newest first. ROADMAP.md milestones A–H are spent; **PLAN.md** is the live pla
 (five gated phases to 1.0 + the UI plan).
 
 ## Phases + performance batch
+- **Phase 2 — precise transforms** (c880bed, e29e8b8). Modal `G`/`R`/`S`
+  transform: press, then `X`/`Y`/`Z` to lock an axis, type an exact amount,
+  Enter commits / Esc cancels; live HUD; works in 2D + 3D, world + entity
+  brushes. "Snap to grid" button; live centre + move-delta readout on 2D
+  drags. `--mx-test` 4/4 (69 total). Remaining P2: snap-to-geometry, 2D
+  draw-by-corners + typed dims, pivot choice.
+- **Phase 1 — brush-entity editing** (93c9917, be788b8, 0a1dbc9). Delete /
+  duplicate / clip / untie / tie-picker on entity brushes; "part of <class>"
+  identity. `--phase1-test` 4/4 on decompiled cp_process (`func_illusionary`).
+  Only cross-entity grouping deferred.
 - **Perf: baked-prop cache** (dcdcce3). Every edit re-baked every prop model —
   pl_upward (1748 props → 1.5M verts) was ~18 s per placement. `buildAndUpload`
   now snapshots the baked-prop geometry into a blob keyed by the prop list and
