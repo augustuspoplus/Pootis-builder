@@ -79,6 +79,7 @@ struct Options {
     bool mapCheck = false;
     bool palette = false;
     bool settings = false;
+    std::string makeTpl;
     std::string placePrefabPath;
     int subDemoMode = 0;
     bool workshop = false;
@@ -128,6 +129,7 @@ Options parseArgs(int argc, char** argv) {
         else if (a == "--map-check") o.mapCheck = true;
         else if (a == "--palette") o.palette = true;
         else if (a == "--settings") o.settings = true;
+        else if (a == "--make-templates") o.makeTpl = next("");
         else if (a == "--place-prefab") o.placePrefabPath = next("");
         else if (a == "--dump-props") o.dumpProps = true;
         else if (a == "--no-decompile") o.noDecompile = true;
@@ -186,6 +188,7 @@ int runHeadlessScreenshot(const Options& opt, GLFWwindow* window, float uiScale)
     if (opt.mapCheck) editor.debugMapCheck();
     if (opt.palette) editor.debugShowPalette();
     if (opt.settings) editor.debugShowSettings();
+    if (!opt.makeTpl.empty()) editor.debugMakeTemplates(opt.makeTpl);
     if (!opt.saveVmfPath.empty()) editor.saveVmf(opt.saveVmfPath);
     if (!opt.panel.empty()) editor.debugFocusPanel(opt.panel);
     if (opt.dumpProps) editor.debugDumpProps();

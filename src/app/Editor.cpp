@@ -767,6 +767,81 @@ void Editor::uiScaleMenu() {
 // ---------------------------------------------------------------------------
 // Welcome screen
 // ---------------------------------------------------------------------------
+void Editor::makeTemplates(const std::string& outDir) {
+    std::error_code ec;
+    fs::create_directories(outDir, ec);
+    auto reset = [&](const char* nm) {
+        bsp_ = BspFile();
+        doc_.newBlank(nm);
+        history_.reset(doc_);
+        clearSelection();
+    };
+    auto sun = [&](glm::vec3 at) { placePiece("Sun / sky", at); };
+
+    // 1. Empty room.
+    reset("empty_room");
+    placePiece("Room", glm::vec3(0, 0, 0));
+    placePiece("One spawn point", glm::vec3(0, 0, 0));
+    sun(glm::vec3(0, 0, 160));
+    doc_.saveVmf(outDir + "/empty_room.vmf");
+
+    // 2. Two-base arena with a mid point.
+    reset("arena");
+    placePiece("Floor", glm::vec3(0, 0, 0));
+    for (int i = 0; i < 6; ++i)
+        placePiece("Floor", glm::vec3((i - 3) * 256, 0, 0));
+    placePiece("RED spawn", glm::vec3(-1024, 0, 0));
+    placePiece("BLU spawn", glm::vec3(1024, 0, 0));
+    placePiece("KOTH point", glm::vec3(0, 0, 0));
+    placePiece("Health / ammo", glm::vec3(0, 320, 0));
+    sun(glm::vec3(0, 0, 512));
+    doc_.saveVmf(outDir + "/arena.vmf");
+
+    // 3. CTF two-base.
+    reset("ctf_2base");
+    for (int i = -4; i <= 4; ++i) placePiece("Floor", glm::vec3(i * 256, 0, 0));
+    placePiece("RED spawn", glm::vec3(-1152, 0, 0));
+    placePiece("BLU spawn", glm::vec3(1152, 0, 0));
+    placePiece("CTF setup", glm::vec3(0, 0, 0));
+    placePiece("Resupply", glm::vec3(-1152, 200, 0));
+    placePiece("Resupply", glm::vec3(1152, 200, 0));
+    sun(glm::vec3(0, 0, 512));
+    doc_.saveVmf(outDir + "/ctf_2base.vmf");
+
+    // 4. Payload skeleton.
+    reset("payload");
+    for (int i = 0; i < 8; ++i) placePiece("Floor", glm::vec3(i * 256 - 512, 0, 0));
+    placePiece("BLU spawn", glm::vec3(-768, 0, 0));
+    placePiece("RED spawn", glm::vec3(1408, 0, 0));
+    placePiece("Payload track", glm::vec3(-384, 0, 0));
+    placePiece("Health / ammo", glm::vec3(384, 256, 0));
+    sun(glm::vec3(0, 0, 512));
+    doc_.saveVmf(outDir + "/payload.vmf");
+
+    // 5. Trade / spawn box.
+    reset("trade_box");
+    placePiece("Room", glm::vec3(0, 0, 0));
+    placePiece("Room", glm::vec3(0, 0, 0));   // twice = bigger seal
+    placePiece("RED spawn", glm::vec3(-160, 0, 0));
+    placePiece("BLU spawn", glm::vec3(160, 0, 0));
+    placePiece("Resupply", glm::vec3(0, 160, 0));
+    sun(glm::vec3(0, 0, 160));
+    doc_.saveVmf(outDir + "/trade_box.vmf");
+
+    // 6. Single-CP attack/defend nub.
+    reset("cp_push");
+    for (int i = -3; i <= 3; ++i) placePiece("Floor", glm::vec3(i * 256, 0, 0));
+    placePiece("BLU spawn", glm::vec3(-896, 0, 0));
+    placePiece("RED spawn", glm::vec3(896, 0, 0));
+    placePiece("Capture point", glm::vec3(384, 0, 0));
+    placePiece("Round timer", glm::vec3(0, 0, 0));
+    sun(glm::vec3(0, 0, 512));
+    doc_.saveVmf(outDir + "/cp_push.vmf");
+
+    reset("scratch");   // leave the editor on a clean blank doc
+    PB_INFO("wrote 6 templates to %s", outDir.c_str());
+}
+
 void Editor::drawWelcome() {
     if (!showWelcome_) return;
     using namespace pb::ui;
@@ -836,11 +911,60 @@ void Editor::drawWelcome() {
         showWelcome_ = false;
     }
     ImGui::SameLine(0, 10);
-    if (bigButton("##bOpen", ICON_FA_FOLDER_OPEN, "Open map", "A compiled .bsp"))
+    if (bigButton("##bOpen", ICON_FA_FOLDER_OPEN, "Open map", "A .bsp or .vmf"))
         promptOpenMap();
     ImGui::SameLine(0, 10);
-    if (bigButton("##bImport", ICON_FA_DOWNLOAD, "Import", ".vmf / .bsp (soon)"))
-        promptOpenMap();
+    static bool showTemplates = true;
+    if (bigButton("##bTpl", ICON_FA_LAYER_GROUP, "From a template",
+                  "Pre-built starting maps"))
+        showTemplates = !showTemplates;
+
+    if (showTemplates) {
+        ImGui::Dummy(ImVec2(0, 12));
+        sectionLabel("TEMPLATES");
+        ImGui::Dummy(ImVec2(0, 4));
+        struct Tpl { const char* file; const char* name; const char* sub; };
+        static const Tpl tpls[] = {
+            {"empty_room", "Empty room", "One sealed room + spawn + sun"},
+            {"arena", "Arena", "Two spawns + a KOTH point"},
+            {"ctf_2base", "CTF — two bases", "Both flags + capture zones"},
+            {"payload", "Payload", "BLU to RED, working cart"},
+            {"cp_push", "Attack / defend", "One point + a round timer"},
+            {"trade_box", "Trade box", "A big room, both spawns"},
+        };
+        const float tw = (ImGui::GetContentRegionAvail().x - 20) / 3.0f;
+        for (int i = 0; i < IM_ARRAYSIZE(tpls); ++i) {
+            if (i % 3) ImGui::SameLine(0, 10);
+            ImGui::PushID(tpls[i].file);
+            ImGui::PushStyleColor(ImGuiCol_Button, col::bg2);
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, col::bg3);
+            const bool hit = ImGui::Button("##t", ImVec2(tw, 66 * uiScale_));
+            ImGui::PopStyleColor(2);
+            const ImVec2 mn = ImGui::GetItemRectMin();
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+            dl->AddText(ImVec2(mn.x + 12, mn.y + 9), u32(col::tx), tpls[i].name);
+            dl->AddText(nullptr, 0.0f,
+                        ImVec2(mn.x + 12, mn.y + 11 + ImGui::GetTextLineHeight()),
+                        u32(col::faint), tpls[i].sub, nullptr, tw - 20.0f);
+            if (hit) {
+                std::string p = executableDir() + "/assets/templates/" +
+                                std::string(tpls[i].file) + ".vmf";
+                if (!fileExists(p))
+                    p = executableDir() + "/../assets/templates/" +
+                        std::string(tpls[i].file) + ".vmf";
+                if (openMap(p)) {
+                    mode_ = Mode::Simple;
+                    layoutDirty_ = true;
+                    showWelcome_ = false;
+                    doc_.markDirty();
+                    status_ = std::string("Loaded template: ") + tpls[i].name;
+                } else {
+                    status_ = "Template not found — build with --make-templates";
+                }
+            }
+            ImGui::PopID();
+        }
+    }
 
     ImGui::Dummy(ImVec2(0, 18));
     sectionLabel("RECENT");
