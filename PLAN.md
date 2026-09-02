@@ -42,18 +42,19 @@ Real maps are 60%+ brush entities; right now they're second-class.
 - **Done:** open decompiled `cp_process_final`, move / reshape / duplicate / untie a
   func_* brush — no dead ends.
 
-### Phase 2 — Precise transforms  (in progress)
+### Phase 2 — Precise transforms  (essentially done)
 Everyday editing feel. No way to say "move it exactly 64 on X".
 - [x] Keyboard ops: `G`/`R`/`S`, then `X`/`Y`/`Z` to lock an axis, type a number,
       Enter commits, Esc cancels. HUD shows op/axis/value. `--mx-test` 4/4.
-- [x] "Snap selection to grid" button.
-- [x] Live readout while dragging in 2D: centre, and the "d +x +y +z" delta on a move.
-- [ ] Snap targets: vertex / edge-midpoint / face-centre of other brushes, with an
-      in-range indicator.
-- [ ] 2D views as first-class editing surfaces: draw a brush by corners with live dims,
-      drag an edge to a typed value, typed block-tool depth.
-- [ ] Rotate/scale about a chosen pivot (cursor / picked point), not just centre.
-- **Done when:** build a room to exact dimensions entirely in the 2D views.
+- [x] "Snap selection to grid" button; live centre + move-delta readout on 2D drags.
+- [x] Snap-to-geometry (magnet toggle): a selection bbox corner snaps onto the nearest
+      vertex of another brush, cyan ring marks the lock. In body-drag + modal G.
+- [x] Block tool: viewport depth field + live "W x H (deep D)" dimensions.
+- [x] Rotate/scale about the cursor — hold Alt when starting R / S.
+- [ ] (nice-to-have) edge-midpoint / face-centre snap targets; drag a 2D edge to a
+      typed value inline.
+- **Done:** lay a wall to exact size via the block depth field + SIZE panel; move a
+  brush corner exactly onto another with the magnet; `G X 64 ⏎`.
 
 ### Phase 3 — Surfaces
 A map's look is 90% surfaces; the texture tool is rough and displacements are read-only.
