@@ -437,7 +437,7 @@ void Editor::buildDockLayout(unsigned int dockId, const ImVec2& size) {
 
     if (mode_ == Mode::Simple) {
         ImGuiID left, rest, right, center;
-        left = ImGui::DockBuilderSplitNode(dockId, ImGuiDir_Left, 0.235f, nullptr, &rest);
+        left = ImGui::DockBuilderSplitNode(dockId, ImGuiDir_Left, 0.28f, nullptr, &rest);
         right = ImGui::DockBuilderSplitNode(rest, ImGuiDir_Right, 0.22f, nullptr, &center);
         ImGui::DockBuilderDockWindow("Build Kit", left);
         ImGui::DockBuilderDockWindow("Selection", right);
@@ -1977,6 +1977,198 @@ void Editor::placePiece(const std::string& piece, const glm::vec3& atRaw) {
             if (s.valid) made.push_back(std::move(s));
         }
         asFuncDetail = true;
+    } else if (piece == "Stairs") {
+        const int n = std::clamp(stairSteps_, 2, 40);
+        const float w = stairWidth_ * 0.5f;
+        for (int i = 0; i < n; ++i) {
+            const float z0 = at.z + i * stairRise_;
+            const float y0 = at.y + i * stairRun_;
+            box({at.x - w, y0, at.z}, {at.x + w, y0 + stairRun_ + 0.5f,
+                                       z0 + stairRise_}, floorMat);
+        }
+        asFuncDetail = true;
+    } else if (piece == "Cylinder" || piece == "Pillar (round)") {
+        const int s = std::clamp(cylSides_, 3, 32);
+        std::vector<std::pair<glm::vec3, float>> planes = {
+            {{0, 0, 1}, at.z + cylHeight_}, {{0, 0, -1}, -at.z}};
+        for (int k = 0; k < s; ++k) {
+            const float a = (k / float(s)) * 6.2831853f;
+            const glm::vec3 nrm(std::cos(a), std::sin(a), 0);
+            planes.push_back({nrm, glm::dot(nrm, at) + cylRadius_});
+        }
+        map::Solid c = map::Solid::fromPlanes(planes, wallMat);
+        if (c.valid) made.push_back(std::move(c));
+    } else if (piece == "Dome") {
+        const int s = std::clamp(cylSides_, 4, 24);
+        const int rings = 6;
+        for (int r = 0; r < rings; ++r) {
+            const float t0 = r / float(rings), t1 = (r + 1) / float(rings);
+            const float z0 = at.z + std::sin(t0 * 1.5708f) * cylHeight_;
+            const float z1 = at.z + std::sin(t1 * 1.5708f) * cylHeight_ + 0.5f;
+            const float rad = std::cos(t0 * 1.5708f) * cylRadius_;
+            std::vector<std::pair<glm::vec3, float>> planes = {
+                {{0, 0, 1}, z1}, {{0, 0, -1}, -z0}};
+            for (int k = 0; k < s; ++k) {
+                const float a = (k / float(s)) * 6.2831853f;
+                const glm::vec3 nrm(std::cos(a), std::sin(a), 0);
+                planes.push_back({nrm, glm::dot(nrm, at) + std::max(8.0f, rad)});
+            }
+            map::Solid c = map::Solid::fromPlanes(planes, wallMat);
+            if (c.valid) made.push_back(std::move(c));
+        }
+        asFuncDetail = true;
+    } else if (piece == "Arch" || piece == "Curved wall") {
+        const int n = std::clamp(archSegs_, 2, 32);
+        const float span = glm::radians(archSpan_);
+        const float a0 = -span * 0.5f;
+        for (int i = 0; i < n; ++i) {
+            const float ai = a0 + span * (i + 0.5f) / n;
+            const float step = span / n;
+            const glm::vec3 c(at.x + std::cos(ai) * archRadius_, at.y,
+                              at.z + std::sin(ai) * archRadius_ + archRadius_);
+            const glm::vec3 tangent(-std::sin(ai), 0, std::cos(ai));
+            const glm::vec3 radial(std::cos(ai), 0, std::sin(ai));
+            const glm::vec3 up(0, 1, 0);
+            const float halfLen = archRadius_ * step * 0.55f;
+            std::vector<std::pair<glm::vec3, float>> pl = {
+                {tangent, glm::dot(tangent, c) + halfLen},
+                {-tangent, glm::dot(-tangent, c) + halfLen},
+                {radial, glm::dot(radial, c) + archThick_ * 0.5f},
+                {-radial, glm::dot(-radial, c) + archThick_ * 0.5f},
+                {up, glm::dot(up, c) + archHeight_ * 0.5f},
+                {-up, glm::dot(-up, c) + archHeight_ * 0.5f}};
+            map::Solid s = map::Solid::fromPlanes(pl, wallMat);
+            if (s.valid) made.push_back(std::move(s));
+        }
+        asFuncDetail = true;
+    } else if (piece == "Wedge") {
+        const float x0 = at.x - 128, x1 = at.x + 128, y0 = at.y - 96, y1 = at.y + 96;
+        const float z0 = at.z, z1 = at.z + 160;
+        glm::vec3 sn = glm::normalize(glm::vec3((z1 - z0), 0, (x1 - x0)));
+        made.push_back(map::Solid::fromPlanes(
+            {{{0, 0, -1}, -z0}, {{-1, 0, 0}, -x0}, {{0, 1, 0}, y1},
+             {{0, -1, 0}, -y0}, {sn, glm::dot(sn, glm::vec3(x1, at.y, z0))}},
+            floorMat));
+    } else if (piece == "Doorway") {
+        // A wall with a 64x112 gap in the middle.
+        const float W = 128, H = 160, T = 8, gw = 40, gh = 112;
+        box({at.x - W, at.y - T, at.z}, {at.x - gw, at.y + T, at.z + H}, wallMat);
+        box({at.x + gw, at.y - T, at.z}, {at.x + W, at.y + T, at.z + H}, wallMat);
+        box({at.x - gw, at.y - T, at.z + gh}, {at.x + gw, at.y + T, at.z + H}, wallMat);
+    } else if (piece == "Platform") {
+        box({at.x - 96, at.y - 96, at.z + 96}, {at.x + 96, at.y + 96, at.z + 112},
+            floorMat);
+        for (int i = 0; i < 4; ++i) {
+            const float sx = (i & 1) ? 80.0f : -80.0f;
+            const float sy = (i & 2) ? 80.0f : -80.0f;
+            box({at.x + sx - 8, at.y + sy - 8, at.z},
+                {at.x + sx + 8, at.y + sy + 8, at.z + 96}, wallMat);
+        }
+        asFuncDetail = true;
+    } else if (piece == "Cover") {
+        box({at.x - 96, at.y - 8, at.z}, {at.x + 96, at.y + 8, at.z + 44}, wallMat);
+    } else if (piece == "Skybox seal") {
+        glm::vec3 mn, mx;
+        doc_.bounds(mn, mx);
+        if (mx.x <= mn.x) { mn = at - glm::vec3(1024); mx = at + glm::vec3(1024); }
+        mn -= glm::vec3(128);
+        mx += glm::vec3(256);
+        const float t = 32;
+        const char* sky = "tools/toolsskybox";
+        box({mn.x - t, mn.y - t, mn.z - t}, {mx.x + t, mx.y + t, mn.z}, sky);
+        box({mn.x - t, mn.y - t, mx.z}, {mx.x + t, mx.y + t, mx.z + t}, sky);
+        box({mn.x - t, mn.y - t, mn.z}, {mx.x + t, mn.y, mx.z}, sky);
+        box({mn.x - t, mx.y, mn.z}, {mx.x + t, mx.y + t, mx.z}, sky);
+        box({mn.x - t, mn.y, mn.z}, {mn.x, mx.y, mx.z}, sky);
+        box({mx.x, mn.y, mn.z}, {mx.x + t, mx.y, mx.z}, sky);
+    } else if (piece == "Clip wall") {
+        box({at.x - 128, at.y - 8, at.z}, {at.x + 128, at.y + 8, at.z + 160},
+            "tools/toolsclip");
+    } else if (piece == "Water") {
+        box({at.x - 256, at.y - 256, at.z - 64}, {at.x + 256, at.y + 256, at.z},
+            "nature/water_movingplane");
+    } else if (piece == "Trigger box") {
+        brushEnt("trigger_multiple", {at.x - 96, at.y - 96, at.z},
+                 {at.x + 96, at.y + 96, at.z + 128},
+                 {{"spawnflags", "1"}, {"wait", "1"}});
+    } else if (piece == "Ladder") {
+        brushEnt("func_ladder", {at.x - 20, at.y - 4, at.z},
+                 {at.x + 20, at.y + 8, at.z + 192}, {});
+        box({at.x - 22, at.y + 6, at.z}, {at.x + 22, at.y + 12, at.z + 192}, wallMat);
+    } else if (piece == "Working door") {
+        brushEnt("func_door", {at.x - 48, at.y - 6, at.z},
+                 {at.x + 48, at.y + 6, at.z + 112},
+                 {{"movedir", "0 0 90"}, {"speed", "100"}, {"wait", "4"},
+                  {"spawnflags", "0"}, {"lip", "8"}});
+    } else if (piece == "Button") {
+        brushEnt("func_button", {at.x - 16, at.y - 4, at.z + 40},
+                 {at.x + 16, at.y + 4, at.z + 72},
+                 {{"speed", "5"}, {"wait", "3"}, {"spawnflags", "1024"}});
+    } else if (piece == "Elevator") {
+        char dist[16];
+        std::snprintf(dist, sizeof(dist), "%d", (int)elevTravel_);
+        brushEnt("func_movelinear", {at.x - 80, at.y - 80, at.z},
+                 {at.x + 80, at.y + 80, at.z + 16},
+                 {{"targetname", "lift"}, {"movedir", "0 0 90"}, {"speed", "80"},
+                  {"spawnflags", "8"}, {"movedistance", dist}});
+        auto& btn = brushEnt("func_button", {at.x - 90, at.y - 12, at.z + 40},
+                             {at.x - 82, at.y + 12, at.z + 72},
+                             {{"speed", "5"}, {"wait", "6"}});
+        btn.connections.push_back({"OnPressed", "lift,Open,,0,-1"});
+    } else if (piece == "Breakable crate") {
+        brushEnt("func_breakable", {at.x - 32, at.y - 32, at.z},
+                 {at.x + 32, at.y + 32, at.z + 64},
+                 {{"material", "1"}, {"health", "40"},
+                  {"spawnflags", "0"}, {"physdamagescale", "1.0"}});
+    } else if (piece == "Fan / rotating") {
+        auto& e = brushEnt("func_rotating", {at.x - 64, at.y - 8, at.z + 64},
+                           {at.x + 64, at.y + 8, at.z + 80},
+                           {{"maxspeed", "120"}, {"spawnflags", "1"},
+                            {"fanfriction", "20"}});
+        e.origin = at + glm::vec3(0, 0, 72);
+    } else if (piece == "Teleport pair") {
+        ent("info_teleport_destination", at + glm::vec3(256, 0, 8),
+            {{"targetname", "tp_out"}, {"angles", "0 0 0"}});
+        brushEnt("trigger_teleport", {at.x - 48, at.y - 48, at.z},
+                 {at.x + 48, at.y + 48, at.z + 108},
+                 {{"target", "tp_out"}, {"spawnflags", "1"}});
+    } else if (piece == "KOTH point") {
+        ent("team_control_point", at + glm::vec3(0, 0, 8),
+            {{"targetname", "koth_cp"}, {"point_printname", "The Hill"},
+             {"point_default_owner", "0"}, {"point_index", "0"}});
+        brushEnt("trigger_capture_area", {at.x - 128, at.y - 128, at.z},
+                 {at.x + 128, at.y + 128, at.z + 128},
+                 {{"area_cap_point", "koth_cp"}, {"team_cancap_2", "1"},
+                  {"team_cancap_3", "1"}, {"team_numcap_2", "1"},
+                  {"team_numcap_3", "1"}, {"area_time_to_cap", "6"}});
+        ent("tf_logic_koth", at + glm::vec3(0, 0, 64),
+            {{"timer_length", "180"}, {"unlock_point", "30"}});
+        ent("team_control_point_master", at + glm::vec3(64, 0, 64),
+            {{"targetname", "master_control_point"}, {"StartDisabled", "0"}});
+        box({at.x - 128, at.y - 128, at.z - 16}, {at.x + 128, at.y + 128, at.z},
+            floorMat);
+    } else if (piece == "CTF setup") {
+        for (int side = 0; side < 2; ++side) {
+            const bool red = side == 0;
+            const float sx = red ? -768.0f : 768.0f;
+            ent("item_teamflag", at + glm::vec3(sx, 0, 8),
+                {{"targetname", red ? "red_flag" : "blu_flag"},
+                 {"TeamNum", red ? "2" : "3"},
+                 {"GameType", "1"},
+                 {"ReturnTime", "60"}});
+            brushEnt("func_capturezone", {at.x + sx - 64, at.y - 64, at.z},
+                     {at.x + sx + 64, at.y + 64, at.z + 96},
+                     {{"TeamNum", red ? "3" : "2"}, {"CapturePoint", "1"}});
+            box({at.x + sx - 96, at.y - 96, at.z - 16},
+                {at.x + sx + 96, at.y + 96, at.z}, floorMat);
+        }
+    } else if (piece == "Round timer") {
+        ent("team_round_timer", at + glm::vec3(0, 0, 16),
+            {{"targetname", "round_timer"}, {"timer_length", "600"},
+             {"show_in_hud", "1"}, {"StartDisabled", "0"}});
+    } else if (piece == "One spawn point") {
+        ent("info_player_teamspawn", at + glm::vec3(0, 0, 8),
+            {{"TeamNum", "0"}, {"angles", "0 0 0"}});
     } else if (piece == "RED spawn" || piece == "BLU spawn") {
         const bool red = piece[0] == 'R';
         const char* team = red ? "2" : "3";
@@ -3402,11 +3594,13 @@ void kitCards(const KitPiece* pieces, int count, std::string* placing,
     using pb::ui::dp;
     const float gap = dp(8.0f);
     const float avail = ImGui::GetContentRegionAvail().x;
-    const float cellW = (avail - gap) * 0.5f;
+    // 2 columns when there's room for a readable card, else 1.
+    const int ncol = (avail - gap) * 0.5f >= dp(120.0f) ? 2 : 1;
+    const float cellW = ncol == 2 ? (avail - gap) * 0.5f : avail;
     // Tall enough for the icon+name row plus two wrapped hint lines at any scale.
     const float cellH = ImGui::GetTextLineHeight() * 3.4f + dp(16.0f);
     for (int i = 0; i < count; ++i) {
-        if (i % 2) ImGui::SameLine(0, gap);
+        if (ncol == 2 && (i % 2)) ImGui::SameLine(0, gap);
         ImGui::PushID(i);
         const bool on = *placing == pieces[i].name;
         ImGui::PushStyleColor(ImGuiCol_Button, on ? pb::ui::col::bg3 : pb::ui::col::bg2);
@@ -3895,31 +4089,69 @@ void Editor::drawBuildKit() {
 
     if (ImGui::BeginTabBar("kit", ImGuiTabBarFlags_FittingPolicyScroll |
                                       ImGuiTabBarFlags_TabListPopupButton)) {
-        if (ImGui::BeginTabItem(ICON_FA_CUBE " Shapes")) {
+        if (ImGui::BeginTabItem(ICON_FA_CUBE " Build")) {
             static const KitPiece shapes[] = {
                 {ICON_FA_BORDER_ALL, "Floor", "Walkable ground area"},
                 {ICON_FA_SQUARE, "Wall", "Solid cover"},
+                {ICON_FA_WINDOW_MINIMIZE, "Ceiling", "A roof slab"},
                 {ICON_FA_TABLE_CELLS_LARGE, "Room", "4 walls + floor + ceiling"},
                 {ICON_FA_DIAGRAM_PROJECT, "Ramp", "Change height smoothly"},
-                {ICON_FA_GRIP, "Pillar", "Vertical cover"},
-                {ICON_FA_MOUND, "Hill", "Faceted mountain / mound of brushwork"},
-                {ICON_FA_ROAD, "Curvy road", "Click points, get a smooth road ribbon"},
+                {ICON_FA_CARET_UP, "Wedge", "Triangular ramp block"},
+                {ICON_FA_STAIRS, "Stairs", "A staircase (adjustable)"},
+                {ICON_FA_BEZIER_CURVE, "Arch", "Curved wall / archway"},
+                {ICON_FA_GRIP, "Pillar", "Square vertical cover"},
+                {ICON_FA_CIRCLE, "Cylinder", "Round pillar / column"},
+                {ICON_FA_IGLOO, "Dome", "Rounded dome roof"},
+                {ICON_FA_DOOR_OPEN, "Doorway", "Wall with a door-hole"},
+                {ICON_FA_TABLE, "Platform", "Raised floor on legs"},
+                {ICON_FA_MINUS, "Cover", "Waist-high cover"},
+                {ICON_FA_MOUND, "Hill", "Faceted mountain / mound"},
+                {ICON_FA_ROAD, "Curvy road", "Click points, get a road ribbon"},
             };
             ImGui::Dummy(ImVec2(0, 4));
             kitCards(shapes, IM_ARRAYSIZE(shapes), &placing_, &status_, &dragPlace_);
             ImGui::EndTabItem();
         }
-        if (ImGui::BeginTabItem(ICON_FA_ARROW_POINTER " Play")) {
+        if (ImGui::BeginTabItem(ICON_FA_FLAG " Play")) {
             static const KitPiece play[] = {
                 {ICON_FA_ARROW_POINTER, "RED spawn", "Team RED respawn room"},
                 {ICON_FA_ARROW_POINTER, "BLU spawn", "Team BLU respawn room"},
-                {ICON_FA_SQUARE, "Capture point", "Control point + trigger"},
-                {ICON_FA_DIAGRAM_PROJECT, "Payload track", "path_track for the cart"},
-                {ICON_FA_PLAY, "Resupply", "Regenerate locker"},
-                {ICON_FA_LIGHTBULB, "Health / ammo", "Pickup near a route"},
+                {ICON_FA_LOCATION_DOT, "One spawn point", "A single respawn spot"},
+                {ICON_FA_CIRCLE_DOT, "Capture point", "Stand-on control point"},
+                {ICON_FA_MOUNTAIN, "KOTH point", "King-of-the-hill point + timer"},
+                {ICON_FA_TRAIN, "Payload track", "Working cart + path + point"},
+                {ICON_FA_FLAG, "CTF setup", "Both flags + capture zones"},
+                {ICON_FA_CLOCK, "Round timer", "Countdown for the round"},
+                {ICON_FA_BOX_OPEN, "Resupply", "Regenerate locker"},
+                {ICON_FA_KIT_MEDICAL, "Health / ammo", "A medkit + ammo pack"},
             };
             ImGui::Dummy(ImVec2(0, 4));
             kitCards(play, IM_ARRAYSIZE(play), &placing_, &status_, &dragPlace_);
+            ImGui::EndTabItem();
+        }
+        if (ImGui::BeginTabItem(ICON_FA_GEARS " Moving")) {
+            static const KitPiece dyn[] = {
+                {ICON_FA_DOOR_OPEN, "Working door", "Opens when touched"},
+                {ICON_FA_HAND_POINTER, "Button", "Press to trigger things"},
+                {ICON_FA_ELEVATOR, "Elevator", "Platform + call button"},
+                {ICON_FA_FAN, "Fan / rotating", "A spinning brush"},
+                {ICON_FA_RIGHT_LEFT, "Teleport pair", "Trigger + destination"},
+                {ICON_FA_BOX, "Breakable crate", "Breaks when shot"},
+            };
+            ImGui::Dummy(ImVec2(0, 4));
+            kitCards(dyn, IM_ARRAYSIZE(dyn), &placing_, &status_, &dragPlace_);
+            ImGui::EndTabItem();
+        }
+        if (ImGui::BeginTabItem(ICON_FA_VECTOR_SQUARE " Zones")) {
+            static const KitPiece zones[] = {
+                {ICON_FA_BOMB, "Trigger box", "Fires outputs on touch"},
+                {ICON_FA_BAN, "Clip wall", "Invisible wall (players only)"},
+                {ICON_FA_WATER, "Water", "A body of water"},
+                {ICON_FA_STAIRS, "Ladder", "Climbable ladder volume"},
+                {ICON_FA_CLOUD, "Skybox seal", "Wraps the map in sky brushes"},
+            };
+            ImGui::Dummy(ImVec2(0, 4));
+            kitCards(zones, IM_ARRAYSIZE(zones), &placing_, &status_, &dragPlace_);
             ImGui::EndTabItem();
         }
         const ImGuiTabItemFlags tf =
@@ -3990,20 +4222,23 @@ void Editor::drawBuildKit() {
     struct Row {
         bool ok;
         const char* label;
+        const char* fixKit;   // kit piece to place if the user clicks "+ Add"
+        const char* fixHint;
     };
     const Row rows[] = {
         {countClass("info_player_teamspawn") >= 2 || countClass("info_player_start") >= 1,
-         "Spawn points placed"},
-        {!skyname.empty(), "Skybox set (seals the map)"},
+         "Spawn points placed", "RED spawn", "adds a RED spawn room"},
+        {!skyname.empty(), "Skybox set (seals the map)", "Skybox seal",
+         "wraps the map in sky brushes"},
         {countClass("team_control_point") > 0 || countClass("trigger_capture_area") > 0 ||
              countClass("func_capturezone") > 0,
-         "An objective (capture / flag)"},
+         "An objective (capture / flag)", "Capture point", "adds a control point"},
         {anyClassPrefix("item_health") || anyClassPrefix("item_ammo") ||
              countClass("func_regenerate") > 0,
-         "Health and ammo on the routes"},
+         "Health and ammo on the routes", "Health / ammo", "adds a medkit + ammo"},
         {countClass("light") > 0 || countClass("light_environment") > 0 ||
              countClass("light_spot") > 0,
-         "Lights in the level"},
+         "Lights in the level", "Sun / sky", "adds a sun (light_environment)"},
     };
     int done = 0;
     for (const Row& r : rows)
@@ -4017,7 +4252,9 @@ void Editor::drawBuildKit() {
     ImGui::SameLine();
     ImGui::TextDisabled("%s", frac);
     ImGui::Dummy(ImVec2(0, 4));
+    int ri = 0;
     for (const Row& r : rows) {
+        ImGui::PushID(ri++);
         ImGui::PushStyleColor(ImGuiCol_Text, r.ok ? pb::ui::col::good : pb::ui::col::faint);
         ImGui::TextUnformatted(r.ok ? ICON_FA_CHECK : ICON_FA_SQUARE);
         ImGui::PopStyleColor();
@@ -4026,6 +4263,24 @@ void Editor::drawBuildKit() {
                               r.ok ? pb::ui::col::tx : pb::ui::col::dim);
         ImGui::TextUnformatted(r.label);
         ImGui::PopStyleColor();
+        if (!r.ok && hasDoc()) {
+            ImGui::SameLine();
+            ImGui::SetCursorPosX(ImGui::GetContentRegionMax().x - pb::ui::dp(52.0f));
+            if (ImGui::SmallButton("+ Add")) {
+                glm::vec3 mn, mx;
+                doc_.bounds(mn, mx);
+                glm::vec3 c = mx.x > mn.x ? 0.5f * (mn + mx) : glm::vec3(0);
+                c.z = mx.x > mn.x ? mn.z : 0.0f;
+                if (std::string(r.fixKit) == "RED spawn") {
+                    placePiece("RED spawn", c + glm::vec3(-512, 0, 0));
+                    placePiece("BLU spawn", c + glm::vec3(512, 0, 0));
+                } else {
+                    placePiece(r.fixKit, c);
+                }
+            }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", r.fixHint);
+        }
+        ImGui::PopID();
     }
 
     ImGui::End();
@@ -4321,6 +4576,36 @@ void Editor::drawSelectionPanel() {
             ImGui::SliderFloat("roughness", &hillRough_, 0.0f, 1.0f, "%.2f");
             ImGui::SetNextItemWidth(-1);
             ImGui::SliderInt("layers", &hillLayers_, 3, 16);
+        }
+        auto w1 = [] { ImGui::SetNextItemWidth(-1); };
+        if (placing_ == "Stairs") {
+            ImGui::Dummy(ImVec2(0, 6));
+            pb::ui::sectionLabel("STAIRS");
+            w1(); ImGui::SliderInt("steps", &stairSteps_, 2, 40);
+            w1(); ImGui::SliderFloat("step rise", &stairRise_, 4.0f, 32.0f, "%.0f");
+            w1(); ImGui::SliderFloat("step depth", &stairRun_, 8.0f, 64.0f, "%.0f");
+            w1(); ImGui::SliderFloat("width", &stairWidth_, 32.0f, 512.0f, "%.0f");
+        }
+        if (placing_ == "Cylinder" || placing_ == "Dome") {
+            ImGui::Dummy(ImVec2(0, 6));
+            pb::ui::sectionLabel(placing_ == "Dome" ? "DOME" : "CYLINDER");
+            w1(); ImGui::SliderInt("sides", &cylSides_, 3, 32);
+            w1(); ImGui::SliderFloat("radius", &cylRadius_, 16.0f, 1024.0f, "%.0f");
+            w1(); ImGui::SliderFloat("height", &cylHeight_, 16.0f, 1024.0f, "%.0f");
+        }
+        if (placing_ == "Arch" || placing_ == "Curved wall") {
+            ImGui::Dummy(ImVec2(0, 6));
+            pb::ui::sectionLabel("ARCH");
+            w1(); ImGui::SliderInt("segments", &archSegs_, 2, 32);
+            w1(); ImGui::SliderFloat("radius", &archRadius_, 32.0f, 2048.0f, "%.0f");
+            w1(); ImGui::SliderFloat("arc °", &archSpan_, 20.0f, 360.0f, "%.0f");
+            w1(); ImGui::SliderFloat("thickness", &archThick_, 8.0f, 256.0f, "%.0f");
+            w1(); ImGui::SliderFloat("height", &archHeight_, 16.0f, 512.0f, "%.0f");
+        }
+        if (placing_ == "Elevator") {
+            ImGui::Dummy(ImVec2(0, 6));
+            pb::ui::sectionLabel("ELEVATOR");
+            w1(); ImGui::SliderFloat("travel up", &elevTravel_, 64.0f, 2048.0f, "%.0f");
         }
         if (placing_ == "Curvy road") {
             ImGui::Dummy(ImVec2(0, 6));
