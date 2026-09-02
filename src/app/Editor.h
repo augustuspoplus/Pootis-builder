@@ -242,6 +242,7 @@ private:
     void drawPlacePreview(ViewPanel& p, float aspect, ImDrawList* dl);
     void placeFgdEntity(const std::string& cls, const glm::vec3& at);
     void tieSelectionToEntity(const std::string& cls);
+    void untieSelectionToWorld();  // move selected entity brushes back to world
     glm::vec3 viewPlanePoint(ViewPanel& p, const ImVec2& mouse) const;
     glm::vec3 dropWorldPoint(ViewPanel& p, const ImVec2& mouse);  // smart drop pos
     glm::vec3 snapVec(const glm::vec3& v) const;
