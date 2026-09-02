@@ -456,6 +456,7 @@ void Editor::frame() {
 
     if (mode_ == Mode::Simple) {
         drawBuildKit();
+        drawTextureBrowser();  // tabbed with Build Kit; feeds the Surface tool
         drawSelectionPanel();
         drawHistoryPanel();
     } else {
@@ -535,6 +536,7 @@ void Editor::buildDockLayout(unsigned int dockId, const ImVec2& size) {
         left = ImGui::DockBuilderSplitNode(dockId, ImGuiDir_Left, 0.28f, nullptr, &rest);
         right = ImGui::DockBuilderSplitNode(rest, ImGuiDir_Right, 0.22f, nullptr, &center);
         ImGui::DockBuilderDockWindow("Build Kit", left);
+        ImGui::DockBuilderDockWindow("Textures", left);  // reachable for the Surface tool
         ImGui::DockBuilderDockWindow("Selection", right);
         ImGui::DockBuilderDockWindow("History", right);
         ImGui::DockBuilderDockWindow("Top (x/y)", center);
@@ -665,8 +667,9 @@ void Editor::drawTopBar() {
         }
     }
 
-    // Tool modes (Pro only)
-    if (mode_ == Mode::Pro) {
+    // Tool strip — available in both modes now (Simple users can reach for a
+    // brush / clip / surface tool without switching to the Pro layout).
+    {
         ImGui::SameLine(0, dp(14.0f));
         ImGui::SetCursorPosY((barH - row) * 0.5f);
         const char* const tools[] = {ICON_FA_ARROW_POINTER, ICON_FA_CUBE,
@@ -679,7 +682,7 @@ void Editor::drawTopBar() {
             subDragging_ = false;
         }
         if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("Select / Block / Vertex / Clip / Texture / Entity");
+            ImGui::SetTooltip("Select / Block / Vertex / Clip / Surface / Entity");
 
         if (tool_ == Tool::Vertex) {
             ImGui::SameLine(0, dp(10.0f));
@@ -6518,6 +6521,8 @@ void Editor::drawSelectionPanel() {
         }
         ImGui::Dummy(ImVec2(0, 6));
         if (ImGui::Button("Cancel", ImVec2(-1, 0))) placing_.clear();
+    } else if (tool_ == Tool::Texture && hasDoc()) {
+        drawFaceEditPanel();  // same surface panel Pro shows for this tool
     } else if (selectedEntity_ >= 0 &&
                selectedEntity_ < static_cast<int>(doc_.entities().size())) {
         drawEntityProperties();
