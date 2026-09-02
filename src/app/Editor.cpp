@@ -2414,7 +2414,8 @@ void Editor::placePiece(const std::string& piece, const glm::vec3& atRaw) {
     } else if (piece == "Pillar") {
         box({at.x - 32, at.y - 32, at.z}, {at.x + 32, at.y + 32, at.z + 192}, wallMat);
     } else if (piece == "Room") {
-        room(at + glm::vec3(0, 0, 96), glm::vec3(192, 192, 96), 16.0f);
+        const float rh = roomHalf_;
+        room(at + glm::vec3(0, 0, rh), glm::vec3(rh, rh, rh), 16.0f);
     } else if (piece == "Ramp") {
         const float x0 = at.x - 128, x1 = at.x + 128, y0 = at.y - 64, y1 = at.y + 64;
         const float z0 = at.z, z1 = at.z + 128;
@@ -5210,13 +5211,22 @@ void Editor::drawSelectionPanel() {
             ImGui::SliderInt("layers", &hillLayers_, 3, 16);
         }
         auto w1 = [] { ImGui::SetNextItemWidth(-1); };
-        if (placing_ == "Stairs") {
+        if (placing_ == "Stairs" || placing_ == "Spiral stairs") {
             ImGui::Dummy(ImVec2(0, 6));
-            pb::ui::sectionLabel("STAIRS");
+            pb::ui::sectionLabel(placing_ == "Spiral stairs" ? "SPIRAL STAIRS"
+                                                             : "STAIRS");
             w1(); ImGui::SliderInt("steps", &stairSteps_, 2, 40);
             w1(); ImGui::SliderFloat("step rise", &stairRise_, 4.0f, 32.0f, "%.0f");
-            w1(); ImGui::SliderFloat("step depth", &stairRun_, 8.0f, 64.0f, "%.0f");
-            w1(); ImGui::SliderFloat("width", &stairWidth_, 32.0f, 512.0f, "%.0f");
+            if (placing_ == "Stairs") {
+                w1(); ImGui::SliderFloat("step depth", &stairRun_, 8.0f, 64.0f, "%.0f");
+            }
+            w1(); ImGui::SliderFloat(placing_ == "Spiral stairs" ? "diameter" : "width",
+                                     &stairWidth_, 32.0f, 512.0f, "%.0f");
+        }
+        if (placing_ == "Room") {
+            ImGui::Dummy(ImVec2(0, 6));
+            pb::ui::sectionLabel("ROOM");
+            w1(); ImGui::SliderFloat("half-size", &roomHalf_, 96.0f, 1024.0f, "%.0f");
         }
         if (placing_ == "Cylinder" || placing_ == "Dome") {
             ImGui::Dummy(ImVec2(0, 6));
@@ -5234,10 +5244,13 @@ void Editor::drawSelectionPanel() {
             w1(); ImGui::SliderFloat("thickness", &archThick_, 8.0f, 256.0f, "%.0f");
             w1(); ImGui::SliderFloat("height", &archHeight_, 16.0f, 512.0f, "%.0f");
         }
-        if (placing_ == "Elevator") {
+        if (placing_ == "Elevator" || placing_ == "Moving platform") {
             ImGui::Dummy(ImVec2(0, 6));
-            pb::ui::sectionLabel("ELEVATOR");
-            w1(); ImGui::SliderFloat("travel up", &elevTravel_, 64.0f, 2048.0f, "%.0f");
+            pb::ui::sectionLabel(placing_ == "Moving platform" ? "MOVING PLATFORM"
+                                                              : "ELEVATOR");
+            w1(); ImGui::SliderFloat(placing_ == "Moving platform" ? "travel"
+                                                                  : "travel up",
+                                     &elevTravel_, 64.0f, 2048.0f, "%.0f");
         }
         if (placing_ == "Curvy road") {
             ImGui::Dummy(ImVec2(0, 6));
