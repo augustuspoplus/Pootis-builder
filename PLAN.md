@@ -75,16 +75,22 @@ A map's look is 90% surfaces; the texture tool was rough and displacements read-
 - **Done:** retexture a room, reshape a hillside — both in Pootis Builder. Blending
   two ground materials still needs Hammer.
 
-### Phase 4 — Simple ↔ Pro, one document
-Simple is expansive; the seam to Pro is abrupt and "everything previews" is half-true.
-- A kit piece stays a live, re-optionable object until "bake to brushes"; option panels
-  persist across a mode switch.
-- Pro's outliner lists those pieces with parameters editable.
-- Finish the preview rule: rendered thumbnails for entities / prefabs / sky-fog-light
-  presets; hover-preview in every list; kit cards with a mini 3D preview.
-- The 3-step guided first map in Simple mode.
-- **Done when:** a beginner starts in Simple, grows into Pro on the same map, never hits
-  "you can't edit that here".
+### Phase 4 — One adaptive workspace  (dial shipped)
+The seam between Simple and Pro was an abrupt app-swap.
+- [x] **The complexity dial**: `Guided · Standard · Full` replaces the binary
+      Simple/Pro switch. Guided and Standard share one friendly docking; only Full
+      swaps layout. Position persists (`Settings::workspaceDial`). `--dial <n>`.
+- [x] The full tool strip (Select / Block / Vertex / Clip / Surface / Entity) is
+      available at Standard, not just Full — reach a Pro tool without changing layout.
+- [x] The Surface panel, Textures browser, Outliner and Map Check are all reachable
+      at Standard; `drawSelectionPanel` routes to the tool-context panel like Pro's.
+- [ ] A kit piece stays a live, re-optionable object until "bake to brushes" — deferred
+      (needs a KitInstance layer over the doc).
+- [ ] Preview-everywhere: entity / prefab / preset thumbnails, hover previews, kit
+      cards with a mini 3D render — deferred.
+- [ ] The 3-step guided first map (coach marks) — deferred.
+- **Done:** a beginner on Guided grows to Standard, then Full, on the same map — same
+  document, camera, undo, selection — and never hits "you can't edit that here".
 
 ### Phase 5 — Ship it
 The compile-test loop and content pipeline aren't fast/trustworthy enough yet.
