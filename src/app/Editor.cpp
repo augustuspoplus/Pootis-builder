@@ -2408,6 +2408,69 @@ void Editor::drawFaceEditPanel() {
                 "Justify texture", true);
         }
     }
+
+    // --- Displacement ----------------------------------------------------
+    sectionLabel("DISPLACEMENT");
+    bool anyDisp = false, anyQuad = false;
+    for (const auto& [ref, fi] : texFaces_) {
+        const map::Solid* s = doc_.resolve(ref);
+        if (!s || fi >= (int)s->faces.size()) continue;
+        anyDisp = anyDisp || s->faces[fi].hasDisp;
+        anyQuad = anyQuad || s->faces[fi].verts.size() == 4;
+    }
+    if (!anyDisp) {
+        ImGui::PushStyleColor(ImGuiCol_Text, col::faint);
+        ImGui::TextWrapped(anyQuad ? "Turn the selected 4-sided face(s) into "
+                                     "editable terrain."
+                                   : "Select a single 4-sided face to make "
+                                     "terrain from it.");
+        ImGui::PopStyleColor();
+        ImGui::BeginDisabled(!anyQuad);
+        for (int p = 2; p <= 4; ++p) {
+            if (p > 2) ImGui::SameLine();
+            char lbl[24];
+            std::snprintf(lbl, sizeof(lbl), "Power %d", p);
+            if (ImGui::Button(lbl, ImVec2(90, 0)))
+                applyToTexFaces(
+                    [&](map::BrushFace& f) {
+                        if (f.verts.size() == 4) map::faceMakeDisplacement(f, p);
+                    },
+                    "Make displacement", true);
+        }
+        ImGui::EndDisabled();
+    } else {
+        ImGui::SetNextItemWidth(-1);
+        ImGui::SliderFloat("##dispR", &dispRadius_, 32.0f, 1024.0f, "radius %.0f");
+        ImGui::SetNextItemWidth(-1);
+        ImGui::SliderFloat("##dispA", &dispAmount_, 4.0f, 256.0f, "step %.0f");
+        if (ImGui::Button(ICON_FA_ARROW_UP "  Raise", ImVec2(-1, 0)))
+            sculptSelectedDisp(+dispAmount_);
+        if (ImGui::Button(ICON_FA_ARROW_DOWN "  Lower", ImVec2(-1, 0)))
+            sculptSelectedDisp(-dispAmount_);
+        ImGui::PushStyleColor(ImGuiCol_Text, col::faint);
+        ImGui::TextWrapped("Nudges the grid around each face's centre. "
+                           "(Interactive brush next.)");
+        ImGui::PopStyleColor();
+        if (ImGui::Button(ICON_FA_TRASH "  Remove displacement", ImVec2(-1, 0)))
+            applyToTexFaces(
+                [&](map::BrushFace& f) { f.hasDisp = false; f.dispInfo = map::KvNode{}; },
+                "Remove displacement", true);
+    }
+}
+
+void Editor::sculptSelectedDisp(float amount) {
+    if (texFaces_.empty()) return;
+    for (const auto& [ref, fi] : texFaces_) {
+        map::Solid* s = doc_.resolve(ref);
+        if (!s || fi >= (int)s->faces.size()) continue;
+        map::BrushFace& f = s->faces[fi];
+        if (!f.hasDisp || f.verts.size() != 4) continue;
+        glm::vec3 c(0.0f);
+        for (const auto& v : f.verts) c += v;
+        c *= 0.25f;
+        map::faceSculptDisplacement(f, c, dispRadius_, amount);
+    }
+    afterEdit(amount >= 0 ? "Raise displacement" : "Lower displacement");
 }
 
 // --------------------------------------------------------------------------
@@ -4603,6 +4666,62 @@ void Editor::debugPhase1Test() {
        entShrank && doc_.worldSolids().size() == w1 + 1);
 
     PB_INFO("phase1-test (%s): %d passed, %d failed", cls.c_str(), pass, fail);
+}
+
+void Editor::debugDispTest() {
+    bsp_ = BspFile();
+    doc_.newBlank("disptest");
+    history_.reset(doc_);
+    clearSelection();
+    placePiece("Floor", glm::vec3(0, 0, 0));
+    int pass = 0, fail = 0;
+    auto ck = [&](const char* w, bool ok) {
+        if (ok) ++pass; else { ++fail; PB_ERROR("disp-test FAIL: %s", w); }
+    };
+    map::Solid* fs = selection_.empty() ? nullptr : doc_.resolve(selection_[0]);
+    if (!fs) { PB_ERROR("disp-test: no Floor placed"); return; }
+
+    // Pick the top face (normal ~ +Z, 4 verts).
+    int top = -1;
+    for (int i = 0; i < (int)fs->faces.size(); ++i)
+        if (fs->faces[i].verts.size() == 4 && fs->faces[i].planeN.z > 0.9f) top = i;
+    ck("found a quad top face", top >= 0);
+    if (top < 0) { PB_INFO("disp-test: 1 passed, 1 failed"); return; }
+
+    map::faceMakeDisplacement(fs->faces[top], 3);
+    ck("make -> hasDisp + power 3",
+       fs->faces[top].hasDisp && fs->faces[top].dispInfo.getInt("power") == 3);
+
+    glm::vec3 c(0.0f);
+    for (const auto& v : fs->faces[top].verts) c += v;
+    c *= 0.25f;
+    const bool sculpted =
+        map::faceSculptDisplacement(fs->faces[top], c, 512.0f, 100.0f);
+    ck("sculpt reported a change", sculpted);
+    {
+        const map::KvNode* d = fs->faces[top].dispInfo.child("distances");
+        bool anyNonZero = false;
+        if (d)
+            for (const auto& p : d->pairs)
+                if (p.second.find_first_not_of(" -0.eE") != std::string::npos)
+                    anyNonZero = true;
+        ck("a distance row is now non-zero", anyNonZero);
+    }
+
+    // Round-trip through VMF.
+    const std::string tmp =
+        (std::filesystem::temp_directory_path() / "pb_disp_rt.vmf").string();
+    std::string err;
+    ck("save vmf", doc_.saveVmf(tmp, &err));
+    map::MapDocument rt;
+    ck("reload vmf", rt.loadVmf(tmp, &err));
+    bool rtDisp = false;
+    for (const auto& s : rt.worldSolids())
+        for (const auto& f : s.faces)
+            if (f.hasDisp && f.dispInfo.getInt("power") == 3) rtDisp = true;
+    ck("dispinfo survived the round-trip", rtDisp);
+
+    PB_INFO("disp-test: %d passed, %d failed", pass, fail);
 }
 
 void Editor::debugUndoTest() {
