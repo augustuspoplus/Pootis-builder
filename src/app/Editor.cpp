@@ -2514,6 +2514,74 @@ void Editor::placePiece(const std::string& piece, const glm::vec3& atRaw) {
         asFuncDetail = true;
     } else if (piece == "Cover") {
         box({at.x - 96, at.y - 8, at.z}, {at.x + 96, at.y + 8, at.z + 44}, wallMat);
+    } else if (piece == "Window") {
+        // A wall with a chest-high rectangular opening.
+        const float W = 128, H = 160, T = 8, gw = 56, sill = 44, head = 128;
+        box({at.x - W, at.y - T, at.z}, {at.x - gw, at.y + T, at.z + H}, wallMat);
+        box({at.x + gw, at.y - T, at.z}, {at.x + W, at.y + T, at.z + H}, wallMat);
+        box({at.x - gw, at.y - T, at.z}, {at.x + gw, at.y + T, at.z + sill}, wallMat);
+        box({at.x - gw, at.y - T, at.z + head}, {at.x + gw, at.y + T, at.z + H},
+            wallMat);
+    } else if (piece == "Spiral stairs") {
+        const int n = std::clamp(stairSteps_ * 2, 8, 48);
+        const float R = std::max(48.0f, stairWidth_ * 0.5f);
+        const float rise = std::max(6.0f, stairRise_);
+        for (int i = 0; i < n; ++i) {
+            const float a0 = (i / float(n)) * 6.2831853f * 1.5f;  // 540deg climb
+            const glm::vec3 c(at.x + std::cos(a0) * R * 0.5f,
+                              at.y + std::sin(a0) * R * 0.5f, 0.0f);
+            const float z0 = at.z + i * rise;
+            std::vector<std::pair<glm::vec3, float>> pl = {
+                {{0, 0, 1}, z0 + rise + 0.5f}, {{0, 0, -1}, -at.z}};
+            for (int k = 0; k < 4; ++k) {
+                const float aa = a0 + k * 1.5708f + 0.7854f;
+                const glm::vec3 nn(std::cos(aa), std::sin(aa), 0);
+                pl.push_back({nn, glm::dot(nn, c) + R * 0.72f});
+            }
+            map::Solid s = map::Solid::fromPlanes(pl, floorMat);
+            if (s.valid) made.push_back(std::move(s));
+        }
+        box({at.x - 12, at.y - 12, at.z}, {at.x + 12, at.y + 12,
+             at.z + n * rise + 16}, wallMat);  // centre post
+        asFuncDetail = true;
+    } else if (piece == "Fence" || piece == "Railing") {
+        const float L = 128, postH = 48;
+        box({at.x - L, at.y - 3, at.z + postH - 6}, {at.x + L, at.y + 3,
+             at.z + postH}, wallMat);                                   // top rail
+        box({at.x - L, at.y - 3, at.z + postH * 0.5f - 3},
+            {at.x + L, at.y + 3, at.z + postH * 0.5f + 3}, wallMat);    // mid rail
+        for (int i = -2; i <= 2; ++i)
+            box({at.x + i * 56.0f - 3, at.y - 3, at.z},
+                {at.x + i * 56.0f + 3, at.y + 3, at.z + postH}, wallMat);
+        asFuncDetail = true;
+    } else if (piece == "Crate stack") {
+        const std::string crate = wallMat;
+        box({at.x - 48, at.y - 48, at.z}, {at.x + 48, at.y + 48, at.z + 96}, crate);
+        box({at.x - 40, at.y + 8, at.z + 96}, {at.x + 40, at.y + 88, at.z + 160},
+            crate);
+        box({at.x + 8, at.y - 72, at.z}, {at.x + 88, at.y + 8, at.z + 72}, crate);
+        asFuncDetail = true;
+    } else if (piece == "Spawn door") {
+        // Team-coloured one-way wall across a spawn exit.
+        brushEnt("func_respawnroomvisualizer", {at.x - 64, at.y - 4, at.z},
+                 {at.x + 64, at.y + 4, at.z + 128},
+                 {{"TeamNum", "0"}, {"solid_to_enemies", "1"}});
+    } else if (piece == "No-build zone") {
+        brushEnt("func_nobuild", {at.x - 128, at.y - 128, at.z},
+                 {at.x + 128, at.y + 128, at.z + 128}, {{"spawnflags", "1"}});
+    } else if (piece == "Death pit") {
+        // A recessed instant-kill trigger with a low rim so it reads as a pit.
+        box({at.x - 200, at.y - 200, at.z - 8}, {at.x + 200, at.y - 168, at.z + 24},
+            wallMat);
+        box({at.x - 200, at.y + 168, at.z - 8}, {at.x + 200, at.y + 200, at.z + 24},
+            wallMat);
+        box({at.x - 200, at.y - 168, at.z - 8}, {at.x - 168, at.y + 168, at.z + 24},
+            wallMat);
+        box({at.x + 168, at.y - 168, at.z - 8}, {at.x + 200, at.y + 168, at.z + 24},
+            wallMat);
+        brushEnt("trigger_hurt", {at.x - 168, at.y - 168, at.z - 256},
+                 {at.x + 168, at.y + 168, at.z + 16},
+                 {{"damage", "1000"}, {"damagecap", "1000"}, {"spawnflags", "1"}});
     } else if (piece == "Skybox seal") {
         glm::vec3 mn, mx;
         doc_.bounds(mn, mx);
@@ -4550,8 +4618,12 @@ void Editor::drawBuildKit() {
                 {ICON_FA_CIRCLE, "Cylinder", "Round pillar / column"},
                 {ICON_FA_IGLOO, "Dome", "Rounded dome roof"},
                 {ICON_FA_DOOR_OPEN, "Doorway", "Wall with a door-hole"},
+                {ICON_FA_WINDOW_MAXIMIZE, "Window", "Wall with a window opening"},
                 {ICON_FA_TABLE, "Platform", "Raised floor on legs"},
                 {ICON_FA_MINUS, "Cover", "Waist-high cover"},
+                {ICON_FA_BOXES_STACKED, "Crate stack", "A few crates as cover"},
+                {ICON_FA_TABLE_LIST, "Fence", "Railing / low fence"},
+                {ICON_FA_STAIRS, "Spiral stairs", "Stairs winding round a post"},
                 {ICON_FA_MOUND, "Hill", "Faceted mountain / mound"},
                 {ICON_FA_ROAD, "Curvy road", "Click points, get a road ribbon"},
             };
@@ -4579,6 +4651,7 @@ void Editor::drawBuildKit() {
         if (ImGui::BeginTabItem(ICON_FA_GEARS " Moving")) {
             static const KitPiece dyn[] = {
                 {ICON_FA_DOOR_OPEN, "Working door", "Opens when touched"},
+                {ICON_FA_DOOR_CLOSED, "Spawn door", "Team-only one-way spawn wall"},
                 {ICON_FA_HAND_POINTER, "Button", "Press to trigger things"},
                 {ICON_FA_ELEVATOR, "Elevator", "Platform + call button"},
                 {ICON_FA_FAN, "Fan / rotating", "A spinning brush"},
@@ -4593,6 +4666,8 @@ void Editor::drawBuildKit() {
             static const KitPiece zones[] = {
                 {ICON_FA_BOMB, "Trigger box", "Fires outputs on touch"},
                 {ICON_FA_BAN, "Clip wall", "Invisible wall (players only)"},
+                {ICON_FA_SKULL, "Death pit", "Instant-kill pit"},
+                {ICON_FA_HELMET_SAFETY, "No-build zone", "Blocks Engineer buildings"},
                 {ICON_FA_WATER, "Water", "A body of water"},
                 {ICON_FA_STAIRS, "Ladder", "Climbable ladder volume"},
                 {ICON_FA_CLOUD, "Skybox seal", "Wraps the map in sky brushes"},
@@ -4918,6 +4993,7 @@ void Editor::drawSimpleEntities() {
         {"Medium ammo", "item_ammopack_medium", ""},
         {"Full ammo", "item_ammopack_full", ""},
         {"Intel briefcase", "item_teamflag", "The flag for CTF"},
+        {"Spectator camera", "info_observer_point", "A camera angle for spectators"},
         {"Hurt zone", "trigger_hurt", "Brush trigger — hurts players inside"},
         {"Push / jump pad", "trigger_push", "Brush trigger — shoves players"},
         {"Sliding door", "func_door", "Select a brush, then click this"},
