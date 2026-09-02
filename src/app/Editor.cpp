@@ -385,7 +385,8 @@ void Editor::frame() {
         drawPrefabPanel();
         drawVisgroupsPanel();
     }
-    for (auto& v : views_) drawViewportPanel(v);
+    for (int i = 0; i < 4; ++i)
+        if (viewOpen_[i]) drawViewportPanel(views_[i], i == 0 ? nullptr : &viewOpen_[i]);
 
     // Manual drag-and-drop: a menu card set dragPlace_ while being dragged;
     // when the mouse is released over a viewport, drop it there. (ImGui's own
@@ -450,11 +451,6 @@ void Editor::buildDockLayout(unsigned int dockId, const ImVec2& size) {
     } else {
         ImGuiID left, center;
         left = ImGui::DockBuilderSplitNode(dockId, ImGuiDir_Left, 0.215f, nullptr, &center);
-        ImGuiID top, bottom;
-        top = ImGui::DockBuilderSplitNode(center, ImGuiDir_Up, 0.5f, nullptr, &bottom);
-        ImGuiID tl, tr, bl, br;
-        tl = ImGui::DockBuilderSplitNode(top, ImGuiDir_Left, 0.5f, nullptr, &tr);
-        bl = ImGui::DockBuilderSplitNode(bottom, ImGuiDir_Left, 0.5f, nullptr, &br);
         ImGui::DockBuilderDockWindow("Properties", left);
         ImGui::DockBuilderDockWindow("Contents", left);
         ImGui::DockBuilderDockWindow("Textures", left);
@@ -466,10 +462,11 @@ void Editor::buildDockLayout(unsigned int dockId, const ImVec2& size) {
         ImGui::DockBuilderDockWindow("Log", left);
         ImGui::DockBuilderDockWindow("Prefabs", left);
         ImGui::DockBuilderDockWindow("Visgroups", left);
-        ImGui::DockBuilderDockWindow("3D View", tl);
-        ImGui::DockBuilderDockWindow("Top (x/y)", tr);
-        ImGui::DockBuilderDockWindow("Front (x/z)", bl);
-        ImGui::DockBuilderDockWindow("Side (y/z)", br);
+        // 3D is primary; Top/Front/Side tab onto it and are opened on demand.
+        ImGui::DockBuilderDockWindow("3D View", center);
+        ImGui::DockBuilderDockWindow("Top (x/y)", center);
+        ImGui::DockBuilderDockWindow("Front (x/z)", center);
+        ImGui::DockBuilderDockWindow("Side (y/z)", center);
     }
     ImGui::DockBuilderFinish(dockId);
 }
@@ -531,6 +528,22 @@ void Editor::drawTopBar() {
         if (r >= 0 && r != static_cast<int>(mode_)) {
             mode_ = static_cast<Mode>(r);
             layoutDirty_ = true;
+        }
+    }
+
+    // 2D view toggles — 3D is always up; Top / Front / Side open on demand.
+    ImGui::SameLine(0, dp(14.0f));
+    ImGui::SetCursorPosY((barH - row) * 0.5f);
+    {
+        struct V { int idx; const char* lbl; };
+        static const V vs[] = {{1, "Top"}, {2, "Front"}, {3, "Side"}};
+        for (int k = 0; k < 3; ++k) {
+            if (k) ImGui::SameLine(0, dp(2.0f));
+            if (toolButton(vs[k].lbl, viewOpen_[vs[k].idx],
+                           "Show / hide this 2D view")) {
+                viewOpen_[vs[k].idx] = !viewOpen_[vs[k].idx];
+                if (viewOpen_[vs[k].idx]) ImGui::SetWindowFocus(views_[vs[k].idx].title);
+            }
         }
     }
 
@@ -1385,9 +1398,9 @@ void Editor::drawWelcome() {
 // ---------------------------------------------------------------------------
 // Viewport panels
 // ---------------------------------------------------------------------------
-void Editor::drawViewportPanel(ViewPanel& p) {
+void Editor::drawViewportPanel(ViewPanel& p, bool* pOpen) {
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
-    const bool visible = ImGui::Begin(p.title);
+    const bool visible = ImGui::Begin(p.title, pOpen);
     ImGui::PopStyleVar();
     if (!visible) {
         p.hovered = false;
