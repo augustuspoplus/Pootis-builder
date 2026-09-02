@@ -371,6 +371,7 @@ void Editor::frame() {
     if (mode_ == Mode::Simple) {
         drawBuildKit();
         drawSelectionPanel();
+        drawHistoryPanel();
     } else {
         drawProperties();
         drawOutliner();
@@ -441,6 +442,7 @@ void Editor::buildDockLayout(unsigned int dockId, const ImVec2& size) {
         right = ImGui::DockBuilderSplitNode(rest, ImGuiDir_Right, 0.22f, nullptr, &center);
         ImGui::DockBuilderDockWindow("Build Kit", left);
         ImGui::DockBuilderDockWindow("Selection", right);
+        ImGui::DockBuilderDockWindow("History", right);
         ImGui::DockBuilderDockWindow("Top (x/y)", center);
         ImGui::DockBuilderDockWindow("Front (x/z)", center);
         ImGui::DockBuilderDockWindow("Side (y/z)", center);
@@ -6376,34 +6378,42 @@ void Editor::drawStatusBar() {
 void Editor::drawHistoryPanel() {
     ImGui::Begin("History");
     if (!hasDoc()) {
-        ImGui::TextDisabled("No editable map open.");
+        ImGui::TextDisabled("Start a map — every change shows up here.");
         ImGui::End();
         return;
     }
-    ImGui::TextDisabled("%zu steps  (Ctrl+Z / Ctrl+Y)", history_.count());
-    ImGui::SameLine();
-    if (ImGui::SmallButton(ICON_FA_ROTATE_LEFT) && history_.canUndo()) undo();
-    ImGui::SameLine();
-    if (ImGui::SmallButton(ICON_FA_ROTATE_RIGHT) && history_.canRedo()) redo();
+    const size_t n = history_.count(), cur = history_.current();
+    if (ImGui::Button(ICON_FA_ROTATE_LEFT "  Undo", ImVec2(-1, 0)) &&
+        history_.canUndo())
+        undo();
+    if (ImGui::Button(ICON_FA_ROTATE_RIGHT "  Redo", ImVec2(-1, 0)) &&
+        history_.canRedo())
+        redo();
+    ImGui::PushStyleColor(ImGuiCol_Text, pb::ui::col::faint);
+    ImGui::TextWrapped("Click a step to jump back or forward. (Ctrl+Z / Ctrl+Y)");
+    ImGui::PopStyleColor();
     ImGui::Separator();
 
     if (ImGui::BeginChild("hist")) {
-        for (size_t i = 0; i < history_.count(); ++i) {
-            const bool cur = i == history_.current();
+        for (size_t i = 0; i < n; ++i) {
+            const bool isCur = i == cur;
+            const bool future = i > cur;  // steps you've undone past
             ImGui::PushID((int)i);
-            char row[160];
-            std::snprintf(row, sizeof(row), "%2zu  %s", i,
-                          history_.labelAt(i).c_str());
-            if (ImGui::Selectable(row, cur) && !cur) {
+            std::string lbl = history_.labelAt(i);
+            if (i == 0) lbl = "New map";
+            char row[176];
+            std::snprintf(row, sizeof(row), "  %s%s",
+                          isCur ? ICON_FA_LOCATION_CROSSHAIRS "  " : "     ",
+                          lbl.c_str());
+            if (future) ImGui::PushStyleColor(ImGuiCol_Text, pb::ui::col::dim);
+            if (ImGui::Selectable(row, isCur) && !isCur) {
                 history_.jumpTo(doc_, i);
                 clearSelection();
                 buildAndUpload(meshOpts_);
-                status_ = "Jumped to: " + history_.labelAt(i);
+                status_ = "Jumped to: " + lbl;
             }
-            if (cur) {
-                ImGui::SameLine();
-                ImGui::TextColored(pb::ui::col::acc, ICON_FA_ARROW_LEFT " now");
-            }
+            if (future) ImGui::PopStyleColor();
+            if (isCur) ImGui::SetScrollHereY(0.7f);
             ImGui::PopID();
         }
     }
