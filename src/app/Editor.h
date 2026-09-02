@@ -57,6 +57,7 @@ public:
             placePiece("Floor", glm::vec3(i * 256.0f - 4000.0f, -3000.0f, 96.0f));
     }
     void debugPhase1Test();  // exercise entity-brush edit ops on the loaded doc
+    void debugModalXform();  // G/R/S numeric transform round-trip check
     void debugArmKit(const std::string& piece) {  // arm + force the ghost preview
         if (!doc_.active()) { doc_.newBlank("kittest"); history_.reset(doc_); }
         placing_ = piece; debugPreviewAtCenter_ = true; showWelcome_ = false;
@@ -348,6 +349,25 @@ private:
     glm::vec3 resizeStartMin_{0}, resizeStartMax_{0};
     std::vector<map::Solid> resizeSnap_;
     std::vector<map::SolidRef> resizeRefs_;
+
+    // Modal keyboard transform (Blender-style): G / R / S, then X/Y/Z to lock
+    // an axis, type a number for an exact amount, Enter commits, Esc cancels.
+    struct ModalXform {
+        int op = 0;            // 0 none, 1 move, 2 rotate, 3 scale
+        int axis = 0;          // 0 free, 1 X, 2 Y, 3 Z
+        std::string num;       // typed amount ("" = mouse-driven)
+        pb::ViewKind view = pb::ViewKind::Perspective;
+        glm::vec2 startMouse{0};
+        glm::vec3 pivot{0};
+        std::vector<map::Solid> snap;
+        std::vector<map::SolidRef> refs;
+        glm::vec3 lastDelta{0};   // for the HUD
+        float lastVal = 0.0f;
+    };
+    ModalXform mx_;
+    void beginModalXform(int op);
+    void updateModalXform();
+    void drawModalXformHud(ViewPanel& p, ImDrawList* dl);
 
     // Body-drag move (Select tool)
     int moveDrag_ = 0;             // 0 none, 1 planar, 2 vertical
