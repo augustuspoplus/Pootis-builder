@@ -114,6 +114,18 @@ src/publish/    Steam Workshop staging
 src/app/        Editor — viewports, panels, tools, Simple/Pro UI
 ```
 
+## License
+
+Copyright (C) 2026 the Pootis Builder authors.
+
+Pootis Builder is free software: you can redistribute it and/or modify it under
+the terms of the **GNU General Public License, version 3** as published by the
+Free Software Foundation. It is distributed WITHOUT ANY WARRANTY. See
+[`LICENSE`](LICENSE) for the full text, or <https://www.gnu.org/licenses/>.
+
+The bundled and fetched third-party components keep their own (GPL-compatible)
+licenses — see Acknowledgements.
+
 ## Acknowledgements
 
 Team Fortress 2, the Source engine, Hammer, the BSP/VMF/VMT/VTF formats and the
