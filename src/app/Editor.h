@@ -235,6 +235,7 @@ private:
     void drawFaceEditPanel();                    // the Face Edit sheet
     void handleClipTool(ViewPanel& p);           // Clip tool: draw a cut line
     void drawClipOverlay(ViewPanel& p, float aspect, ImDrawList* dl);
+    void drawBlockOverlay(ViewPanel& p, float aspect, ImDrawList* dl);
     void applyClip();
     void applyToTexFaces(const std::function<void(map::BrushFace&)>& fn,
                          const char* undoLabel, bool commit);
@@ -368,6 +369,14 @@ private:
     void beginModalXform(int op);
     void updateModalXform();
     void drawModalXformHud(ViewPanel& p, ImDrawList* dl);
+
+    // Snap-to-geometry: while moving, pull a selection bbox corner onto the
+    // nearest vertex of another brush. `geoSnapDelta` adjusts a proposed move
+    // delta; snapMark_ is the world point it locked to (for the indicator).
+    bool snapGeo_ = false;
+    glm::vec3 snapMark_{0};
+    bool snapMarkOn_ = false;
+    bool geoSnapDelta(glm::vec3& d, const glm::vec3& selMn, const glm::vec3& selMx);
 
     // Body-drag move (Select tool)
     int moveDrag_ = 0;             // 0 none, 1 planar, 2 vertical
