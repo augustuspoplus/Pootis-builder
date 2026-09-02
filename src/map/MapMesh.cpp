@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdio>
+#include <sstream>
 #include <unordered_map>
 
 #include "core/Log.h"
@@ -33,17 +35,121 @@ float flatShade(const glm::vec3& n) {
     return 0.42f + 0.58f * std::clamp(glm::dot(glm::normalize(n), key), 0.0f, 1.0f);
 }
 
+// Read a dispinfo sub-block ("normals" / "distances" / "offsets") whose rows are
+// "row0" .. "row<gn-1>", each a run of gn*comp space-separated floats.
+bool readDispRows(const KvNode* blk, int gn, int comp, std::vector<float>& out) {
+    if (!blk) return false;
+    out.assign(static_cast<size_t>(gn) * gn * comp, 0.0f);
+    for (int r = 0; r < gn; ++r) {
+        char key[16];
+        std::snprintf(key, sizeof(key), "row%d", r);
+        const std::string s = blk->get(key);
+        if (s.empty()) return false;
+        std::istringstream is(s);
+        for (int i = 0; i < gn * comp; ++i)
+            if (!(is >> out[static_cast<size_t>(r) * gn * comp + i])) return false;
+    }
+    return true;
+}
+
+// Tessellate one displacement face into `mesh`. Returns false if the dispinfo is
+// unusable (caller then falls back to the flat face).
+bool emitDispFace(const BrushFace& f, const glm::vec3& off, float tw, float th,
+                  std::vector<uint32_t>& idxBucket, WorldMesh& mesh, glm::vec3& bmin,
+                  glm::vec3& bmax) {
+    const int power = f.dispInfo.getInt("power");
+    if (power < 2 || power > 4 || f.verts.size() < 4) return false;
+    const int gn = (1 << power) + 1;
+
+    std::vector<float> nrm, dst, ofs;
+    if (!readDispRows(f.dispInfo.child("normals"), gn, 3, nrm)) return false;
+    if (!readDispRows(f.dispInfo.child("distances"), gn, 1, dst)) return false;
+    readDispRows(f.dispInfo.child("offsets"), gn, 3, ofs);  // optional
+    const bool haveOfs = ofs.size() == nrm.size();
+
+    glm::vec3 start(0.0f);
+    std::sscanf(f.dispInfo.get("startposition").c_str(), " [ %f %f %f ]", &start.x,
+                &start.y, &start.z);
+
+    // Corner 0 = the polygonised vertex nearest startposition. f.verts is CCW
+    // around the normal, so walk forward for the base quad.
+    int c0 = 0;
+    float bestD = 1e30f;
+    for (int k = 0; k < 4; ++k) {
+        const float d = glm::distance(f.verts[k], start);
+        if (d < bestD) { bestD = d; c0 = k; }
+    }
+    const glm::vec3 A = f.verts[c0];
+    const glm::vec3 B = f.verts[(c0 + 1) % 4];  // col axis (u)
+    const glm::vec3 C = f.verts[(c0 + 2) % 4];  // diagonal
+    const glm::vec3 D = f.verts[(c0 + 3) % 4];  // row axis (v)
+    const float shade = flatShade(f.planeN);
+
+    std::vector<uint32_t> g(static_cast<size_t>(gn) * gn);
+    for (int row = 0; row < gn; ++row) {
+        const float tb = float(row) / (gn - 1);
+        const glm::vec3 e0 = A + (D - A) * tb;
+        const glm::vec3 e1 = B + (C - B) * tb;
+        for (int col = 0; col < gn; ++col) {
+            const float ta = float(col) / (gn - 1);
+            glm::vec3 p = e0 + (e1 - e0) * ta;
+            const int i = row * gn + col;
+            p += glm::vec3(nrm[i * 3], nrm[i * 3 + 1], nrm[i * 3 + 2]) * dst[i];
+            if (haveOfs) p += glm::vec3(ofs[i * 3], ofs[i * 3 + 1], ofs[i * 3 + 2]);
+            p += off;
+            WorldVertex v;
+            v.pos = p;
+            v.normal = f.planeN;
+            v.uv = {0.5f / 8.0f, 0.5f / 8.0f};
+            v.texUv = f.texUV(p, tw, th);
+            v.tint = glm::vec3(shade);
+            g[i] = static_cast<uint32_t>(mesh.vertices.size());
+            mesh.vertices.push_back(v);
+            bmin = glm::min(bmin, p);
+            bmax = glm::max(bmax, p);
+        }
+    }
+    for (int row = 0; row + 1 < gn; ++row)
+        for (int col = 0; col + 1 < gn; ++col) {
+            const uint32_t a = g[row * gn + col];
+            const uint32_t b = g[row * gn + col + 1];
+            const uint32_t c = g[(row + 1) * gn + col + 1];
+            const uint32_t d = g[(row + 1) * gn + col];
+            if ((row + col) & 1)
+                idxBucket.insert(idxBucket.end(), {a, b, c, a, c, d});
+            else
+                idxBucket.insert(idxBucket.end(), {a, b, d, b, c, d});
+        }
+    // 2D wireframe: just the base-quad outline keeps the ortho views readable.
+    for (int k = 0; k < 4; ++k) {
+        mesh.wireLines.push_back(f.verts[k] + off);
+        mesh.wireLines.push_back(f.verts[(k + 1) % 4] + off);
+    }
+    return true;
+}
+
 void emitSolid(const Solid& s, MaterialLibrary& mats, const glm::vec3& off,
                std::unordered_map<std::string, std::vector<uint32_t>>& buckets,
                WorldMesh& mesh, glm::vec3& bmin, glm::vec3& bmax) {
+    // A brush with any displacement face is a "displacement solid": only its
+    // displacement surfaces are visible, the other 5 backing faces are not.
+    bool dispSolid = false;
+    for (const auto& f : s.faces) dispSolid = dispSolid || f.hasDisp;
+
     for (const auto& f : s.faces) {
         if (f.verts.size() < 3) continue;
+        if (dispSolid && !f.hasDisp) continue;
         if (skipFaceMaterial(f.material)) continue;
         const auto& info = mats.get(f.material);
         const float tw = info.width > 0 ? float(info.width) : 128.0f;
         const float th = info.height > 0 ? float(info.height) : 128.0f;
         glm::vec3 n = f.planeN;
         const float shade = flatShade(n);
+
+        // Displacement face: tessellate the power grid instead of a flat fan.
+        if (f.hasDisp &&
+            emitDispFace(f, off, tw, th, buckets[f.material], mesh, bmin, bmax))
+            continue;
 
         std::vector<uint32_t> ring;
         ring.reserve(f.verts.size());
