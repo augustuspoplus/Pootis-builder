@@ -316,6 +316,7 @@ private:
     bool gizmoUsing_ = false;
     float gizmoSize_ = 0.17f;    // clip-space size passed to ImGuizmo (Options)
     int gizmoStyle_ = 0;         // 0 = arrows (default), 1 = thick, 2 = fine
+    bool selectWholePiece_ = true;  // click a multi-brush piece -> whole vs one part
     bool docMeshDirty_ = false;
 
     // Bounding-box resize (Select tool, 2D views)
