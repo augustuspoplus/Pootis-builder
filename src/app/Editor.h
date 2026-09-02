@@ -70,6 +70,8 @@ public:
     void debugShowSettings() { showSettings_ = true; showWelcome_ = false; }
     void makeTemplates(const std::string& outDir);
     void debugMakeTemplates(const std::string& d) { makeTemplates(d); }
+    void makeTurbine(const std::string& outPath);
+    void debugMakeTurbine(const std::string& p) { makeTurbine(p); }
     void debugPlacePrefab(const std::string& p) { placePrefab(p, glm::vec3(0)); }
     void debugDumpProps();
     void debugNoDecompile() { suppressAutoDecompile_ = true; }
