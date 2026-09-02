@@ -70,6 +70,7 @@ struct Options {
     int selectSolid = -1;
     int selectEnt = -1;
     bool sampleMap = false;
+    bool undoTest = false;
     bool compile = false;
     std::string panel;
     bool subDemo = false;
@@ -121,6 +122,7 @@ Options parseArgs(int argc, char** argv) {
         else if (a == "--select") o.selectSolid = std::atoi(next("0").c_str());
         else if (a == "--select-ent") o.selectEnt = std::atoi(next("0").c_str());
         else if (a == "--sample-map") o.sampleMap = true;
+        else if (a == "--undo-test") o.undoTest = true;
         else if (a == "--compile") o.compile = true;
         else if (a == "--panel") o.panel = next("");
         else if (a == "--sub-demo") { o.subDemo = true; o.subDemoMode = std::atoi(next("0").c_str()); }
@@ -170,6 +172,7 @@ int runHeadlessScreenshot(const Options& opt, GLFWwindow* window, float uiScale)
     if (!opt.mapPath.empty() && !editor.openMap(opt.mapPath))
         PB_WARN("map did not load; screenshot will show an empty scene");
     if (opt.sampleMap) editor.debugBuildSampleMap();
+    if (opt.undoTest) editor.debugUndoTest();
     if (!opt.importObjPath.empty()) editor.debugImportObj(opt.importObjPath);
     if (!opt.placeEnt.empty()) editor.debugPlaceEntity(opt.placeEnt);
     if (!opt.placeKit.empty()) editor.debugPlaceKit(opt.placeKit);

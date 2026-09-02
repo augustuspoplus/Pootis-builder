@@ -3585,6 +3585,40 @@ void Editor::redo() {
     }
 }
 
+void Editor::debugUndoTest() {
+    bsp_ = BspFile();
+    doc_.newBlank("undotest");
+    history_.reset(doc_);
+    clearSelection();
+    auto count = [&] {
+        return std::make_pair(doc_.worldSolids().size(), doc_.entities().size());
+    };
+    const auto c0 = count();
+    placePiece("Room", glm::vec3(0, 0, 0));
+    const auto c1 = count();
+    placePiece("RED spawn", glm::vec3(512, 0, 0));
+    const auto c2 = count();
+    rotateSelection(2, 90.0f);
+    deleteSelection();
+    const auto c3 = count();
+
+    int pass = 0, fail = 0;
+    auto check = [&](const char* what, bool ok) {
+        if (ok) ++pass; else { ++fail; PB_ERROR("undo-test FAIL: %s", what); }
+    };
+    undo();                                   // undo delete
+    check("undo delete restores entities", count().second == c2.second);
+    undo(); undo();                           // undo rotate + spawn
+    check("undo back to post-Room", count() == c1);
+    undo();                                   // undo Room
+    check("undo back to empty", count() == c0);
+    redo();
+    check("redo re-adds Room", count() == c1);
+    redo(); redo(); redo();
+    check("redo replays to final", count() == c3);
+    PB_INFO("undo-test: %d passed, %d failed", pass, fail);
+}
+
 void Editor::debugBuildSampleMap() {
     bsp_ = BspFile();
     doc_.newBlank("sample");

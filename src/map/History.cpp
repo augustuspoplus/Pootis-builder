@@ -12,15 +12,13 @@ History::Snap History::capture(const MapDocument& doc, std::string label) {
     Snap s;
     s.label = std::move(label);
     s.world = doc.worldSolids();
-    s.entitySolids.reserve(doc.entities().size());
-    for (const auto& e : doc.entities()) s.entitySolids.push_back(e.solids);
+    s.entities = doc.entities();
     return s;
 }
 
 void History::restore(MapDocument& doc, const Snap& s) {
     doc.worldSolids() = s.world;
-    for (size_t i = 0; i < doc.entities().size() && i < s.entitySolids.size(); ++i)
-        doc.entities()[i].solids = s.entitySolids[i];
+    doc.entities() = s.entities;
     doc.markDirty();
 }
 
