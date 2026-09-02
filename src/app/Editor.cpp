@@ -784,7 +784,8 @@ void Editor::makeTemplates(const std::string& outDir) {
     reset("empty_room");
     placePiece("Room", glm::vec3(0, 0, 0));
     placePiece("One spawn point", glm::vec3(0, 0, 0));
-    sun(glm::vec3(0, 0, 160));
+    sun(glm::vec3(0, 0, 96));
+    seal();
     doc_.saveVmf(outDir + "/empty_room.vmf");
 
     // 2. Two-base arena with a mid point.
@@ -825,12 +826,14 @@ void Editor::makeTemplates(const std::string& outDir) {
 
     // 5. Trade / spawn box.
     reset("trade_box");
+    roomHalf_ = 384.0f;                       // a big open room
     placePiece("Room", glm::vec3(0, 0, 0));
-    placePiece("Room", glm::vec3(0, 0, 0));   // twice = bigger seal
-    placePiece("RED spawn", glm::vec3(-160, 0, 0));
-    placePiece("BLU spawn", glm::vec3(160, 0, 0));
-    placePiece("Resupply", glm::vec3(0, 160, 0));
-    sun(glm::vec3(0, 0, 160));
+    roomHalf_ = 192.0f;
+    placePiece("RED spawn", glm::vec3(-256, 0, 0));
+    placePiece("BLU spawn", glm::vec3(256, 0, 0));
+    placePiece("Resupply", glm::vec3(0, 256, 0));
+    sun(glm::vec3(0, 0, 96));
+    seal();
     doc_.saveVmf(outDir + "/trade_box.vmf");
 
     // 6. Single-CP attack/defend nub.
@@ -2658,6 +2661,12 @@ void Editor::placePiece(const std::string& piece, const glm::vec3& atRaw) {
         brushEnt("func_button", {at.x - 16, at.y - 4, at.z + 40},
                  {at.x + 16, at.y + 4, at.z + 72},
                  {{"speed", "5"}, {"wait", "3"}, {"spawnflags", "1024"}});
+    } else if (piece == "Lever") {
+        // A wall lever: a tall thin func_button that toggles and stays.
+        brushEnt("func_button", {at.x - 6, at.y - 10, at.z + 32},
+                 {at.x + 6, at.y + 10, at.z + 88},
+                 {{"speed", "40"}, {"wait", "-1"}, {"spawnflags", "32"},
+                  {"sounds", "3"}});
     } else if (piece == "Elevator") {
         char dist[16];
         std::snprintf(dist, sizeof(dist), "%d", (int)elevTravel_);
@@ -4761,6 +4770,7 @@ void Editor::drawBuildKit() {
                 {ICON_FA_DOOR_OPEN, "Working door", "Opens when touched"},
                 {ICON_FA_DOOR_CLOSED, "Spawn door", "Team-only one-way spawn wall"},
                 {ICON_FA_HAND_POINTER, "Button", "Press to trigger things"},
+                {ICON_FA_TOGGLE_ON, "Lever", "A switch that toggles + stays"},
                 {ICON_FA_ELEVATOR, "Elevator", "Platform + call button"},
                 {ICON_FA_ARROWS_LEFT_RIGHT, "Moving platform", "Slides on a button"},
                 {ICON_FA_FAN, "Fan / rotating", "A spinning brush"},
