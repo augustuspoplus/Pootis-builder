@@ -3746,6 +3746,21 @@ void Editor::debugPickTest() {
     ck("ray missed the old +-16 box",
        !map::rayAabb(ro, rd, glm::vec3(-16.0f), glm::vec3(16.0f), t));
 
+    // Identity: clicking a prop must say what it is, not just "prop_static".
+    {
+        map::MapEntity& e = doc_.entities().back();
+        e.kv.set("targetname", "locker_a");
+        const std::string d = describeEntity(e);
+        ck("identity names the class", d.find("prop_static") != std::string::npos);
+        ck("identity names the targetname",
+           d.find("locker_a") != std::string::npos);
+        ck("identity names the model",
+           d.find("resupply_locker") != std::string::npos);
+        ck("identity drops the path and extension",
+           d.find("models/") == std::string::npos &&
+               d.find(".mdl") == std::string::npos);
+    }
+
     PB_INFO("pick-test: %d passed, %d failed", pass, fail);
 }
 
@@ -4088,7 +4103,16 @@ void Editor::untieSelectionToWorld() {
 }
 
 void Editor::handleViewportInput(ViewPanel& p) {
-    if (!p.hovered) return;
+    if (!p.hovered) {
+        // Keep feeding a drag that started here — leaving the viewport used to
+        // freeze it mid-way and swallow the mouse release, so it stayed stuck.
+        if (dragView_ == static_cast<int>(p.kind) &&
+            (resizeHandle_ >= 0 || moveDrag_ != 0 || movePending_)) {
+            handleSelectionResize(p);
+            handleSelectionMove(p);
+        }
+        return;
+    }
     ImGuiIO& io = ImGui::GetIO();
     const float dt = std::clamp(io.DeltaTime, 0.0f, 0.1f);
 
@@ -4224,6 +4248,75 @@ void Editor::handleViewportInput(ViewPanel& p) {
     }
 }
 
+std::string Editor::describeEntity(const map::MapEntity& e) const {
+    std::string out = e.classname.empty() ? "entity" : e.classname;
+    const std::string tn = e.kv.get("targetname");
+    if (!tn.empty()) out += "  \"" + tn + "\"";
+    std::string mdl = e.kv.get("model");
+    if (mdl.empty())
+        if (const fgd::EntityClass* ec = fgd_.flattened(e.classname))
+            mdl = ec->studioModel;
+    if (!mdl.empty() && mdl.find(".mdl") != std::string::npos) {
+        const size_t sl = mdl.find_last_of('/');
+        std::string leaf = sl == std::string::npos ? mdl : mdl.substr(sl + 1);
+        if (leaf.size() > 4) leaf.resize(leaf.size() - 4);  // .mdl
+        out += "  —  " + leaf;
+    }
+    return out;
+}
+
+bool Editor::pickRawAt(const glm::vec3& ro, const glm::vec3& rd) {
+    // A raw .bsp (no decompile yet) has no editable document, so nothing above
+    // can be hit. The props and point entities are still on screen though, and
+    // clicking them ought to at least tell you what they are.
+    float bestT = 1e30f;
+    const bsp::PropInstance* hitProp = nullptr;
+    const bsp::PointEntity* hitEnt = nullptr;
+
+    for (const auto& pr : mesh_.props) {
+        glm::vec3 mn(-24.0f), mx(24.0f);
+        const model::StudioModel& sm = model::loadStudioModel(sourceFs_, pr.model);
+        if (sm.ok && sm.boundsMax != sm.boundsMin) {
+            mn = sm.boundsMin * pr.scale;
+            mx = sm.boundsMax * pr.scale;
+        }
+        float t;
+        if (map::rayAabb(ro, rd, pr.pos + mn, pr.pos + mx, t) && t < bestT) {
+            bestT = t;
+            hitProp = &pr;
+            hitEnt = nullptr;
+        }
+    }
+    for (const auto& pe : mesh_.pointEntities) {
+        float t;
+        if (map::rayAabb(ro, rd, pe.pos - glm::vec3(20.0f), pe.pos + glm::vec3(20.0f),
+                         t) &&
+            t < bestT) {
+            bestT = t;
+            hitEnt = &pe;
+            hitProp = nullptr;
+        }
+    }
+
+    if (hitProp) {
+        std::string leaf = hitProp->model;
+        const size_t sl = leaf.find_last_of('/');
+        if (sl != std::string::npos) leaf = leaf.substr(sl + 1);
+        if (leaf.size() > 4) leaf.resize(leaf.size() - 4);
+        status_ = "prop_static  —  " + leaf +
+                  "   (decompile the map to edit it)";
+        return true;
+    }
+    if (hitEnt) {
+        status_ = hitEnt->classname +
+                  (hitEnt->targetname.empty() ? std::string()
+                                              : "  \"" + hitEnt->targetname + "\"") +
+                  "   (decompile the map to edit it)";
+        return true;
+    }
+    return false;
+}
+
 void Editor::entityPickBounds(const map::MapEntity& e, glm::vec3& mn,
                               glm::vec3& mx) {
     mn = glm::vec3(-16.0f);
@@ -4319,11 +4412,12 @@ void Editor::pickAt(ViewPanel& p, const glm::vec2& px, bool additive) {
         selectedEntity_ = bestPointEnt;
         selection_.clear();
         rebuildSelectionWire();
-        status_ = doc_.entities()[bestPointEnt].classname + " selected";
+        status_ = describeEntity(doc_.entities()[bestPointEnt]);
         return;
     }
 
     if (!best.valid()) {
+        if (!hasDoc() && pickRawAt(ro, rd)) return;  // raw .bsp: identify only
         if (!additive) clearSelection();
         return;
     }
@@ -4351,6 +4445,8 @@ void Editor::pickAt(ViewPanel& p, const glm::vec2& px, bool additive) {
     syncSelectedEntity();
     rebuildSelectionWire();
     status_ = std::to_string(selection_.size()) + " brush(es) selected";
+    if (selectedEntity_ >= 0 && selectedEntity_ < (int)doc_.entities().size())
+        status_ += "  —  " + describeEntity(doc_.entities()[selectedEntity_]);
 }
 
 void Editor::syncSelectedEntity() {
@@ -9513,6 +9609,12 @@ void Editor::handleSelectionResize(ViewPanel& p) {
             mx = glm::max(mx, s->boundsMax);
         }
     if (mn.x > mx.x) { resizeHot_ = -1; return; }
+    // Mid-drag the live bounds are already deformed; measuring against them
+    // makes the handle accelerate away from the cursor. Use the grab-time box.
+    if (resizeHandle_ >= 0) {
+        mn = resizeStartMin_;
+        mx = resizeStartMax_;
+    }
 
     int au = 0, av = 1;
     if (!persp) orthoAxes(p.kind, au, av);
@@ -9556,17 +9658,22 @@ void Editor::handleSelectionResize(ViewPanel& p) {
 
     const ImVec2 m = ImGui::GetMousePos();
     resizeHot_ = -1;
-    if (resizeHandle_ < 0) {
-        float best = pb::ui::dp(persp ? 17.0f : 14.0f);
+    if (resizeHandle_ < 0 && p.hovered) {
+        const float reach = pb::ui::dp(persp ? 17.0f : 14.0f);
+        float best = reach;
         for (int h = 0; h < nHandles; ++h) {
             const ImVec2 s = project(handleWorld(h));
-            const float d = std::hypot(s.x - m.x, s.y - m.y);
+            float d = std::hypot(s.x - m.x, s.y - m.y);
+            // On a small selection the edge handles crowd the corners; bias so
+            // a corner wins the tie and you can actually grab two axes at once.
+            if (!persp && h < 4) d -= reach * 0.35f;
             if (d < best) { best = d; resizeHot_ = h; }
         }
     }
 
     if (resizeHot_ >= 0 && p.hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
         resizeHandle_ = resizeHot_;
+        dragView_ = static_cast<int>(p.kind);
         resizeStartMin_ = mn;
         resizeStartMax_ = mx;
         resizeAnchor_ = ctr;
@@ -9637,9 +9744,24 @@ void Editor::handleSelectionResize(ViewPanel& p) {
 
     if (resizeHandle_ >= 0 && ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
         resizeHandle_ = -1;
+        dragView_ = -1;
         resizeSnap_.clear();
         resizeRefs_.clear();
         afterEdit("Resize");
+    }
+
+    // Tell the cursor what the handle under it will do.
+    if (p.hovered && (resizeHot_ >= 0 || resizeHandle_ >= 0)) {
+        const int h = resizeHandle_ >= 0 ? resizeHandle_ : resizeHot_;
+        ImGuiMouseCursor c = ImGuiMouseCursor_ResizeAll;
+        if (!persp) {
+            // Screen Y runs opposite world V, so lo/lo reads as bottom-left.
+            if (h == 0 || h == 2) c = ImGuiMouseCursor_ResizeNESW;
+            else if (h == 1 || h == 3) c = ImGuiMouseCursor_ResizeNWSE;
+            else if (h == 4 || h == 5) c = ImGuiMouseCursor_ResizeEW;
+            else if (h == 6 || h == 7) c = ImGuiMouseCursor_ResizeNS;
+        }
+        ImGui::SetMouseCursor(c);
     }
 }
 
@@ -9809,9 +9931,9 @@ void Editor::handleSelectionMove(ViewPanel& p) {
         return ro + rd * t;
     };
 
-    // ---- arm on press over the body; only becomes a move once you drag ----
-    if (moveDrag_ == 0 && !movePending_ && p.hovered &&
-        ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+    // Is the cursor over the selection's body (as opposed to a handle or empty
+    // space)? Used both to arm a drag and to show the move cursor.
+    auto overBody = [&]() -> bool {
         bool over = false;
         if (persp) {
             float t;
@@ -9849,8 +9971,15 @@ void Editor::handleSelectionMove(ViewPanel& p) {
             const float y0 = std::min(a.y, b.y) + 10, y1 = std::max(a.y, b.y) - 10;
             over = m.x > x0 && m.x < x1 && m.y > y0 && m.y < y1;
         }
-        if (over) {
+        return over;
+    };
+
+    // ---- arm on press over the body; only becomes a move once you drag ----
+    if (moveDrag_ == 0 && !movePending_ && p.hovered &&
+        ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+        if (overBody()) {
             movePending_ = true;
+            dragView_ = static_cast<int>(p.kind);
             moveIsEnt_ = haveEnt;
             if (haveEnt) moveEntStart_ = doc_.entities()[selectedEntity_].origin;
             resizeSnap_.clear();
@@ -9863,6 +9992,12 @@ void Editor::handleSelectionMove(ViewPanel& p) {
                     }
         }
     }
+
+    // While the cursor is over the body, say so — otherwise there's no hint
+    // that a press-and-drag here moves the thing.
+    if (p.hovered && moveDrag_ == 0 && !movePending_ && resizeHot_ < 0 &&
+        overBody())
+        ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeAll);
 
     // Promote to an actual move once the cursor leaves the click point.
     if (movePending_ && moveDrag_ == 0 &&
@@ -9904,10 +10039,13 @@ void Editor::handleSelectionMove(ViewPanel& p) {
         }
     }
 
+    if (moveDrag_ != 0) ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeAll);
+
     if (ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
         const bool didMove = moveDrag_ != 0;
         moveDrag_ = 0;
         movePending_ = false;
+        if (dragView_ == static_cast<int>(p.kind)) dragView_ = -1;
         resizeSnap_.clear();
         resizeRefs_.clear();
         if (didMove) {
