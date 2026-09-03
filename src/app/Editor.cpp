@@ -5174,6 +5174,28 @@ void Editor::drawCompileWindow() {
     ImGui::Checkbox("Pack custom content into the .bsp (bspzip)", &compilePack_);
     if (compilePack_) {
         ImGui::Indent();
+        if (ImGui::Button(ICON_FA_MAGNIFYING_GLASS "  Scan map for custom content") &&
+            hasDoc()) {
+            const auto refs = publish::scanCustomAssets(doc_, sourceFs_);
+            packMissing_.clear();
+            int added = 0;
+            for (const auto& r : refs) {
+                if (r.missing) { packMissing_.push_back(r.bspPath); continue; }
+                const std::string e = r.bspPath + "|" + r.sourcePath;
+                if (std::find(packFiles_.begin(), packFiles_.end(), e) ==
+                    packFiles_.end()) {
+                    packFiles_.push_back(e);
+                    ++added;
+                }
+            }
+            status_ = "Pack scan: +" + std::to_string(added) + " file(s), " +
+                      std::to_string(packMissing_.size()) + " missing";
+        }
+        for (const auto& m : packMissing_) {
+            ImGui::PushStyleColor(ImGuiCol_Text, col::warn);
+            ImGui::BulletText(ICON_FA_TRIANGLE_EXCLAMATION " missing: %s", m.c_str());
+            ImGui::PopStyleColor();
+        }
         ImGui::SetNextItemWidth(-90);
         ImGui::InputTextWithHint("##packadd", "absolute path to a material/model/sound",
                                  packAddPath_, sizeof(packAddPath_));
