@@ -62,6 +62,10 @@ Settings Settings::load() {
         else if (key == "bake_props") s.bakeProps = b();
         else if (key == "perf_mode") s.perfMode = inum();
         else if (key == "workspace_dial") s.workspaceDial = inum();
+        else if (key == "ai_style") s.aiStyle = inum();
+        else if (key == "ai_base_url") s.aiBaseUrl = val;
+        else if (key == "ai_model") s.aiModel = val;
+        else if (key == "ai_key") s.aiKey = val;
         else if (key == "tf2_dir") s.tf2Dir = val;
         else if (key.rfind("recent", 0) == 0 && !val.empty()) s.recent.push_back(val);
     }
@@ -95,6 +99,10 @@ void Settings::save() const {
     f << "bake_props=" << (bakeProps ? 1 : 0) << "\n";
     f << "perf_mode=" << perfMode << "\n";
     f << "workspace_dial=" << workspaceDial << "\n";
+    f << "ai_style=" << aiStyle << "\n";
+    if (!aiBaseUrl.empty()) f << "ai_base_url=" << aiBaseUrl << "\n";
+    if (!aiModel.empty()) f << "ai_model=" << aiModel << "\n";
+    if (!aiKey.empty()) f << "ai_key=" << aiKey << "\n";
     if (!tf2Dir.empty()) f << "tf2_dir=" << tf2Dir << "\n";
     for (size_t i = 0; i < recent.size() && i < kMaxRecent; ++i)
         f << "recent" << i << "=" << recent[i] << "\n";

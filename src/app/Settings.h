@@ -34,6 +34,13 @@ struct Settings {
     bool bakeProps = true;     // render prop_static models
     int perfMode = 0;          // 0 auto, 1 quality, 2 fast (heavy-map throttle)
     int workspaceDial = 1;     // 0 Guided, 1 Standard, 2 Full — the complexity dial
+    // AI backend. Empty baseUrl = the feature is simply off. The key is
+    // stored in plain text here, so local models (which need none) are the
+    // default; the Options page says so.
+    int aiStyle = 0;           // 0 OpenAI-compatible, 1 Anthropic
+    std::string aiBaseUrl;
+    std::string aiModel;
+    std::string aiKey;
     std::string tf2Dir;        // override for the TF2 install
 
     std::vector<std::string> recent;  // most-recent first, capped

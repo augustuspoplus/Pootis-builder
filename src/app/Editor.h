@@ -8,6 +8,7 @@
 
 #include <imgui.h>
 
+#include "ai/AiBackend.h"
 #include "app/Settings.h"
 #include "bsp/BspFile.h"
 #include "bsp/BspMesh.h"
@@ -227,6 +228,10 @@ private:
     void drawMaterialList();
     void drawTextureBrowser();
     void drawMaterialGrid();  // shared body: Pro dock + Simple kit tab
+    // AI backend config lives in Settings; this assembles it for a call.
+    ai::Config aiConfig() const;
+    std::vector<std::string> aiModels_;  // last successful model listing
+    std::string aiStatus_;               // last Options AI action result
     void drawModelBrowser();
     void drawModelGrid();   // shared body: Pro "Models" dock + Simple Props tab
     void drawEntityCatalog();

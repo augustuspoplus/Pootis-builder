@@ -30,6 +30,7 @@
 #include "import/ModelImport.h"
 #include "import/ObjModel.h"
 #include "map/MapMesh.h"
+#include "ai/AiBackend.h"
 #include "net/Http.h"
 #include "net/Json.h"
 #include "publish/AssetScan.h"
@@ -4633,6 +4634,15 @@ void Editor::duplicateSelection() {
     status_ = "Duplicated " + std::to_string(newSel.size()) + " brush(es)";
 }
 
+ai::Config Editor::aiConfig() const {
+    ai::Config c;
+    c.style = static_cast<ai::Style>(prefs_.aiStyle == 1 ? 1 : 0);
+    c.baseUrl = prefs_.aiBaseUrl;
+    c.model = prefs_.aiModel;
+    c.apiKey = prefs_.aiKey;
+    return c;
+}
+
 void Editor::drawSettingsWindow() {
     if (!showSettings_) return;
     using namespace pb::ui;
@@ -4773,6 +4783,127 @@ void Editor::drawSettingsWindow() {
             "\"High performance\" for PootisBuilder.exe in Windows Graphics "
             "settings, or in the NVIDIA / AMD control panel.");
         ImGui::PopStyleColor();
+    }
+
+    if (ImGui::CollapsingHeader("AI")) {
+        ImGui::PushStyleColor(ImGuiCol_Text, col::faint);
+        ImGui::TextWrapped(
+            "Point this at a model and the AI helpers switch on. A local server "
+            "(Ollama, LM Studio, llama.cpp) needs no key and never leaves your "
+            "machine. Leave it blank and nothing here is used.");
+        ImGui::PopStyleColor();
+        ImGui::Dummy(ImVec2(0, 4));
+
+        // Provider preset picker.
+        const auto& ps = ai::presets();
+        std::string cur = "Custom (OpenAI-compatible)";
+        for (const auto& pr : ps)
+            if (prefs_.aiBaseUrl == pr.baseUrl && !prefs_.aiBaseUrl.empty())
+                cur = pr.name;
+        ImGui::SetNextItemWidth(-1);
+        if (ImGui::BeginCombo("##aiprovider", cur.c_str())) {
+            for (const auto& pr : ps)
+                if (ImGui::Selectable(pr.name, cur == pr.name)) {
+                    prefs_.aiBaseUrl = pr.baseUrl;
+                    prefs_.aiStyle = static_cast<int>(pr.style);
+                    aiModels_.clear();
+                    dirty = true;
+                }
+            ImGui::EndCombo();
+        }
+
+        ImGui::PushStyleColor(ImGuiCol_Text, col::faint);
+        ImGui::TextUnformatted("Base URL");
+        ImGui::PopStyleColor();
+        char url[512];
+        std::snprintf(url, sizeof(url), "%s", prefs_.aiBaseUrl.c_str());
+        ImGui::SetNextItemWidth(-1);
+        if (ImGui::InputText("##aiurl", url, sizeof(url))) {
+            prefs_.aiBaseUrl = url;
+            dirty = true;
+        }
+
+        ImGui::PushStyleColor(ImGuiCol_Text, col::faint);
+        ImGui::TextUnformatted("Model");
+        ImGui::PopStyleColor();
+        char mdl[256];
+        std::snprintf(mdl, sizeof(mdl), "%s", prefs_.aiModel.c_str());
+        ImGui::SetNextItemWidth(-150);
+        if (ImGui::InputText("##aimodel", mdl, sizeof(mdl))) {
+            prefs_.aiModel = mdl;
+            dirty = true;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("List models", ImVec2(-1, 0))) {
+            std::string err;
+            aiModels_ = ai::listModels(aiConfig(), &err);
+            aiStatus_ = aiModels_.empty()
+                            ? ("Could not list models: " + err)
+                            : (std::to_string(aiModels_.size()) + " model(s) found");
+        }
+        if (!aiModels_.empty()) {
+            ImGui::SetNextItemWidth(-1);
+            if (ImGui::BeginCombo("##aimodels", "pick a listed model…")) {
+                for (const auto& m : aiModels_)
+                    if (ImGui::Selectable(m.c_str(), m == prefs_.aiModel)) {
+                        prefs_.aiModel = m;
+                        dirty = true;
+                    }
+                ImGui::EndCombo();
+            }
+        }
+
+        const bool anthropic = prefs_.aiStyle == 1;
+        const bool localish = prefs_.aiBaseUrl.find("127.0.0.1") != std::string::npos ||
+                              prefs_.aiBaseUrl.find("localhost") != std::string::npos;
+        if (!localish) {
+            ImGui::PushStyleColor(ImGuiCol_Text, col::faint);
+            ImGui::TextUnformatted(anthropic ? "API key (x-api-key)"
+                                             : "API key (Bearer)");
+            ImGui::PopStyleColor();
+            char key[256];
+            std::snprintf(key, sizeof(key), "%s", prefs_.aiKey.c_str());
+            ImGui::SetNextItemWidth(-1);
+            if (ImGui::InputText("##aikey", key, sizeof(key),
+                                 ImGuiInputTextFlags_Password)) {
+                prefs_.aiKey = key;
+                dirty = true;
+            }
+            ImGui::PushStyleColor(ImGuiCol_Text, col::warn);
+            ImGui::TextWrapped(ICON_FA_TRIANGLE_EXCLAMATION
+                               "  Stored as plain text in pootis.ini. A local "
+                               "model avoids needing a key at all.");
+            ImGui::PopStyleColor();
+        }
+
+        ImGui::Dummy(ImVec2(0, 4));
+        if (ImGui::Button("Find local servers")) {
+            const auto found = ai::detectLocal();
+            if (found.empty()) {
+                aiStatus_ = "No local model server answered on the usual ports.";
+            } else {
+                prefs_.aiBaseUrl = found.front().baseUrl;
+                prefs_.aiStyle = 0;
+                aiModels_ = found.front().models;
+                if (prefs_.aiModel.empty() && !aiModels_.empty())
+                    prefs_.aiModel = aiModels_.front();
+                aiStatus_ = "Found " + found.front().name + " with " +
+                            std::to_string(aiModels_.size()) + " model(s)";
+                dirty = true;
+            }
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Test")) {
+            const ai::Result r =
+                ai::chat(aiConfig(), "You are a terse assistant.",
+                         "Reply with the single word: ready", false);
+            aiStatus_ = r.ok ? ("Model replied: " + r.text) : ("Failed: " + r.error);
+        }
+        if (!aiStatus_.empty()) {
+            ImGui::PushStyleColor(ImGuiCol_Text, col::dim);
+            ImGui::TextWrapped("%s", aiStatus_.c_str());
+            ImGui::PopStyleColor();
+        }
     }
 
     if (ImGui::CollapsingHeader("Advanced")) {
