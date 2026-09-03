@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 
 #include "net/Json.h"
 
@@ -99,6 +100,7 @@ std::vector<std::string> buildPool(const std::vector<std::string>& all,
 
 MaterialPick suggestMaterials(const Config& cfg, const std::string& mood,
                               const std::vector<std::string>& pool,
+                              const std::vector<std::string>& skies,
                               std::string* err) {
     MaterialPick pick;
     if (pool.empty()) {
@@ -112,18 +114,32 @@ MaterialPick suggestMaterials(const Config& cfg, const std::string& mood,
         list += '\n';
     }
 
+    std::string skyList;
+    for (const auto& sk : skies) {
+        skyList += "  ";
+        skyList += sk;
+        skyList += '\n';
+    }
+
     const std::string system =
-        "You dress Team Fortress 2 map geometry. You are given a list of "
-        "material names that exist in the game. Choose materials that read well "
-        "together at TF2's cartoon-realist scale.\n"
+        "You art-direct Team Fortress 2 maps. Given lists of materials and "
+        "skyboxes that exist in the game, choose a set that reads well together "
+        "at TF2's cartoon-realist scale, plus fog and sunlight that match.\n"
         "Reply with ONLY a JSON object, no prose, no code fence:\n"
         "{\"floor\":\"...\",\"wall\":\"...\",\"ceiling\":\"...\","
-        "\"trim\":\"...\",\"accent\":\"...\",\"note\":\"short reason\"}\n"
-        "Every material value MUST be copied exactly from the list. If nothing "
-        "in the list suits a slot, use an empty string for it.";
+        "\"trim\":\"...\",\"accent\":\"...\",\"skyname\":\"...\","
+        "\"fog\":[r,g,b],\"fog_start\":512,\"fog_end\":4096,"
+        "\"sun\":[r,g,b],\"sun_pitch\":-45,\"sun_yaw\":210,"
+        "\"note\":\"short reason\"}\n"
+        "Material and skyname values MUST be copied exactly from the lists. Use "
+        "an empty string for any slot nothing suits. Colours are 0-255. "
+        "sun_pitch is negative for a sun above the horizon (-90 is straight "
+        "down). Fog should sit inside the map's scale: start 256-1024, end "
+        "2048-8192.";
 
     const std::string user = "Mood: " + mood +
-                             "\n\nAvailable materials:\n" + list;
+                             "\n\nAvailable materials:\n" + list +
+                             "\nAvailable skyboxes:\n" + skyList;
 
     const Result r = chat(cfg, system, user, /*jsonMode=*/true);
     if (!r.ok) {
@@ -167,8 +183,48 @@ MaterialPick suggestMaterials(const Config& cfg, const std::string& mood,
     pick.accent = take("accent");
     pick.note = v["note"].asString();
 
+    // Sky must be one the game actually ships, or the map won't light right.
+    {
+        const std::string lw = lower(v["skyname"].asString());
+        for (const auto& sk : skies)
+            if (lower(sk) == lw) { pick.skyname = sk; break; }
+    }
+    auto chan = [](const json::Value& a, size_t i) {
+        const double d = a[i].asNumber(-1.0);
+        if (d < 0.0) return -1;
+        return static_cast<int>(std::max(0.0, std::min(255.0, d)));
+    };
+    if (v["fog"].size() >= 3) {
+        pick.fogR = chan(v["fog"], 0);
+        pick.fogG = chan(v["fog"], 1);
+        pick.fogB = chan(v["fog"], 2);
+    }
+    if (v["sun"].size() >= 3) {
+        pick.sunR = chan(v["sun"], 0);
+        pick.sunG = chan(v["sun"], 1);
+        pick.sunB = chan(v["sun"], 2);
+    }
+    const double fs = v["fog_start"].asNumber(-1.0);
+    const double fe = v["fog_end"].asNumber(-1.0);
+    if (fs >= 0.0 && fe > fs) {
+        pick.fogStart = static_cast<float>(std::min(fs, 8192.0));
+        pick.fogEnd = static_cast<float>(std::min(fe, 32768.0));
+    }
+    if (v.has("sun_pitch")) {
+        const double p = v["sun_pitch"].asNumber(1e9);
+        if (p < 1e8)
+            pick.sunPitch = static_cast<float>(std::max(-90.0, std::min(90.0, p)));
+    }
+    if (v.has("sun_yaw")) {
+        const double y = v["sun_yaw"].asNumber(1e9);
+        if (y < 1e8)
+            pick.sunYaw =
+                static_cast<float>(std::fmod(std::fmod(y, 360.0) + 360.0, 360.0));
+    }
+
+
     if (!pick.any() && err)
-        *err = "The model picked nothing that exists in the game's materials.";
+        *err = "The model picked nothing that exists in the game's content.";
     return pick;
 }
 

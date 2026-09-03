@@ -246,6 +246,10 @@ private:
     void startGreybox();
     void pollAi();
     void applyMaterialPick(const ai::MaterialPick& p);
+    const std::vector<std::string>& skyNames();
+    int applyArtPass(const ai::MaterialPick& p);  // sky + fog + sun
+    std::vector<std::string> skyNames_;
+    bool skyNamesBuilt_ = false;
     void applyPlan(const ai::Plan& p);
     AiKind aiKind_ = AiKind::MaterialSet;
     ai::Plan aiPlan_;      // guarded by aiMutex_

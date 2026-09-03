@@ -3639,6 +3639,16 @@ void Editor::debugAiPoolTest() {
         ai::buildPool(materialList_, "rusty industrial metal warehouse", 180);
     ck("shortlisting is deterministic", again == pool);
 
+    // The other validated input list: skyboxes the game actually ships.
+    const auto& skies = skyNames();
+    ck("skyboxes enumerated", skies.size() > 10);
+    bool sane = true;
+    for (const auto& sk : skies)
+        if (sk.empty() || sk.find('/') != std::string::npos ||
+            sk.compare(sk.size() - 2, 2, "up") == 0)
+            sane = false;
+    ck("sky names are bare (no path, no up/dn suffix)", sane);
+
     PB_INFO("ai-pool: %d passed, %d failed", pass, fail);
 }
 
@@ -4926,9 +4936,11 @@ void Editor::startMaterialSuggest() {
     const ai::Config cfg = aiConfig();
     const std::string mood = aiPrompt_;
     const std::vector<std::string> pool = ai::buildPool(materialList_, mood);
-    aiThread_ = std::thread([this, cfg, mood, pool] {
+    const std::vector<std::string> skies = skyNames();
+    aiThread_ = std::thread([this, cfg, mood, pool, skies] {
         std::string err;
-        const ai::MaterialPick p = ai::suggestMaterials(cfg, mood, pool, &err);
+        const ai::MaterialPick p =
+            ai::suggestMaterials(cfg, mood, pool, skies, &err);
         {
             std::lock_guard<std::mutex> lk(aiMutex_);
             aiPick_ = p;
@@ -4963,18 +4975,115 @@ void Editor::pollAi() {
     else applyMaterialPick(pick);
 }
 
+const std::vector<std::string>& Editor::skyNames() {
+    // A skybox is six materials named <name>{up,dn,lf,rt,ft,bk}; the "up" face
+    // is enough to enumerate what the game ships.
+    if (!skyNamesBuilt_) {
+        for (std::string m : sourceFs_.listFiles("materials/skybox/", ".vmt")) {
+            const size_t sl = m.find_last_of('/');
+            std::string n = sl == std::string::npos ? m : m.substr(sl + 1);
+            if (n.size() > 4 && n.compare(n.size() - 4, 4, ".vmt") == 0)
+                n.resize(n.size() - 4);
+            if (n.size() > 2 && n.compare(n.size() - 2, 2, "up") == 0) {
+                n.resize(n.size() - 2);
+                if (!n.empty()) skyNames_.push_back(n);
+            }
+        }
+        std::sort(skyNames_.begin(), skyNames_.end());
+        skyNames_.erase(std::unique(skyNames_.begin(), skyNames_.end()),
+                        skyNames_.end());
+        skyNamesBuilt_ = true;
+        PB_INFO("skyboxes: %zu", skyNames_.size());
+    }
+    return skyNames_;
+}
+
+int Editor::applyArtPass(const ai::MaterialPick& p) {
+    int changed = 0;
+    char buf[96];
+
+    if (!p.skyname.empty()) {
+        doc_.worldExtra().set("skyname", p.skyname);
+        ++changed;
+    }
+
+    if (p.hasFog()) {
+        map::MapEntity* fog = nullptr;
+        for (auto& e : doc_.entities())
+            if (e.classname == "env_fog_controller") { fog = &e; break; }
+        if (!fog) {
+            map::MapEntity e;
+            e.id = doc_.nextId();
+            e.classname = "env_fog_controller";
+            e.origin = glm::vec3(0, 0, 64);
+            e.kv.set("classname", e.classname);
+            e.kv.set("origin", "0 0 64");
+            doc_.entities().push_back(std::move(e));
+            fog = &doc_.entities().back();
+        }
+        std::snprintf(buf, sizeof(buf), "%d %d %d", p.fogR, p.fogG, p.fogB);
+        fog->kv.set("fogcolor", buf);
+        fog->kv.set("fogcolor2", buf);
+        fog->kv.set("fogenable", "1");
+        fog->kv.set("fogstart", std::to_string(static_cast<int>(p.fogStart)));
+        fog->kv.set("fogend", std::to_string(static_cast<int>(p.fogEnd)));
+        ++changed;
+    }
+
+    if (p.hasSun()) {
+        map::MapEntity* sun = nullptr;
+        for (auto& e : doc_.entities())
+            if (e.classname == "light_environment") { sun = &e; break; }
+        if (!sun) {
+            map::MapEntity e;
+            e.id = doc_.nextId();
+            e.classname = "light_environment";
+            e.origin = glm::vec3(0, 0, 512);
+            e.kv.set("classname", e.classname);
+            e.kv.set("origin", "0 0 512");
+            doc_.entities().push_back(std::move(e));
+            sun = &doc_.entities().back();
+        }
+        if (p.sunPitch < 1e8f) {
+            const float yaw = p.sunYaw < 1e8f ? p.sunYaw : 0.0f;
+            // light_environment carries the sun angle in both "angles" (pitch
+            // yaw roll) and its own "pitch" key; vrad reads the latter.
+            std::snprintf(buf, sizeof(buf), "%d %d 0",
+                          static_cast<int>(-p.sunPitch), static_cast<int>(yaw));
+            sun->kv.set("angles", buf);
+            sun->kv.set("pitch", std::to_string(static_cast<int>(p.sunPitch)));
+        }
+        if (p.sunR >= 0) {
+            std::snprintf(buf, sizeof(buf), "%d %d %d 300", p.sunR, p.sunG, p.sunB);
+            sun->kv.set("_light", buf);
+            // A dim, slightly cooler ambient reads better than a flat one.
+            std::snprintf(buf, sizeof(buf), "%d %d %d 60", p.sunR * 2 / 3,
+                          p.sunG * 3 / 4, std::min(255, p.sunB));
+            sun->kv.set("_ambient", buf);
+        }
+        ++changed;
+    }
+    return changed;
+}
+
 void Editor::applyMaterialPick(const ai::MaterialPick& p) {
     if (!p.any()) {
         status_ = "AI returned no usable materials.";
         return;
     }
+    const int art = applyArtPass(p);  // sky / fog / sun apply map-wide
+
     // Nothing selected? Just arm the wall material for new brushwork.
     if (selection_.empty()) {
         if (!p.wall.empty()) {
             blockMaterial_ = p.wall;
             std::snprintf(texMaterial_, sizeof(texMaterial_), "%s", p.wall.c_str());
         }
-        status_ = "AI set: " + (p.wall.empty() ? p.floor : p.wall) +
+        if (art) afterEdit("AI art pass");
+        status_ = (art ? "AI set the look (" + std::to_string(art) +
+                             " map setting(s))  "
+                       : std::string("AI set: ") +
+                             (p.wall.empty() ? p.floor : p.wall)) +
                   (p.note.empty() ? "" : "  — " + p.note);
         return;
     }
@@ -5002,9 +5111,11 @@ void Editor::applyMaterialPick(const ai::MaterialPick& p) {
         status_ = "Nothing to paint (only tool faces selected).";
         return;
     }
-    afterEdit("AI material set");
+    afterEdit("AI art pass");
     aiLastPick_ = p;
     status_ = "AI painted " + std::to_string(painted) + " face(s)" +
+              (art ? ", set " + std::to_string(art) + " map setting(s)"
+                   : std::string()) +
               (p.note.empty() ? "" : "  — " + p.note);
 }
 
