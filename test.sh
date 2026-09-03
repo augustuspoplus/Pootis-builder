@@ -83,7 +83,7 @@ echo "== ai: greybox plan validation =="
 "$RUN" --greybox-test --screenshot /dev/null --width 32 --height 32 2>&1 | grep -q 'greybox-test: 13 passed, 0 failed' && ok || bad "greybox-test"
 
 echo "== ai: material shortlisting =="
-"$RUN" --ai-pool-test --screenshot /dev/null --width 32 --height 32 2>&1 | grep -q 'ai-pool: 7 passed, 0 failed' && ok || bad "ai-pool-test"
+"$RUN" --ai-pool-test --screenshot /dev/null --width 32 --height 32 2>&1 | grep -q 'ai-pool: 9 passed, 0 failed' && ok || bad "ai-pool-test"
 
 echo "== net: json round-trip + http stack =="
 "$RUN" --net-test --screenshot /dev/null --width 32 --height 32 2>&1 | grep -q 'net-test: 8 passed, 0 failed' && ok || bad "net-test (json/http)"
