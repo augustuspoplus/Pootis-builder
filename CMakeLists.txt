@@ -138,7 +138,7 @@ target_include_directories(PootisBuilder PRIVATE
 find_package(Threads REQUIRED)
 target_link_libraries(PootisBuilder PRIVATE
     glad glfw imgui glm::glm lzma Threads::Threads
-    opengl32 gdi32 comdlg32)
+    opengl32 gdi32 comdlg32 winhttp)
 
 if(WIN32)
     target_compile_definitions(PootisBuilder PRIVATE
