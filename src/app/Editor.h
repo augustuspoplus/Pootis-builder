@@ -549,7 +549,8 @@ private:
     bool compileLaunch_ = true;
     bool compileAutoScroll_ = true;
     bool compilePack_ = false;
-    std::vector<std::string> packFiles_;  // "<bsp/path>|<abs source>"
+    std::vector<std::string> packFiles_;    // "<bsp/path>|<abs source>"
+    std::vector<std::string> packMissing_;  // referenced but not found (last scan)
     char packAddPath_[512] = {0};
     char compileMapName_[128] = {0};      // rename the output (blank = map name)
     char compileOutDir_[512] = {0};       // extra copy target (blank = tf/maps only)
