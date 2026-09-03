@@ -30,6 +30,8 @@
 #include "import/ModelImport.h"
 #include "import/ObjModel.h"
 #include "map/MapMesh.h"
+#include "net/Http.h"
+#include "net/Json.h"
 #include "publish/AssetScan.h"
 #include "publish/Workshop.h"
 #include "map/Raycast.h"
@@ -3475,6 +3477,69 @@ void Editor::debugPackScan() {
     }
     PB_INFO("pack-scan: %zu custom asset(s), %d missing",
             refs.size() - missing, missing);
+}
+
+void Editor::debugNetTest() {
+    int pass = 0, fail = 0;
+    auto ck = [&](const char* w, bool ok) {
+        if (ok) ++pass; else { ++fail; PB_ERROR("net-test FAIL: %s", w); }
+    };
+
+    // Build a body the way an OpenAI-compatible request is built, round-trip it.
+    const std::string tricky = "a \"quoted\" line\nand a tab\there";
+    json::Value msg = json::Value::object();
+    msg.set("role", json::Value::str("user"));
+    msg.set("content", json::Value::str(tricky));
+    json::Value msgs = json::Value::array();
+    msgs.push(msg);
+    json::Value body = json::Value::object();
+    body.set("model", json::Value::str("test-model"));
+    body.set("messages", msgs);
+    body.set("stream", json::Value::boolean(false));
+    body.set("temperature", json::Value::number(0.25));
+
+    std::string err;
+    const json::Value rt = json::parse(body.dump(), &err);
+    ck("round-trip parses", err.empty());
+    ck("string survives escaping",
+       rt["messages"][0]["content"].asString() == tricky);
+    ck("bool survives", rt["stream"].asBool(true) == false);
+    ck("number survives", std::fabs(rt["temperature"].asNumber() - 0.25) < 1e-9);
+
+    // Missing keys must chain safely rather than crash.
+    ck("missing keys chain to null",
+       rt["nope"]["deeper"][3]["x"].asString().empty());
+
+    // Replies shaped like the two APIs we target.
+    const json::Value oai = json::parse(
+        R"({"choices":[{"message":{"role":"assistant","content":"hello é"}}]})");
+    ck("openai reply shape reads",
+       oai["choices"][0]["message"]["content"].asString() == "hello \xc3\xa9");
+    const json::Value ant =
+        json::parse(R"({"content":[{"type":"text","text":"hi"}]})");
+    ck("anthropic reply shape reads", ant["content"][0]["text"].asString() == "hi");
+
+    err.clear();
+    ck("malformed json is rejected",
+       json::parse(R"({"a":)", &err).isNull() && !err.empty());
+
+    // Connectivity probe — informational, never a failure (no server is fine).
+    struct Probe { const char* name; const char* url; };
+    static const Probe kProbes[] = {
+        {"Ollama", "http://127.0.0.1:11434/api/tags"},
+        {"LM Studio", "http://127.0.0.1:1234/v1/models"},
+    };
+    for (const auto& pr : kProbes) {
+        const net::Response r = net::get(pr.url, {}, 1200);
+        if (r.ok())
+            PB_INFO("  %s: up (%zu bytes)", pr.name, r.body.size());
+        else if (!r.error.empty())
+            PB_INFO("  %s: not running (%s)", pr.name, r.error.c_str());
+        else
+            PB_INFO("  %s: HTTP %ld", pr.name, r.status);
+    }
+
+    PB_INFO("net-test: %d passed, %d failed", pass, fail);
 }
 
 void Editor::debugPickTest() {

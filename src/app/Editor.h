@@ -68,6 +68,7 @@ public:
     void debugLeakLoad(const std::string& p) { loadPointfile(p); }
     void debugPackScan();    // list the custom assets the loaded map references
     void debugPickTest();    // a prop's click box must match its model, not +-16
+    void debugNetTest();     // JSON round-trip + probe any local model server
     void debugArmKit(const std::string& piece) {  // arm + force the ghost preview
         if (!doc_.active()) { doc_.newBlank("kittest"); history_.reset(doc_); }
         placing_ = piece; debugPreviewAtCenter_ = true; showWelcome_ = false;
