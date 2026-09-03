@@ -49,8 +49,11 @@ void SourceFs::mountDefaults(const std::string& exeDir) {
     addLooseRoot(hl2);
     addVpk(tf + "/tf2_textures_dir.vpk");
     addVpk(tf + "/tf2_misc_dir.vpk");
+    addVpk(tf + "/tf2_sound_misc_dir.vpk");
+    addVpk(tf + "/tf2_sound_vo_english_dir.vpk");
     addVpk(hl2 + "/hl2_misc_dir.vpk");
     addVpk(hl2 + "/hl2_textures_dir.vpk");
+    addVpk(hl2 + "/hl2_sound_misc_dir.vpk");
 
     // Bundled ABS Mapping Resource Pack (common Hammer dev/measure textures).
     for (const std::string& base : {exeDir, exeDir + "/..", std::string(".")}) {
@@ -78,6 +81,37 @@ std::optional<std::vector<uint8_t>> SourceFs::read(const std::string& path) cons
         if (auto d = v->read(key)) return d;
     }
     return std::nullopt;
+}
+
+namespace {
+bool isOfficialVpk(const std::string& p) {
+    std::string f = p;
+    const size_t sl = f.find_last_of("/\\");
+    if (sl != std::string::npos) f = f.substr(sl + 1);
+    for (char& c : f) c = static_cast<char>(::tolower((unsigned char)c));
+    return f.rfind("tf2_", 0) == 0 || f.rfind("hl2_", 0) == 0;
+}
+}  // namespace
+
+std::string SourceFs::loosePath(const std::string& path) const {
+    const std::string key = lower(path);
+    for (const std::string& root : looseRoots_) {
+        const std::string full = root + "/" + key;
+        std::error_code ec;
+        if (fs::exists(full, ec)) return full;
+    }
+    return {};
+}
+
+SourceFs::AssetOrigin SourceFs::assetOrigin(const std::string& path) const {
+    const std::string key = lower(path);
+    for (const auto& v : vpks_)
+        if (isOfficialVpk(v->sourcePath()) && v->contains(key))
+            return AssetOrigin::Base;
+    if (!loosePath(path).empty()) return AssetOrigin::Custom;
+    for (const auto& v : vpks_)
+        if (v->contains(key)) return AssetOrigin::Custom;  // a non-official VPK
+    return AssetOrigin::Missing;
 }
 
 std::vector<std::string> SourceFs::listFiles(const std::string& prefix,

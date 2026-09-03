@@ -114,6 +114,7 @@ struct Options {
     bool mxTest = false;
     bool dispTest = false;
     bool leakTest = false;
+    bool packScan = false;
     std::string saveVmfPath;
     int width = 1600;
     int height = 950;
@@ -176,6 +177,7 @@ Options parseArgs(int argc, char** argv) {
         else if (a == "--mx-test") o.mxTest = true;
         else if (a == "--disp-test") o.dispTest = true;
         else if (a == "--leak-test") o.leakTest = true;
+        else if (a == "--pack-scan") o.packScan = true;
         else if (a == "--save-vmf") o.saveVmfPath = next("");
         else if (a == "--view") {
             const std::string v = next("persp");
@@ -209,6 +211,7 @@ int runHeadlessScreenshot(const Options& opt, GLFWwindow* window, float uiScale)
     if (opt.mxTest) editor.debugModalXform();
     if (opt.dispTest) editor.debugDispTest();
     if (opt.leakTest) editor.debugLeakTest();
+    if (opt.packScan) editor.debugPackScan();
     if (!opt.placePrefabPath.empty()) editor.debugPlacePrefab(opt.placePrefabPath);
     if (opt.selectSolid >= 0) editor.debugSelectWorldSolid(opt.selectSolid);
     if (opt.selectEnt >= 0) editor.debugSelectEntity(opt.selectEnt);

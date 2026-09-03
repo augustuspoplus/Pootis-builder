@@ -79,6 +79,12 @@ echo "== phase 5: leak pointfile =="
 "$RUN" --leak-test --screenshot /dev/null --width 32 --height 32 2>&1 \
   | grep -q 'leak-test: 1 passed, 0 failed' && ok || bad "leak-test (pointfile parse)"
 
+echo "== phase 5: asset pack scan =="
+"$RUN" "$ROOT/assets/templates/turbine_lookalike.vmf" --pack-scan \
+  --screenshot /dev/null --width 32 --height 32 2>&1 \
+  | grep -q 'pack-scan: 0 custom asset(s), 0 missing' && ok \
+  || bad "pack-scan (kit output should reference no custom/missing assets)"
+
 echo "== templates =="
 for f in "$ROOT"/assets/templates/*.vmf; do
   [ -e "$f" ] || continue

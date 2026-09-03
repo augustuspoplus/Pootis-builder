@@ -66,6 +66,7 @@ public:
     void debugDispTest();    // make + sculpt + VMF round-trip a displacement
     void debugLeakTest();    // write a synthetic .lin, load it, verify the trace
     void debugLeakLoad(const std::string& p) { loadPointfile(p); }
+    void debugPackScan();    // list the custom assets the loaded map references
     void debugArmKit(const std::string& piece) {  // arm + force the ghost preview
         if (!doc_.active()) { doc_.newBlank("kittest"); history_.reset(doc_); }
         placing_ = piece; debugPreviewAtCenter_ = true; showWelcome_ = false;
