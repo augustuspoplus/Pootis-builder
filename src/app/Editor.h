@@ -290,6 +290,10 @@ private:
     // bounds when it has one (props are far bigger than the +-16 default),
     // else the FGD size(), else a small box.
     void entityPickBounds(const map::MapEntity& e, glm::vec3& mn, glm::vec3& mx);
+    // Human-readable identity for the status bar: class, targetname, model.
+    std::string describeEntity(const map::MapEntity& e) const;
+    // Fallback pick for a raw .bsp that has no editable document yet.
+    bool pickRawAt(const glm::vec3& ro, const glm::vec3& rd);
     void rebuildSelectionWire();
     void clearSelection();
     void expandSelectionToGroups();   // pull in group-siblings of the picked solids
@@ -480,6 +484,10 @@ private:
 
     // Body-drag move (Select tool)
     int moveDrag_ = 0;             // 0 none, 1 planar, 2 vertical
+    // Which viewport owns an in-progress resize/move. A drag keeps the mouse
+    // even when the cursor leaves that viewport, so it can't freeze half way
+    // or miss the release.
+    int dragView_ = -1;
     bool movePending_ = false;     // pressed on the body, waiting for a drag
     glm::vec3 moveGrab_{0};        // world point under the cursor at grab
     glm::vec3 moveEntStart_{0};    // point-entity origin at grab

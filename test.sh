@@ -89,7 +89,7 @@ echo "== net: json round-trip + http stack =="
 "$RUN" --net-test --screenshot /dev/null --width 32 --height 32 2>&1 | grep -q 'net-test: 8 passed, 0 failed' && ok || bad "net-test (json/http)"
 
 echo "== picking: props use their model bounds =="
-"$RUN" --pick-test --screenshot /dev/null --width 32 --height 32 2>&1 | grep -q 'pick-test: 4 passed, 0 failed' && ok || bad "pick-test (prop click box)"
+"$RUN" --pick-test --screenshot /dev/null --width 32 --height 32 2>&1 | grep -q 'pick-test: 8 passed, 0 failed' && ok || bad "pick-test (prop click box)"
 
 echo "== phase 5: asset pack scan =="
 "$RUN" "$ROOT/assets/templates/turbine_lookalike.vmf" --pack-scan \
