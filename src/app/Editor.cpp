@@ -31,6 +31,7 @@
 #include "import/ObjModel.h"
 #include "map/MapMesh.h"
 #include "ai/AiBackend.h"
+#include "ai/MaterialSuggest.h"
 #include "net/Http.h"
 #include "net/Json.h"
 #include "publish/AssetScan.h"
@@ -92,6 +93,7 @@ bool Editor::init(GLFWwindow* window) {
 
 void Editor::shutdown() {
     if (decompileThread_.joinable()) decompileThread_.join();
+    if (aiThread_.joinable()) aiThread_.join();
     prefs_.save();
     renderer_.clearWorld();
 }
@@ -371,6 +373,7 @@ void Editor::frameAllViews() {
 void Editor::frame() {
     pollDecompile();
     compiler_.poll();
+    pollAi();
     // Compile just finished? If vbsp left a leak pointfile, load and show it.
     if (compileWasRunning_ && !compiler_.running()) {
         const std::string lf = compiler_.leakFile();
@@ -3480,6 +3483,61 @@ void Editor::debugPackScan() {
             refs.size() - missing, missing);
 }
 
+void Editor::debugAiPoolTest() {
+    if (!materialListBuilt_) {
+        for (std::string m : sourceFs_.listFiles("materials/", ".vmt")) {
+            if (m.rfind("materials/", 0) == 0) m = m.substr(10);
+            if (m.size() > 4 && m.substr(m.size() - 4) == ".vmt") m.resize(m.size() - 4);
+            materialList_.push_back(std::move(m));
+        }
+        materialListBuilt_ = true;
+    }
+    int pass = 0, fail = 0;
+    auto ck = [&](const char* w, bool ok) {
+        if (ok) ++pass; else { ++fail; PB_ERROR("ai-pool FAIL: %s", w); }
+    };
+    ck("game materials are mounted", materialList_.size() > 1000);
+
+    const std::vector<std::string> pool =
+        ai::buildPool(materialList_, "rusty industrial metal warehouse", 180);
+    ck("pool is non-empty", !pool.empty());
+    ck("pool respects the cap", pool.size() <= 180);
+
+    // Nothing that can't sit on a brush face should survive the filter.
+    bool clean = true;
+    for (const auto& m : pool)
+        if (m.rfind("vgui/", 0) == 0 || m.rfind("hud/", 0) == 0 ||
+            m.rfind("models/", 0) == 0 || m.find("backpack/") != std::string::npos)
+            clean = false;
+    ck("pool has no ui/model junk", clean);
+
+    // The mood's own keywords should actually be represented.
+    int hits = 0;
+    for (const auto& m : pool)
+        if (m.find("metal") != std::string::npos ||
+            m.find("rust") != std::string::npos ||
+            m.find("industrial") != std::string::npos)
+            ++hits;
+    ck("mood keywords are represented", hits >= 5);
+
+    // Staples are mixed in even for a mood with no matches at all.
+    const std::vector<std::string> odd =
+        ai::buildPool(materialList_, "zzzqqq nonsense mood", 180);
+    bool staple = false;
+    for (const auto& m : odd)
+        if (m.rfind("concrete/", 0) == 0 || m.rfind("metal/", 0) == 0 ||
+            m.rfind("wood/", 0) == 0)
+            staple = true;
+    ck("an unmatched mood still gets buildable staples", staple);
+
+    // Deterministic: the same mood must shortlist the same way twice.
+    const std::vector<std::string> again =
+        ai::buildPool(materialList_, "rusty industrial metal warehouse", 180);
+    ck("shortlisting is deterministic", again == pool);
+
+    PB_INFO("ai-pool: %d passed, %d failed", pass, fail);
+}
+
 void Editor::debugNetTest() {
     int pass = 0, fail = 0;
     auto ck = [&](const char* w, bool ok) {
@@ -4632,6 +4690,111 @@ void Editor::duplicateSelection() {
     selection_ = newSel;
     afterEdit("Duplicate");
     status_ = "Duplicated " + std::to_string(newSel.size()) + " brush(es)";
+}
+
+void Editor::startMaterialSuggest() {
+    if (aiBusy_.load() || !hasDoc()) return;
+    if (!aiConfig().configured()) {
+        aiJobError_ = "No model configured — set one in Options > AI.";
+        return;
+    }
+    if (aiPrompt_[0] == 0) {
+        aiJobError_ = "Describe the look you want first.";
+        return;
+    }
+    if (!materialListBuilt_) {
+        for (std::string m : sourceFs_.listFiles("materials/", ".vmt")) {
+            if (m.rfind("materials/", 0) == 0) m = m.substr(10);
+            if (m.size() > 4 && m.substr(m.size() - 4) == ".vmt") m.resize(m.size() - 4);
+            materialList_.push_back(std::move(m));
+        }
+        materialListBuilt_ = true;
+    }
+
+    if (aiThread_.joinable()) aiThread_.join();
+    aiJobError_.clear();
+    aiBusy_ = true;
+    aiJobDone_ = false;
+
+    const ai::Config cfg = aiConfig();
+    const std::string mood = aiPrompt_;
+    const std::vector<std::string> pool = ai::buildPool(materialList_, mood);
+    aiThread_ = std::thread([this, cfg, mood, pool] {
+        std::string err;
+        const ai::MaterialPick p = ai::suggestMaterials(cfg, mood, pool, &err);
+        {
+            std::lock_guard<std::mutex> lk(aiMutex_);
+            aiPick_ = p;
+            aiJobError_ = err;
+        }
+        aiJobDone_ = true;
+        aiBusy_ = false;
+    });
+    status_ = "Asking the model for a \"" + mood + "\" material set…";
+}
+
+void Editor::pollAi() {
+    if (!aiJobDone_.load()) return;
+    aiJobDone_ = false;
+    if (aiThread_.joinable()) aiThread_.join();
+
+    ai::MaterialPick p;
+    std::string err;
+    {
+        std::lock_guard<std::mutex> lk(aiMutex_);
+        p = aiPick_;
+        err = aiJobError_;
+    }
+    if (!err.empty()) {
+        status_ = "AI: " + err;
+        return;
+    }
+    applyMaterialPick(p);
+}
+
+void Editor::applyMaterialPick(const ai::MaterialPick& p) {
+    if (!p.any()) {
+        status_ = "AI returned no usable materials.";
+        return;
+    }
+    // Nothing selected? Just arm the wall material for new brushwork.
+    if (selection_.empty()) {
+        if (!p.wall.empty()) {
+            blockMaterial_ = p.wall;
+            std::snprintf(texMaterial_, sizeof(texMaterial_), "%s", p.wall.c_str());
+        }
+        status_ = "AI set: " + (p.wall.empty() ? p.floor : p.wall) +
+                  (p.note.empty() ? "" : "  — " + p.note);
+        return;
+    }
+
+    // Assign by which way each face points, so a room gets a floor, a ceiling
+    // and walls rather than one texture smeared over everything.
+    int painted = 0;
+    for (const auto& r : selection_) {
+        map::Solid* s = doc_.resolve(r);
+        if (!s) continue;
+        for (auto& f : s->faces) {
+            if (f.material.rfind("tools/", 0) == 0) continue;  // keep tool faces
+            const float nz = f.planeN.z;
+            const std::string* pickName = nullptr;
+            if (nz > 0.7f) pickName = &p.floor;
+            else if (nz < -0.7f) pickName = &p.ceiling;
+            else pickName = &p.wall;
+            if (!pickName || pickName->empty()) pickName = &p.wall;
+            if (pickName->empty()) continue;
+            f.material = *pickName;
+            ++painted;
+        }
+    }
+    if (!painted) {
+        status_ = "Nothing to paint (only tool faces selected).";
+        return;
+    }
+    afterEdit("AI material set");
+    aiLastPick_ = p;
+    status_ = "AI painted " + std::to_string(painted) + " face(s)" +
+              (p.note.empty() ? "" : "  — " + p.note);
 }
 
 ai::Config Editor::aiConfig() const {
@@ -6363,6 +6526,51 @@ void Editor::drawBuildKit() {
                                      "brush(es). Use the Surface tool for one face "
                                      "at a time.");
             ImGui::PopStyleColor();
+
+            // AI: describe a look, get a coherent set applied by face direction.
+            if (aiConfig().configured()) {
+                ImGui::Dummy(ImVec2(0, 4));
+                pb::ui::sectionLabel("DESCRIBE A LOOK");
+                ImGui::SetNextItemWidth(-1);
+                const bool go = ImGui::InputTextWithHint(
+                    "##aiprompt", "rusty industrial warehouse, snowy alpine base…",
+                    aiPrompt_, sizeof(aiPrompt_),
+                    ImGuiInputTextFlags_EnterReturnsTrue);
+                ImGui::BeginDisabled(aiBusy_.load());
+                if (ImGui::Button(aiBusy_.load()
+                                      ? ICON_FA_HOURGLASS_HALF "  Thinking…"
+                                      : ICON_FA_WAND_MAGIC_SPARKLES "  Suggest a set",
+                                  ImVec2(-1, 0)) ||
+                    go)
+                    startMaterialSuggest();
+                ImGui::EndDisabled();
+                ImGui::PushStyleColor(ImGuiCol_Text, pb::ui::col::faint);
+                ImGui::TextWrapped(
+                    selection_.empty()
+                        ? "With nothing selected this just arms the wall material."
+                        : "Floors, walls and ceilings are told apart by which way "
+                          "each face points.");
+                ImGui::PopStyleColor();
+                if (aiLastPick_.any()) {
+                    struct Slot { const char* label; const std::string* m; };
+                    const Slot slots[] = {{"floor", &aiLastPick_.floor},
+                                          {"wall", &aiLastPick_.wall},
+                                          {"ceiling", &aiLastPick_.ceiling},
+                                          {"trim", &aiLastPick_.trim},
+                                          {"accent", &aiLastPick_.accent}};
+                    for (const auto& sl : slots) {
+                        if (sl.m->empty()) continue;
+                        ImGui::PushID(sl.label);
+                        if (ImGui::SmallButton(ICON_FA_CHECK))
+                            applyBrowserMaterial(*sl.m);
+                        ImGui::SameLine();
+                        ImGui::TextDisabled("%-7s %s", sl.label, sl.m->c_str());
+                        ImGui::PopID();
+                    }
+                }
+                ImGui::Separator();
+            }
+
             ImGui::Dummy(ImVec2(0, 4));
             drawMaterialGrid();
             ImGui::EndTabItem();
