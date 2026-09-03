@@ -44,6 +44,15 @@ public:
     std::vector<std::string> listFiles(const std::string& prefix,
                                        const std::string& ext) const;
 
+    enum class AssetOrigin { Missing, Base, Custom };
+    // Where a "materials/…vtf" / "models/…mdl" / "sound/…" path lives:
+    //   Base    — in an official game VPK (every player already has it)
+    //   Custom  — only loose, or in a non-official VPK (needs bspzip packing)
+    //   Missing — not found anywhere (a broken reference)
+    AssetOrigin assetOrigin(const std::string& path) const;
+    // Absolute path of the loose file backing `path`, or "" if it isn't loose.
+    std::string loosePath(const std::string& path) const;
+
     // name: material path without "materials/" prefix or ".vmt" suffix.
     ResolvedMaterial resolveMaterial(std::string name) const;
 

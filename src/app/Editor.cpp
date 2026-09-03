@@ -30,6 +30,7 @@
 #include "import/ModelImport.h"
 #include "import/ObjModel.h"
 #include "map/MapMesh.h"
+#include "publish/AssetScan.h"
 #include "publish/Workshop.h"
 #include "map/Raycast.h"
 #include "model/StudioModel.h"
@@ -3423,6 +3424,26 @@ void Editor::drawRoadOverlay(ViewPanel& p, float aspect, ImDrawList* dl) {
     }
     dl->AddText(ImVec2(p.contentMin.x + 8, p.contentMin.y + 40), col,
                 "ROAD — click to add points, Enter to build");
+}
+
+void Editor::debugPackScan() {
+    if (!hasDoc()) { PB_WARN("pack-scan: no editable doc"); return; }
+    const auto refs = publish::scanCustomAssets(doc_, sourceFs_);
+    int missing = 0;
+    for (const auto& r : refs) {
+        const char* k = r.kind == publish::AssetRef::Material ? "material"
+                        : r.kind == publish::AssetRef::Texture ? "texture"
+                        : r.kind == publish::AssetRef::Model    ? "model"
+                                                                : "sound";
+        if (r.missing) {
+            ++missing;
+            PB_WARN("  MISSING %-9s %s", k, r.bspPath.c_str());
+        } else {
+            PB_INFO("  pack    %-9s %s", k, r.bspPath.c_str());
+        }
+    }
+    PB_INFO("pack-scan: %zu custom asset(s), %d missing",
+            refs.size() - missing, missing);
 }
 
 void Editor::debugLeakTest() {
