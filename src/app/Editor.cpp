@@ -1934,6 +1934,10 @@ void Editor::drawEntityTags(ViewPanel& p, float aspect, ImDrawList* dl) {
 
 void Editor::drawGizmo(ViewPanel& p, float aspect) {
     if (!hasDoc() || selection_.empty() || tool_ != Tool::Select) return;
+    // Only one viewport drives the gizmo. Manipulate() hit-tests the shared
+    // mouse position, so running it in all four let an unhovered view grab the
+    // drag. While a drag is live it stays pinned to the view that started it.
+    if (gizmoUsing_ ? gizmoView_ != static_cast<int>(p.kind) : !p.hovered) return;
 
     ImGuizmo::SetOrthographic(p.kind != ViewKind::Perspective);
     ImGuizmo::SetDrawlist();
@@ -1959,25 +1963,52 @@ void Editor::drawGizmo(ViewPanel& p, float aspect) {
                                    : gizmoMode_ == 2 ? ImGuizmo::SCALE
                                                      : ImGuizmo::TRANSLATE;
 
-    glm::mat4 model = glm::translate(glm::mat4(1.0f), selectionCenter());
-    glm::mat4 delta(1.0f);
+    // Idle: park the gizmo on the selection centre. Dragging: keep the matrix
+    // we've been accumulating so the pivot doesn't chase the deforming solids.
+    glm::mat4 m = gizmoUsing_ ? gizmoMat_
+                              : glm::translate(glm::mat4(1.0f), selectionCenter());
+    const glm::mat4 before = m;
+
     float snapv[3] = {float(gridSize_), float(gridSize_), float(gridSize_)};
     if (gizmoMode_ == 1) snapv[0] = snapv[1] = snapv[2] = 5.0f;   // 5 deg
     if (gizmoMode_ == 2) snapv[0] = snapv[1] = snapv[2] = 0.05f;  // 5%
 
-    const bool changed = ImGuizmo::Manipulate(&view[0][0], &proj[0][0], op,
-                                              ImGuizmo::WORLD, &model[0][0],
-                                              &delta[0][0], snap_ ? snapv : nullptr);
-    if (changed) {
-        for (const auto& r : selection_)
-            if (map::Solid* s = doc_.resolve(r)) s->transform(delta);
-        docMeshDirty_ = true;
-    }
-    if (ImGuizmo::IsUsing()) {
+    ImGuizmo::Manipulate(&view[0][0], &proj[0][0], op, ImGuizmo::WORLD, &m[0][0],
+                         nullptr, snap_ ? snapv : nullptr);
+
+    if (!gizmoUsing_ && ImGuizmo::IsUsing()) {
+        // Drag just started — snapshot the selection and the pre-drag matrix.
         gizmoUsing_ = true;
-    } else if (gizmoUsing_) {
-        gizmoUsing_ = false;
-        afterEdit(gizmoMode_ == 1 ? "Rotate" : gizmoMode_ == 2 ? "Scale" : "Move");
+        gizmoView_ = static_cast<int>(p.kind);
+        gizmoStart_ = before;
+        gizmoRefs_.clear();
+        gizmoSnap_.clear();
+        for (const auto& r : selection_)
+            if (const map::Solid* s = doc_.resolve(r)) {
+                gizmoRefs_.push_back(r);
+                gizmoSnap_.push_back(*s);
+            }
+    }
+
+    if (gizmoUsing_) {
+        gizmoMat_ = m;
+        // One cumulative transform off the snapshot — no per-frame delta to
+        // accumulate error, so rotate/scale land exactly where the gizmo says.
+        const glm::mat4 x = m * glm::inverse(gizmoStart_);
+        for (size_t i = 0; i < gizmoRefs_.size(); ++i)
+            if (map::Solid* s = doc_.resolve(gizmoRefs_[i])) {
+                *s = gizmoSnap_[i];
+                s->transform(x);
+            }
+        docMeshDirty_ = true;
+
+        if (!ImGuizmo::IsUsing()) {  // released
+            gizmoUsing_ = false;
+            gizmoView_ = -1;
+            gizmoRefs_.clear();
+            gizmoSnap_.clear();
+            afterEdit(gizmoMode_ == 1 ? "Rotate" : gizmoMode_ == 2 ? "Scale" : "Move");
+        }
     }
 }
 
@@ -3446,6 +3477,40 @@ void Editor::debugPackScan() {
             refs.size() - missing, missing);
 }
 
+void Editor::debugPickTest() {
+    bsp_ = BspFile();
+    doc_.newBlank("picktest");
+    history_.reset(doc_);
+    clearSelection();
+    const char* kMdl = "models/props_gameplay/resupply_locker.mdl";
+    placeFgdEntity("prop_static", glm::vec3(0));
+    if (doc_.entities().empty()) { PB_ERROR("pick-test: no entity placed"); return; }
+    doc_.entities().back().kv.set("model", kMdl);
+
+    int pass = 0, fail = 0;
+    auto ck = [&](const char* w, bool ok) {
+        if (ok) ++pass; else { ++fail; PB_ERROR("pick-test FAIL: %s", w); }
+    };
+
+    glm::vec3 mn, mx;
+    entityPickBounds(doc_.entities().back(), mn, mx);
+    const glm::vec3 size = mx - mn;
+    ck("model bounds resolved", size.x > 1.0f && size.y > 1.0f && size.z > 1.0f);
+    // A resupply locker is ~80 units tall — far outside the old +-16 default.
+    ck("click box is model-sized, not the +-16 default", size.z > 40.0f);
+
+    // A ray aimed at the top of the model must hit the new box and miss the old.
+    const glm::vec3 aim(0.0f, 0.0f, mx.z - size.z * 0.15f);
+    const glm::vec3 ro = aim + glm::vec3(0.0f, -512.0f, 0.0f);
+    const glm::vec3 rd(0.0f, 1.0f, 0.0f);
+    float t = 0.0f;
+    ck("ray hits the model box", map::rayAabb(ro, rd, mn, mx, t));
+    ck("ray missed the old +-16 box",
+       !map::rayAabb(ro, rd, glm::vec3(-16.0f), glm::vec3(16.0f), t));
+
+    PB_INFO("pick-test: %d passed, %d failed", pass, fail);
+}
+
 void Editor::debugLeakTest() {
     const std::string tmp =
         (std::filesystem::temp_directory_path() / "pb_leak.lin").string();
@@ -3921,6 +3986,63 @@ void Editor::handleViewportInput(ViewPanel& p) {
     }
 }
 
+void Editor::entityPickBounds(const map::MapEntity& e, glm::vec3& mn,
+                              glm::vec3& mx) {
+    mn = glm::vec3(-16.0f);
+    mx = glm::vec3(16.0f);
+
+    // Prefer the actual model: a prop's visible mesh is often hundreds of units
+    // across, so the old +-16 box round the origin meant clicking the crate you
+    // can see missed it entirely.
+    std::string mdl = e.kv.get("model");
+    const fgd::EntityClass* ec = fgd_.flattened(e.classname);
+    if (mdl.empty() && ec) mdl = ec->studioModel;
+    bool haveModel = false;
+    if (!mdl.empty() && mdl[0] != '*' && mdl.find(".mdl") != std::string::npos) {
+        const model::StudioModel& sm = model::loadStudioModel(sourceFs_, mdl);
+        if (sm.ok && sm.boundsMax != sm.boundsMin) {
+            mn = sm.boundsMin;
+            mx = sm.boundsMax;
+            haveModel = true;
+        }
+    }
+    if (!haveModel && ec && ec->hasSize) {
+        mn = ec->sizeMin;
+        mx = ec->sizeMax;
+    }
+
+    float sc = 1.0f;
+    if (const std::string ms = e.kv.get("modelscale"); !ms.empty())
+        sc = std::max(0.01f, static_cast<float>(std::atof(ms.c_str())));
+    mn *= sc;
+    mx *= sc;
+
+    // Rotate the local box by "P Y R" and re-bound it in world space (same
+    // yaw*pitch*roll order the prop baker uses), then offset to the origin.
+    float pit = 0.0f, yaw = 0.0f, rol = 0.0f;
+    if (const std::string ang = e.kv.get("angles"); !ang.empty())
+        std::sscanf(ang.c_str(), "%f %f %f", &pit, &yaw, &rol);
+    if (pit != 0.0f || yaw != 0.0f || rol != 0.0f) {
+        const glm::mat3 R =
+            glm::mat3(glm::rotate(glm::mat4(1.0f), glm::radians(yaw), glm::vec3(0, 0, 1))) *
+            glm::mat3(glm::rotate(glm::mat4(1.0f), glm::radians(pit), glm::vec3(0, 1, 0))) *
+            glm::mat3(glm::rotate(glm::mat4(1.0f), glm::radians(rol), glm::vec3(1, 0, 0)));
+        const glm::vec3 lo = mn, hi = mx;
+        glm::vec3 rmn(1e30f), rmx(-1e30f);
+        for (int c = 0; c < 8; ++c) {
+            const glm::vec3 corner(c & 1 ? hi.x : lo.x, c & 2 ? hi.y : lo.y,
+                                   c & 4 ? hi.z : lo.z);
+            const glm::vec3 w = R * corner;
+            rmn = glm::min(rmn, w);
+            rmx = glm::max(rmx, w);
+        }
+        mn = rmn;
+        mx = rmx;
+    }
+    mn += e.origin;
+    mx += e.origin;
+}
+
 void Editor::pickAt(ViewPanel& p, const glm::vec2& px, bool additive) {
     glm::vec3 ro, rd;
     p.camera.pixelRay(px, p.contentSize, ro, rd);
@@ -3946,14 +4068,10 @@ void Editor::pickAt(ViewPanel& p, const glm::vec2& px, bool additive) {
     for (int e = 0; e < static_cast<int>(doc_.entities().size()); ++e) {
         const auto& ent = doc_.entities()[e];
         if (!ent.solids.empty() || ent.hidden) continue;
-        glm::vec3 mn(-16), mx(16);
-        if (const fgd::EntityClass* ec = fgd_.flattened(ent.classname);
-            ec && ec->hasSize) {
-            mn = ec->sizeMin;
-            mx = ec->sizeMax;
-        }
+        glm::vec3 mn, mx;
+        entityPickBounds(ent, mn, mx);
         float t;
-        if (map::rayAabb(ro, rd, ent.origin + mn, ent.origin + mx, t) && t < bestT) {
+        if (map::rayAabb(ro, rd, mn, mx, t) && t < bestT) {
             bestT = t;
             bestPointEnt = e;
             best = {};
@@ -6039,6 +6157,20 @@ void Editor::drawBuildKit() {
             drawModelGrid();
             ImGui::EndTabItem();
         }
+        if (ImGui::BeginTabItem(ICON_FA_PALETTE " Textures", nullptr, tabSel(8))) {
+            ImGui::PushStyleColor(ImGuiCol_Text, pb::ui::col::faint);
+            ImGui::TextWrapped(selection_.empty()
+                                   ? "Pick a brush first, then click a texture to "
+                                     "paint it. With nothing selected this just sets "
+                                     "the texture for new brushwork."
+                                   : "Click a texture to paint the selected "
+                                     "brush(es). Use the Surface tool for one face "
+                                     "at a time.");
+            ImGui::PopStyleColor();
+            ImGui::Dummy(ImVec2(0, 4));
+            drawMaterialGrid();
+            ImGui::EndTabItem();
+        }
         if (ImGui::BeginTabItem(ICON_FA_LIGHTBULB " Light", nullptr, tabSel(7))) {
             static const KitPiece lights[] = {
                 {ICON_FA_LIGHTBULB, "Point light", "Local glow"},
@@ -7156,22 +7288,48 @@ void Editor::applyBrowserMaterial(const std::string& mat) {
 
     blockMaterial_ = mat;
     std::snprintf(texMaterial_, sizeof(texMaterial_), "%s", mat.c_str());
+
+    // Paint whatever is actually selected: individual faces under the Surface
+    // tool, otherwise every face of the selected brushes (so "click a wall,
+    // click a texture" just works), otherwise arm it for new brushwork.
     if (tool_ == Tool::Texture && !texFaces_.empty()) {
         applyToTexFaces([&](map::BrushFace& f) { f.material = mat; }, "Apply material",
                         true);
         status_ = "Applied " + mat + " to " + std::to_string(texFaces_.size()) +
                   " face(s)";
-    } else {
-        status_ = "Material set: " + mat + "  (block tool + new brushwork)";
+        return;
     }
+    if (!selection_.empty()) {
+        int faces = 0;
+        for (const auto& r : selection_)
+            if (map::Solid* sl = doc_.resolve(r))
+                for (auto& f : sl->faces) {
+                    if (f.material.rfind("tools/", 0) == 0) continue;  // keep tool faces
+                    f.material = mat;
+                    ++faces;
+                }
+        if (faces) {
+            afterEdit("Apply material");
+            status_ = "Applied " + mat + " to " + std::to_string(selection_.size()) +
+                      " brush(es)";
+            return;
+        }
+    }
+    status_ = "Material set: " + mat + "  (block tool + new brushwork)";
 }
 
 void Editor::drawTextureBrowser() {
-    using namespace pb::ui;
     ImGui::Begin("Textures");
+    drawMaterialGrid();
+    ImGui::End();
+}
+
+// Shared body: the Pro "Textures" dock and the Simple kit's Textures tab both
+// draw this.
+void Editor::drawMaterialGrid() {
+    using namespace pb::ui;
     if (!sourceFs_.ready()) {
         ImGui::TextDisabled("No game content mounted (install / locate TF2).");
-        ImGui::End();
         return;
     }
 
@@ -7244,8 +7402,29 @@ void Editor::drawTextureBrowser() {
             o.insert(o.end(), misc.begin(), misc.end());
         }
         materialCats_.assign(cats.begin(), cats.end());
+        // Rank by usefulness for texturing brushwork, not by raw count — the
+        // enormous UI/model-skin buckets would otherwise bury the wall and
+        // floor materials people actually reach for.
+        auto rank = [](const std::string& n) {
+            static const char* kFirst[] = {
+                "Concrete & stone", "Brick & tile", "Metal", "Wood",
+                "Plaster & walls", "Nature & ground", "Glass & windows",
+                "Roof & exterior", "Doors & trim", "Liquids", "Skybox",
+                "Lights & glows", "Desert & badlands", "Farm & sawmill",
+                "Spytech & sci-fi", "Dev & measure", "Tool textures"};
+            for (int i = 0; i < (int)(sizeof(kFirst) / sizeof(kFirst[0])); ++i)
+                if (n == kFirst[i]) return i;
+            // Everything else after, with the pure-noise buckets last.
+            if (n == "Signs & overlays" || n == "Effects") return 100;
+            if (n == "Prop textures") return 101;
+            if (n == "Model skins") return 200;
+            if (n == "UI & menus") return 201;
+            return 50;
+        };
         std::sort(materialCats_.begin(), materialCats_.end(),
-                  [](const auto& a, const auto& b) {
+                  [&](const auto& a, const auto& b) {
+                      const int ra = rank(a.first), rb = rank(b.first);
+                      if (ra != rb) return ra < rb;
                       return a.second.size() > b.second.size();
                   });
     }
@@ -7391,7 +7570,6 @@ void Editor::drawTextureBrowser() {
         }
     }
     ImGui::EndChild();
-    ImGui::End();
 }
 
 void Editor::drawModelBrowser() {

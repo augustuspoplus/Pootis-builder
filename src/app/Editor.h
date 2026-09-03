@@ -67,6 +67,7 @@ public:
     void debugLeakTest();    // write a synthetic .lin, load it, verify the trace
     void debugLeakLoad(const std::string& p) { loadPointfile(p); }
     void debugPackScan();    // list the custom assets the loaded map references
+    void debugPickTest();    // a prop's click box must match its model, not +-16
     void debugArmKit(const std::string& piece) {  // arm + force the ghost preview
         if (!doc_.active()) { doc_.newBlank("kittest"); history_.reset(doc_); }
         placing_ = piece; debugPreviewAtCenter_ = true; showWelcome_ = false;
@@ -224,6 +225,7 @@ private:
     void drawOutliner();
     void drawMaterialList();
     void drawTextureBrowser();
+    void drawMaterialGrid();  // shared body: Pro dock + Simple kit tab
     void drawModelBrowser();
     void drawModelGrid();   // shared body: Pro "Models" dock + Simple Props tab
     void drawEntityCatalog();
@@ -247,6 +249,10 @@ private:
     void writeBackup(const std::string& vmfPath);
     void handleViewportInput(ViewPanel& p);
     void pickAt(ViewPanel& p, const glm::vec2& pxInViewport, bool additive);
+    // World-space AABB a point entity can be clicked in: the real model
+    // bounds when it has one (props are far bigger than the +-16 default),
+    // else the FGD size(), else a small box.
+    void entityPickBounds(const map::MapEntity& e, glm::vec3& mn, glm::vec3& mx);
     void rebuildSelectionWire();
     void clearSelection();
     void expandSelectionToGroups();   // pull in group-siblings of the picked solids
@@ -383,6 +389,17 @@ private:
     bool gizmoUsing_ = false;
     float gizmoSize_ = 0.17f;    // clip-space size passed to ImGuizmo (Options)
     int gizmoStyle_ = 0;         // 0 = arrows (default), 1 = thick, 2 = fine
+    // A gizmo drag is snapshot-based, like the modal G/R/S transform: the
+    // selection is captured once at drag start and the cumulative matrix is
+    // re-applied to that snapshot every frame. Re-deriving the pivot from the
+    // live (already-deformed) selection each frame is what made rotate/scale
+    // drift. gizmoView_ pins the drag to one viewport so the other three
+    // can't steal it.
+    glm::mat4 gizmoMat_{1.0f};       // the matrix ImGuizmo manipulates
+    glm::mat4 gizmoStart_{1.0f};     // its value when the drag began
+    std::vector<map::Solid> gizmoSnap_;
+    std::vector<map::SolidRef> gizmoRefs_;
+    int gizmoView_ = -1;             // ViewKind that owns the in-progress drag
     bool selectWholePiece_ = true;  // click a multi-brush piece -> whole vs one part
     bool docMeshDirty_ = false;
 
