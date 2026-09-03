@@ -31,6 +31,7 @@
 #include "import/ObjModel.h"
 #include "map/MapMesh.h"
 #include "ai/AiBackend.h"
+#include "ai/Greybox.h"
 #include "ai/MaterialSuggest.h"
 #include "net/Http.h"
 #include "net/Json.h"
@@ -2811,7 +2812,8 @@ glm::vec3 Editor::viewPlanePoint(ViewPanel& p, const ImVec2& m) const {
     return ro + rd * t;
 }
 
-void Editor::placePiece(const std::string& piece, const glm::vec3& atRaw) {
+void Editor::placePiece(const std::string& piece, const glm::vec3& atRaw,
+                        bool commit) {
     if (!doc_.active()) doc_.newBlank("untitled");
     const glm::vec3 at = snapVec(atRaw);
     const std::string floorMat = "dev/dev_measuregeneric01b";
@@ -3354,7 +3356,7 @@ void Editor::placePiece(const std::string& piece, const glm::vec3& atRaw) {
     }
     for (auto& e : madeEnts) doc_.entities().push_back(std::move(e));
 
-    afterEdit(("Add " + piece).c_str());
+    if (commit) afterEdit(("Add " + piece).c_str());
     status_ = "Placed " + piece;
 }
 
@@ -3481,6 +3483,108 @@ void Editor::debugPackScan() {
     }
     PB_INFO("pack-scan: %zu custom asset(s), %d missing",
             refs.size() - missing, missing);
+}
+
+void Editor::debugGreyboxTest() {
+    int pass = 0, fail = 0;
+    auto ck = [&](const char* w, bool ok) {
+        if (ok) ++pass; else { ++fail; PB_ERROR("greybox FAIL: %s", w); }
+    };
+    const auto& kit = kitPieceNames();
+    const int grid = 64;
+
+    // A clean reply.
+    {
+        const ai::Plan p = ai::validatePlan(
+            R"({"pieces":[{"piece":"Room","x":0,"y":0,"z":0,"size":512},
+                          {"piece":"Stairs","x":600,"y":0,"z":0,"steps":9}],
+                "note":"a room and stairs"})",
+            kit, grid);
+        ck("clean reply yields both pieces", p.items.size() == 2);
+        ck("note survives", p.note == "a room and stairs");
+        ck("coords snap to the grid",
+           !p.items.empty() && std::fmod(p.items[1].pos.x, 64.0f) == 0.0f);
+        ck("steps carried", p.items.size() == 2 && p.items[1].steps == 9);
+    }
+
+    // Invented piece names must be dropped, not passed to placePiece.
+    {
+        const ai::Plan p = ai::validatePlan(
+            R"({"pieces":[{"piece":"Floor","x":0,"y":0,"z":0},
+                          {"piece":"Sniper Nest 3000","x":0,"y":0,"z":0}]})",
+            kit, grid);
+        ck("invented piece is rejected", p.items.size() == 1);
+        ck("rejection is reported",
+           p.rejected.size() == 1 && p.rejected[0] == "Sniper Nest 3000");
+    }
+
+    // Case-insensitive match against the real kit.
+    {
+        const ai::Plan p = ai::validatePlan(
+            R"({"pieces":[{"piece":"crate STACK","x":0,"y":0,"z":0}]})", kit, grid);
+        ck("piece match ignores case",
+           p.items.size() == 1 && p.items[0].piece == "Crate stack");
+    }
+
+    // Runaway coordinates get clamped inside Source's limits.
+    {
+        const ai::Plan p = ai::validatePlan(
+            R"({"pieces":[{"piece":"Floor","x":900000,"y":-900000,"z":0}]})", kit,
+            grid);
+        ck("coords are clamped",
+           p.items.size() == 1 && std::fabs(p.items[0].pos.x) <= ai::kMaxCoord &&
+               std::fabs(p.items[0].pos.y) <= ai::kMaxCoord);
+    }
+
+    // Prose and a code fence round the JSON.
+    {
+        const ai::Plan p = ai::validatePlan(
+            "Sure! Here you go:\n```json\n"
+            R"({"pieces":[{"piece":"Wall","x":0,"y":0,"z":0}]})"
+            "\n```\nHope that helps.",
+            kit, grid);
+        ck("fenced/prose-wrapped JSON still parses", p.items.size() == 1);
+    }
+
+    // A runaway plan is capped.
+    {
+        std::string big = R"({"pieces":[)";
+        for (int i = 0; i < 200; ++i) {
+            if (i) big += ',';
+            big += R"({"piece":"Floor","x":0,"y":0,"z":0})";
+        }
+        big += "]}";
+        const ai::Plan p = ai::validatePlan(big, kit, grid);
+        ck("plan length is capped", p.items.size() == ai::kMaxPieces);
+    }
+
+    // Garbage in, nothing out.
+    {
+        const ai::Plan p = ai::validatePlan("not json at all", kit, grid);
+        ck("garbage yields no pieces", p.items.empty() && !p.rejected.empty());
+    }
+
+    // Applying a plan must land as exactly one undo step.
+    {
+        bsp_ = BspFile();
+        doc_.newBlank("greyboxtest");
+        history_.reset(doc_);
+        clearSelection();
+        const size_t before = doc_.worldSolids().size();
+        ai::Plan p = ai::validatePlan(
+            R"({"pieces":[{"piece":"Room","x":0,"y":0,"z":0},
+                          {"piece":"Floor","x":1024,"y":0,"z":0},
+                          {"piece":"Wall","x":2048,"y":0,"z":0}]})",
+            kit, grid);
+        applyPlan(p);
+        const size_t after = doc_.worldSolids().size();
+        ck("plan created brushwork", after > before);
+        undo();
+        ck("one undo removes the whole plan",
+           doc_.worldSolids().size() == before);
+    }
+
+    PB_INFO("greybox-test: %d passed, %d failed", pass, fail);
 }
 
 void Editor::debugAiPoolTest() {
@@ -4692,6 +4796,108 @@ void Editor::duplicateSelection() {
     status_ = "Duplicated " + std::to_string(newSel.size()) + " brush(es)";
 }
 
+const std::vector<std::string>& Editor::kitPieceNames() {
+    // The canonical list every AI plan is validated against, and the same names
+    // placePiece() answers to. Kept here so there is one source of truth.
+    static const std::vector<std::string> kNames = {
+        "Floor", "Wall", "Ceiling", "Pillar", "Room", "Ramp", "Route", "Hill",
+        "Stairs", "Cylinder", "Dome", "Arch", "Wedge", "Doorway", "Window",
+        "Platform", "Cover", "Crate stack", "Fence", "Spiral stairs",
+        "Skybox seal", "Clip wall", "Water", "Trigger box", "Ladder",
+        "Working door", "Spawn door", "Button", "Lever", "Elevator",
+        "Moving platform", "Fan / rotating", "Teleport pair", "Breakable crate",
+        "KOTH point", "CTF setup", "Capture point", "Round timer", "Arena logic",
+        "Death pit", "No-build zone", "One spawn point", "RED spawn", "BLU spawn",
+        "Payload track", "Resupply", "Health / ammo", "Point light", "Spot light",
+        "Sun / sky", "Pillar (round)", "Mountain"};
+    return kNames;
+}
+
+void Editor::startGreybox() {
+    if (aiBusy_.load()) return;
+    if (!aiConfig().configured()) {
+        aiJobError_ = "No model configured — set one in Options > AI.";
+        status_ = "AI: " + aiJobError_;
+        return;
+    }
+    if (aiBrief_[0] == 0) {
+        status_ = "AI: describe the layout you want first.";
+        return;
+    }
+    if (!doc_.active()) {
+        doc_.newBlank("untitled");
+        history_.reset(doc_);
+        showWelcome_ = false;
+    }
+
+    if (aiThread_.joinable()) aiThread_.join();
+    aiJobError_.clear();
+    aiKind_ = AiKind::Greybox;
+    aiBusy_ = true;
+    aiJobDone_ = false;
+
+    const ai::Config cfg = aiConfig();
+    const std::string brief = aiBrief_;
+    const int grid = gridSize_;
+    aiThread_ = std::thread([this, cfg, brief, grid] {
+        std::string err;
+        const ai::Plan p =
+            ai::requestGreybox(cfg, brief, kitPieceNames(), grid, &err);
+        {
+            std::lock_guard<std::mutex> lk(aiMutex_);
+            aiPlan_ = p;
+            aiJobError_ = err;
+        }
+        aiJobDone_ = true;
+        aiBusy_ = false;
+    });
+    status_ = "Asking the model to lay out \"" + brief + "\"…";
+}
+
+void Editor::applyPlan(const ai::Plan& p) {
+    if (p.items.empty()) {
+        status_ = "AI returned no usable pieces.";
+        return;
+    }
+    // Remember the option sliders the pieces borrow, so a generated plan can
+    // set them per piece without permanently changing the user's settings.
+    const float roomHalf = roomHalf_, cylR = cylRadius_, cylH = cylHeight_;
+    const float hillR = hillRadius_, hillH = hillHeight_, archR = archRadius_;
+    const int stairSteps = stairSteps_;
+    const float stairW = stairWidth_;
+
+    clearSelection();
+    for (const auto& it : p.items) {
+        if (it.size > 0.0f) {
+            roomHalf_ = std::clamp(it.size * 0.5f, 96.0f, 1024.0f);
+            cylRadius_ = std::clamp(it.size * 0.5f, 16.0f, 1024.0f);
+            hillRadius_ = std::clamp(it.size, 64.0f, 4096.0f);
+            archRadius_ = std::clamp(it.size * 0.5f, 32.0f, 2048.0f);
+            stairWidth_ = std::clamp(it.size, 32.0f, 512.0f);
+        }
+        if (it.height > 0.0f) {
+            cylHeight_ = std::clamp(it.height, 16.0f, 1024.0f);
+            hillHeight_ = std::clamp(it.height, 32.0f, 4096.0f);
+        }
+        if (it.steps > 0) stairSteps_ = std::clamp(it.steps, 2, 40);
+        placePiece(it.piece, it.pos, /*commit=*/false);
+    }
+
+    roomHalf_ = roomHalf;  cylRadius_ = cylR;  cylHeight_ = cylH;
+    hillRadius_ = hillR;   hillHeight_ = hillH; archRadius_ = archR;
+    stairSteps_ = stairSteps; stairWidth_ = stairW;
+
+    clearSelection();
+    afterEdit("AI greybox");     // the whole plan is one undo step
+    frameAllViews();
+    aiLastPlan_ = p;
+    std::string msg = "AI placed " + std::to_string(p.items.size()) + " piece(s)";
+    if (!p.rejected.empty())
+        msg += ", skipped " + std::to_string(p.rejected.size()) + " it invented";
+    if (!p.note.empty()) msg += "  — " + p.note;
+    status_ = msg;
+}
+
 void Editor::startMaterialSuggest() {
     if (aiBusy_.load() || !hasDoc()) return;
     if (!aiConfig().configured()) {
@@ -4713,6 +4919,7 @@ void Editor::startMaterialSuggest() {
 
     if (aiThread_.joinable()) aiThread_.join();
     aiJobError_.clear();
+    aiKind_ = AiKind::MaterialSet;
     aiBusy_ = true;
     aiJobDone_ = false;
 
@@ -4738,18 +4945,22 @@ void Editor::pollAi() {
     aiJobDone_ = false;
     if (aiThread_.joinable()) aiThread_.join();
 
-    ai::MaterialPick p;
+    ai::MaterialPick pick;
+    ai::Plan plan;
     std::string err;
+    const AiKind kind = aiKind_;
     {
         std::lock_guard<std::mutex> lk(aiMutex_);
-        p = aiPick_;
+        pick = aiPick_;
+        plan = aiPlan_;
         err = aiJobError_;
     }
     if (!err.empty()) {
         status_ = "AI: " + err;
         return;
     }
-    applyMaterialPick(p);
+    if (kind == AiKind::Greybox) applyPlan(plan);
+    else applyMaterialPick(pick);
 }
 
 void Editor::applyMaterialPick(const ai::MaterialPick& p) {
@@ -6432,6 +6643,36 @@ void Editor::drawBuildKit() {
     if (ImGui::BeginTabBar("kit", ImGuiTabBarFlags_FittingPolicyScroll |
                                       ImGuiTabBarFlags_TabListPopupButton)) {
         if (ImGui::BeginTabItem(ICON_FA_CUBE " Build", nullptr, tabSel(1))) {
+            if (aiConfig().configured()) {
+                ImGui::Dummy(ImVec2(0, 4));
+                pb::ui::sectionLabel("DESCRIBE A LAYOUT");
+                ImGui::SetNextItemWidth(-1);
+                const bool go = ImGui::InputTextWithHint(
+                    "##aibrief",
+                    "a two-storey RED spawn with a balcony over a courtyard…",
+                    aiBrief_, sizeof(aiBrief_),
+                    ImGuiInputTextFlags_EnterReturnsTrue);
+                ImGui::BeginDisabled(aiBusy_.load());
+                if (ImGui::Button(aiBusy_.load()
+                                      ? ICON_FA_HOURGLASS_HALF "  Laying it out…"
+                                      : ICON_FA_WAND_MAGIC_SPARKLES "  Build it",
+                                  ImVec2(-1, 0)) ||
+                    go)
+                    startGreybox();
+                ImGui::EndDisabled();
+                ImGui::PushStyleColor(ImGuiCol_Text, pb::ui::col::faint);
+                ImGui::TextWrapped(
+                    "Real kit pieces on the grid — edit or undo the lot in one "
+                    "step. Anything the model invents is thrown away.");
+                ImGui::PopStyleColor();
+                if (!aiLastPlan_.rejected.empty()) {
+                    ImGui::PushStyleColor(ImGuiCol_Text, pb::ui::col::warn);
+                    ImGui::TextWrapped(ICON_FA_TRIANGLE_EXCLAMATION "  skipped: %s",
+                                       aiLastPlan_.rejected.front().c_str());
+                    ImGui::PopStyleColor();
+                }
+                ImGui::Separator();
+            }
             static const KitPiece shapes[] = {
                 {ICON_FA_BORDER_ALL, "Floor", "Walkable ground area"},
                 {ICON_FA_SQUARE, "Wall", "Solid cover"},

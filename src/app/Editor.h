@@ -10,6 +10,7 @@
 #include <imgui.h>
 
 #include "ai/AiBackend.h"
+#include "ai/Greybox.h"
 #include "ai/MaterialSuggest.h"
 #include "app/Settings.h"
 #include "bsp/BspFile.h"
@@ -73,6 +74,7 @@ public:
     void debugPickTest();    // a prop's click box must match its model, not +-16
     void debugNetTest();     // JSON round-trip + probe any local model server
     void debugAiPoolTest();  // material shortlisting is deterministic + clean
+    void debugGreyboxTest(); // plan validation + one-undo-step apply
     void debugArmKit(const std::string& piece) {  // arm + force the ghost preview
         if (!doc_.active()) { doc_.newBlank("kittest"); history_.reset(doc_); }
         placing_ = piece; debugPreviewAtCenter_ = true; showWelcome_ = false;
@@ -238,9 +240,17 @@ private:
 
     // One AI request at a time, on its own thread — a model call can take many
     // seconds and must never stall a frame. pollAi() applies the result.
+    enum class AiKind { MaterialSet, Greybox };
+    static const std::vector<std::string>& kitPieceNames();
     void startMaterialSuggest();
+    void startGreybox();
     void pollAi();
     void applyMaterialPick(const ai::MaterialPick& p);
+    void applyPlan(const ai::Plan& p);
+    AiKind aiKind_ = AiKind::MaterialSet;
+    ai::Plan aiPlan_;      // guarded by aiMutex_
+    ai::Plan aiLastPlan_;  // last one applied, for the UI
+    char aiBrief_[320] = {0};
     std::thread aiThread_;
     std::mutex aiMutex_;
     std::atomic<bool> aiBusy_{false};
@@ -300,7 +310,10 @@ private:
     void applyClip();
     void applyToTexFaces(const std::function<void(map::BrushFace&)>& fn,
                          const char* undoLabel, bool commit);
-    void placePiece(const std::string& piece, const glm::vec3& at);
+    // commit=false leaves the undo step to the caller, so a generated plan
+    // lands as one entry instead of forty.
+    void placePiece(const std::string& piece, const glm::vec3& at,
+                    bool commit = true);
     void finalizeRoad();
     void drawRoadOverlay(ViewPanel& p, float aspect, ImDrawList* dl);
     void drawLeakOverlay(ViewPanel& p, float aspect, ImDrawList* dl);

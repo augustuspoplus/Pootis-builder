@@ -118,6 +118,7 @@ struct Options {
     bool pickTest = false;
     bool netTest = false;
     bool aiPoolTest = false;
+    bool greyboxTest = false;
     std::string saveVmfPath;
     int width = 1600;
     int height = 950;
@@ -184,6 +185,7 @@ Options parseArgs(int argc, char** argv) {
         else if (a == "--pick-test") o.pickTest = true;
         else if (a == "--net-test") o.netTest = true;
         else if (a == "--ai-pool-test") o.aiPoolTest = true;
+        else if (a == "--greybox-test") o.greyboxTest = true;
         else if (a == "--save-vmf") o.saveVmfPath = next("");
         else if (a == "--view") {
             const std::string v = next("persp");
@@ -221,6 +223,7 @@ int runHeadlessScreenshot(const Options& opt, GLFWwindow* window, float uiScale)
     if (opt.pickTest) editor.debugPickTest();
     if (opt.netTest) editor.debugNetTest();
     if (opt.aiPoolTest) editor.debugAiPoolTest();
+    if (opt.greyboxTest) editor.debugGreyboxTest();
     if (!opt.placePrefabPath.empty()) editor.debugPlacePrefab(opt.placePrefabPath);
     if (opt.selectSolid >= 0) editor.debugSelectWorldSolid(opt.selectSolid);
     if (opt.selectEnt >= 0) editor.debugSelectEntity(opt.selectEnt);

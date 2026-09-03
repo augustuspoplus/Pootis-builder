@@ -79,6 +79,9 @@ echo "== phase 5: leak pointfile =="
 "$RUN" --leak-test --screenshot /dev/null --width 32 --height 32 2>&1 \
   | grep -q 'leak-test: 1 passed, 0 failed' && ok || bad "leak-test (pointfile parse)"
 
+echo "== ai: greybox plan validation =="
+"$RUN" --greybox-test --screenshot /dev/null --width 32 --height 32 2>&1 | grep -q 'greybox-test: 13 passed, 0 failed' && ok || bad "greybox-test"
+
 echo "== ai: material shortlisting =="
 "$RUN" --ai-pool-test --screenshot /dev/null --width 32 --height 32 2>&1 | grep -q 'ai-pool: 7 passed, 0 failed' && ok || bad "ai-pool-test"
 
