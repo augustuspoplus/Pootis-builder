@@ -101,10 +101,13 @@ The compile-test loop and content pipeline aren't fast/trustworthy enough yet.
 - [x] **Map Check depth**: no-skybox-brush (with skyname set), no `env_cubemap`,
       one-team spawns, spawns-without-`func_respawnroom`, displacement on a brush
       entity. (Dangling entity I/O + invalid/oversized brushes were already in.)
-- [ ] Iteration loop: changed-leaves-only, auto `+map` reload, compile-time budget
-      (fast profile + live log + `+map` launch already exist).
-- [ ] Content packing: auto-detect every custom material/model/sound and `bspzip`
-      it in, with a review list.
+- [x] **Content packing auto-detect**: `publish/AssetScan` walks face materials
+      (+ `$basetexture`/`$basetexture2`), entity models (+ `.vvd`/`.vtx`/`.phy`)
+      and sound keys; `SourceFs::assetOrigin()` splits Base (official VPK) from
+      Custom (loose → bspzip) from Missing. "Scan map for custom content" in the
+      compile window fills the pack list and flags missing refs. `--pack-scan`.
+- [ ] Iteration loop: changed-leaves-only, auto `+map` reload, per-stage
+      compile timing (fast profile + live log + `+map` launch already exist).
 - [ ] Workshop publish end-to-end (window + steamcmd hand-off exist; needs a real
       tested submission).
 - **Done when:** decompile → edit → compile → play → publish, no step back to Valve's tools.

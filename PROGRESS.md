@@ -4,6 +4,16 @@ Newest first. ROADMAP.md milestones A–H are spent; **PLAN.md** is the live pla
 (five gated phases to 1.0 + the UI plan).
 
 ## Phases + performance batch
+- **Phase 5 — content packing auto-detect.** `publish/AssetScan` walks
+  the doc's face materials (+ `$basetexture`/`$basetexture2`), entity
+  models (+ `.vvd`/`.vtx`/`.phy` siblings) and sound keys.
+  `SourceFs::assetOrigin()` classifies each path Base (in an official
+  `tf2_*`/`hl2_*` VPK) / Custom (loose → needs bspzip) / Missing;
+  `mountDefaults()` now also mounts the sound VPKs so ambient sounds
+  don't read as missing. "Scan map for custom content" in the compile
+  window auto-fills `packFiles_` (which already feeds bspzip) and lists
+  missing refs. `--pack-scan`; test.sh checks the kit output is clean.
+  73/73.
 - **Phase 5 — ship it (started).** **Leak diagnostics**: `MapCompiler`
   now detects the `.lin`/`.pts` pointfile vbsp drops next to the vmf on a
   leak (`leakFile()`); the editor auto-loads it when a compile finishes
