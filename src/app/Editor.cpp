@@ -1446,6 +1446,14 @@ void Editor::drawWelcome() {
                   "Pre-built starting maps"))
         showTemplates = !showTemplates;
 
+    // Everything between the three big buttons and the pinned bottom bar
+    // scrolls as one region, so RECENT is always reachable no matter how many
+    // templates or recent files there are.
+    const float bottomH = ImGui::GetFrameHeightWithSpacing() +
+                          ImGui::GetStyle().ItemSpacing.y * 2.0f + dp(14.0f);
+    ImGui::Dummy(ImVec2(0, 6));
+    ImGui::BeginChild("##welcomebody", ImVec2(0, -bottomH), ImGuiChildFlags_None);
+
     if (showTemplates) {
         ImGui::Dummy(ImVec2(0, 12));
         sectionLabel("TEMPLATES");
@@ -1501,7 +1509,7 @@ void Editor::drawWelcome() {
         ImGui::PushStyleColor(ImGuiCol_Text, col::faint);
         ImGui::TextUnformatted("Nothing yet — the maps you open show up here.");
         ImGui::PopStyleColor();
-    } else if (ImGui::BeginChild("recent", ImVec2(0, -46 * uiScale_))) {
+    } else {
         int removeIdx = -1;
         const float rowH = ImGui::GetTextLineHeight() * 2.0f + 12.0f;
         for (size_t i = 0; i < prefs_.recent.size(); ++i) {
@@ -1530,7 +1538,8 @@ void Editor::drawWelcome() {
             prefs_.save();
         }
     }
-    if (!prefs_.recent.empty()) ImGui::EndChild();
+
+    ImGui::EndChild();  // ##welcomebody
 
     ImGui::Separator();
     ImGui::AlignTextToFramePadding();
