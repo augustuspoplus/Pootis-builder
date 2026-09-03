@@ -3,12 +3,14 @@
 #include <atomic>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <thread>
 
 #include <imgui.h>
 
 #include "ai/AiBackend.h"
+#include "ai/MaterialSuggest.h"
 #include "app/Settings.h"
 #include "bsp/BspFile.h"
 #include "bsp/BspMesh.h"
@@ -70,6 +72,7 @@ public:
     void debugPackScan();    // list the custom assets the loaded map references
     void debugPickTest();    // a prop's click box must match its model, not +-16
     void debugNetTest();     // JSON round-trip + probe any local model server
+    void debugAiPoolTest();  // material shortlisting is deterministic + clean
     void debugArmKit(const std::string& piece) {  // arm + force the ghost preview
         if (!doc_.active()) { doc_.newBlank("kittest"); history_.reset(doc_); }
         placing_ = piece; debugPreviewAtCenter_ = true; showWelcome_ = false;
@@ -232,6 +235,20 @@ private:
     ai::Config aiConfig() const;
     std::vector<std::string> aiModels_;  // last successful model listing
     std::string aiStatus_;               // last Options AI action result
+
+    // One AI request at a time, on its own thread — a model call can take many
+    // seconds and must never stall a frame. pollAi() applies the result.
+    void startMaterialSuggest();
+    void pollAi();
+    void applyMaterialPick(const ai::MaterialPick& p);
+    std::thread aiThread_;
+    std::mutex aiMutex_;
+    std::atomic<bool> aiBusy_{false};
+    std::atomic<bool> aiJobDone_{false};
+    ai::MaterialPick aiPick_;      // guarded by aiMutex_
+    ai::MaterialPick aiLastPick_;  // last one applied, for the UI
+    std::string aiJobError_;       // guarded by aiMutex_
+    char aiPrompt_[192] = {0};
     void drawModelBrowser();
     void drawModelGrid();   // shared body: Pro "Models" dock + Simple Props tab
     void drawEntityCatalog();
