@@ -538,6 +538,7 @@ private:
     int subSel_ = -1;             // index into verts / edges / faces per subMode_
     int subHot_ = -1;            // hovered handle this frame
     bool subDragging_ = false;
+    ViewKind subDragView_ = ViewKind::Top;  // which viewport owns an in-progress drag
     glm::vec3 subDragStartHit_{0}, subDragStartPos_{0}, subCurPos_{0};
 
     Mode mode_ = Mode::Standard;
