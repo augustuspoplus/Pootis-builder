@@ -2126,11 +2126,13 @@ void Editor::handleSubObjectInput(ViewPanel& p) {
         subSel_ = subHot_;
         if (subSel_ >= 0) {
             subDragging_ = true;
+            subDragView_ = p.kind;
             subDragStartPos_ = subCurPos_ = handlePos(subSel_);
             subDragStartHit_ = planeHit(mouse, subDragStartPos_);
         }
     }
 
+    if (subDragging_ && p.kind != subDragView_) return;
     if (subDragging_ && ImGui::IsMouseDown(ImGuiMouseButton_Left) && subSel_ >= 0) {
         const glm::vec3 hit = planeHit(mouse, subDragStartPos_);
         glm::vec3 want = subDragStartPos_ + (hit - subDragStartHit_);
@@ -4106,11 +4108,16 @@ void Editor::handleViewportInput(ViewPanel& p) {
     if (!p.hovered) {
         // Keep feeding a drag that started here — leaving the viewport used to
         // freeze it mid-way and swallow the mouse release, so it stayed stuck.
+        // Each tool tracks its own owning view (dragView_ / blockView_ /
+        // clipView_ / subDragView_); only that view keeps driving the drag.
         if (dragView_ == static_cast<int>(p.kind) &&
             (resizeHandle_ >= 0 || moveDrag_ != 0 || movePending_)) {
             handleSelectionResize(p);
             handleSelectionMove(p);
         }
+        if (blockDragging_ && blockView_ == p.kind) handleBlockTool(p);
+        if (clipDragging_ && clipView_ == p.kind) handleClipTool(p);
+        if (subDragging_ && subDragView_ == p.kind) handleSubObjectInput(p);
         return;
     }
     ImGuiIO& io = ImGui::GetIO();
