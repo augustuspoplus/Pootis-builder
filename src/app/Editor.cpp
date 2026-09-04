@@ -9593,6 +9593,16 @@ inline void orthoAxes(ViewKind k, int& u, int& v) {
         default:              u = 1; v = 2; break;  // Side: Y, Z
     }
 }
+
+// Resize-handle sizing, shared between the hit test and both draw sites so
+// the drawn square and the grabbable area can never drift apart. The squares
+// were easy to miss and fiddly to grab — this makes them plainly bigger.
+constexpr float kHandleReach2D = 22.0f;   // hit-test radius, ortho views
+constexpr float kHandleReach3D = 24.0f;   // hit-test radius, perspective
+constexpr float kHandleDraw2D = 9.0f;     // half-size of the drawn square
+constexpr float kHandleDraw2DHot = 12.0f;
+constexpr float kHandleDraw3D = 10.0f;
+constexpr float kHandleDraw3DHot = 13.0f;
 }  // namespace
 
 void Editor::handleSelectionResize(ViewPanel& p) {
@@ -9659,7 +9669,7 @@ void Editor::handleSelectionResize(ViewPanel& p) {
     const ImVec2 m = ImGui::GetMousePos();
     resizeHot_ = -1;
     if (resizeHandle_ < 0 && p.hovered) {
-        const float reach = pb::ui::dp(persp ? 17.0f : 14.0f);
+        const float reach = pb::ui::dp(persp ? kHandleReach3D : kHandleReach2D);
         float best = reach;
         for (int h = 0; h < nHandles; ++h) {
             const ImVec2 s = project(handleWorld(h));
@@ -10081,7 +10091,7 @@ void Editor::drawSelectionDims(ViewPanel& p, float aspect, ImDrawList* dl) {
             const ImVec2 s = pr(wp, ok);
             if (!ok) continue;
             const bool hot = (hnd == resizeHot_ || hnd == resizeHandle_);
-            const float r = pb::ui::dp(hot ? 10.0f : 7.0f);
+            const float r = pb::ui::dp(hot ? kHandleDraw3DHot : kHandleDraw3D);
             const ImU32 hc = hot ? IM_COL32(255, 180, 90, 255)
                                  : IM_COL32(255, 214, 150, 235);
             dl->AddRectFilled(ImVec2(s.x - r, s.y - r), ImVec2(s.x + r, s.y + r), hc,
@@ -10137,7 +10147,7 @@ void Editor::drawSelectionDims(ViewPanel& p, float aspect, ImDrawList* dl) {
         {(x0 + x1) * 0.5f, y0}, {(x0 + x1) * 0.5f, y1}};
     for (int i = 0; i < 8; ++i) {
         const bool hot = (i == resizeHot_ || i == resizeHandle_);
-        const float r = pb::ui::dp(hot ? 8.5f : 6.0f);
+        const float r = pb::ui::dp(hot ? kHandleDraw2DHot : kHandleDraw2D);
         const ImU32 hc = hot ? IM_COL32(255, 180, 90, 255)
                              : IM_COL32(255, 214, 150, 230);
         dl->AddRectFilled(ImVec2(pts[i].x - r, pts[i].y - r),
