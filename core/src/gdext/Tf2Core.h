@@ -58,6 +58,9 @@ public:
     // and world collision triangles for instant F5 walk playtesting!).
     Dictionary load_bsp_data(const String& bsp_path);
 
+    // Reads raw WAV/MP3 sound bytes directly from Steam TF2 VPKs (e.g. "sound/ui/buttonclick.wav").
+    PackedByteArray read_sound_bytes(const String& vpk_path) const;
+
 private:
     pb::source::SourceFs fs_;
     pb::fgd::Fgd fgd_;

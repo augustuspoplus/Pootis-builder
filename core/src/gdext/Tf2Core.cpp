@@ -74,6 +74,7 @@ void Tf2Core::_bind_methods() {
     ClassDB::bind_method(D_METHOD("read_skybox_panorama", "skyname", "pano_width", "pano_height"),
                          &Tf2Core::read_skybox_panorama, DEFVAL(1024), DEFVAL(512));
     ClassDB::bind_method(D_METHOD("load_bsp_data", "bsp_path"), &Tf2Core::load_bsp_data);
+    ClassDB::bind_method(D_METHOD("read_sound_bytes", "vpk_path"), &Tf2Core::read_sound_bytes);
 }
 
 Dictionary Tf2Core::mount_tf2(const String& repo_root) {
@@ -657,6 +658,19 @@ Dictionary Tf2Core::load_bsp_data(const String& bsp_path) {
     out["collision_faces"] = colFaces;
     out["prop_groups"] = propGroups;
     out["entities"] = entities;
+    return out;
+}
+
+PackedByteArray Tf2Core::read_sound_bytes(const String& vpk_path) const {
+    PackedByteArray out;
+    if (!mounted_) return out;
+    std::string rel = toStd(vpk_path);
+    std::replace(rel.begin(), rel.end(), '\\', '/');
+    if (rel.rfind("sound/", 0) != 0) rel = "sound/" + rel;
+    auto raw = fs_.read(rel);
+    if (!raw || raw->empty()) return out;
+    out.resize(static_cast<int64_t>(raw->size()));
+    std::memcpy(out.ptrw(), raw->data(), raw->size());
     return out;
 }
 
