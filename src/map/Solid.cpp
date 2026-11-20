@@ -247,6 +247,20 @@ bool Solid::clip(const glm::vec3& nIn, float d, const std::string& cutMaterial) 
     trial.faces.push_back(cut);
     trial.polygonise();
     if (!trial.valid) return false;
+    // Prune faces completely clipped away or collapsed to a tiny sliver (< 1 sq Hammer unit)
+    trial.faces.erase(
+        std::remove_if(trial.faces.begin(), trial.faces.end(),
+                       [](const BrushFace& f) {
+                           if (f.verts.size() < 3) return true;
+                           float maxCross = 0.0f;
+                           for (size_t i = 1; i + 1 < f.verts.size(); ++i) {
+                               maxCross = std::max(maxCross, glm::length(glm::cross(
+                                   f.verts[i] - f.verts[0], f.verts[i + 1] - f.verts[0])));
+                           }
+                           return maxCross < 1.0f;
+                       }),
+        trial.faces.end());
+    if (trial.faces.size() < 4) return false;
     *this = std::move(trial);
     return true;
 }
@@ -550,16 +564,23 @@ KvNode solidToKv(const Solid& s) {
     n.set("id", std::to_string(s.id));
     char buf[256];
     for (const auto& f : s.faces) {
+        if (f.verts.size() < 3) continue;
+        // Find a non-degenerate triangle with maximum area for vbsp plane precision
+        glm::vec3 a(0), b(0), c(0);
+        float bestArea = 0.0f;
+        for (size_t i = 1; i + 1 < f.verts.size(); ++i) {
+            const float area = glm::length(glm::cross(f.verts[i + 1] - f.verts[0],
+                                                      f.verts[i] - f.verts[0]));
+            if (area > bestArea) {
+                bestArea = area;
+                a = f.verts[i + 1];
+                b = f.verts[i];
+                c = f.verts[0];
+            }
+        }
+        if (bestArea < 1.0f) continue;  // skip sliver / degenerate face (< 1 sq Hammer unit)
         KvNode side;
         side.name = "side";
-        // Emit the plane from the polygonised verts (clockwise from the front,
-        // which is the reverse of our CCW-around-normal winding).
-        glm::vec3 a = f.p0, b = f.p1, c = f.p2;
-        if (f.verts.size() >= 3) {
-            a = f.verts[2];
-            b = f.verts[1];
-            c = f.verts[0];
-        }
         std::snprintf(buf, sizeof(buf), "(%g %g %g) (%g %g %g) (%g %g %g)", a.x, a.y,
                       a.z, b.x, b.y, b.z, c.x, c.y, c.z);
         side.set("plane", buf);
