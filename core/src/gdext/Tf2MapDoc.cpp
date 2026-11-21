@@ -7,6 +7,8 @@
 #include <unordered_map>
 
 #include <godot_cpp/core/class_db.hpp>
+#include <godot_cpp/variant/color.hpp>
+#include <godot_cpp/variant/packed_color_array.hpp>
 #include <godot_cpp/variant/packed_int32_array.hpp>
 #include <godot_cpp/variant/packed_vector2_array.hpp>
 #include <godot_cpp/variant/packed_vector3_array.hpp>
@@ -116,6 +118,7 @@ bool meshSolidToDict(const pb::map::Solid& s, Dictionary& out) {
         PackedVector3Array verts;
         PackedVector3Array norms;
         PackedVector2Array uvs;
+        PackedColorArray colors;
         PackedInt32Array inds;
     };
     std::unordered_map<std::string, Bucket> buckets;
@@ -138,9 +141,10 @@ bool meshSolidToDict(const pb::map::Solid& s, Dictionary& out) {
         if (f.hasDisp && f.verts.size() == 4) {
             const int power = f.dispInfo.getInt("power");
             const int gn = (power >= 2 && power <= 4) ? ((1 << power) + 1) : 0;
-            std::vector<float> nrm, dst;
+            std::vector<float> nrm, dst, alp;
             if (gn > 0 && readDispRows(f.dispInfo.child("normals"), gn, 3, nrm) &&
                 readDispRows(f.dispInfo.child("distances"), gn, 1, dst)) {
+                const bool hasAlp = readDispRows(f.dispInfo.child("alphas"), gn, 1, alp);
                 glm::vec3 start(0.0f);
                 std::sscanf(f.dispInfo.get("startposition").c_str(), " [ %f %f %f ]",
                             &start.x, &start.y, &start.z);
@@ -160,7 +164,7 @@ bool meshSolidToDict(const pb::map::Solid& s, Dictionary& out) {
                         grid[i] = base + nv * dst[i];
                     }
                 }
-                // Compute smooth normals across the displacement grid
+                // Compute smooth normals across the displacement grid + alpha blend in COLOR.a
                 const int32_t baseV = static_cast<int32_t>(bk.verts.size());
                 for (int r = 0; r < gn; ++r) {
                     for (int c = 0; c < gn; ++c) {
@@ -178,6 +182,8 @@ bool meshSolidToDict(const pb::map::Solid& s, Dictionary& out) {
                         bk.norms.push_back(toGodotDir(gnrm));
                         const glm::vec2 uv = f.texUV(p, 512.0f, 512.0f);
                         bk.uvs.push_back(Vector2(uv.x, uv.y));
+                        const float aVal = hasAlp ? std::clamp(alp[i] / 255.0f, 0.0f, 1.0f) : 0.0f;
+                        bk.colors.push_back(Color(1.0f, 1.0f, 1.0f, aVal));
                     }
                 }
                 for (int r = 0; r < gn - 1; ++r) {
@@ -218,6 +224,7 @@ bool meshSolidToDict(const pb::map::Solid& s, Dictionary& out) {
             bk.norms.push_back(gN);
             const glm::vec2 uv = f.texUV(vp, 512.0f, 512.0f);
             bk.uvs.push_back(Vector2(uv.x, uv.y));
+            bk.colors.push_back(Color(1.0f, 1.0f, 1.0f, 0.0f));
         }
         const int32_t n = static_cast<int32_t>(f.verts.size());
         for (int32_t k = 1; k + 1 < n; ++k) {
@@ -241,6 +248,7 @@ bool meshSolidToDict(const pb::map::Solid& s, Dictionary& out) {
         sd["vertices"] = bk.verts;
         sd["normals"] = bk.norms;
         sd["uvs"] = bk.uvs;
+        sd["colors"] = bk.colors;
         sd["indices"] = bk.inds;
         surfaces.push_back(sd);
     }
@@ -281,6 +289,20 @@ void Tf2MapDoc::_bind_methods() {
     ClassDB::bind_method(D_METHOD("add_building", "min_g", "max_g", "floors", "roof_style", "wall_mat", "floor_mat", "roof_mat", "door_side"),
                          &Tf2MapDoc::add_building, DEFVAL(2));
     ClassDB::bind_method(D_METHOD("add_arch", "center_g", "width_m", "depth_m", "height_m", "segments", "material"), &Tf2MapDoc::add_arch);
+    ClassDB::bind_method(D_METHOD("add_wall_segment", "p0_g", "p1_g", "height_m", "thick_m", "material"), &Tf2MapDoc::add_wall_segment);
+    ClassDB::bind_method(D_METHOD("make_hollow", "solid_idx", "wall_thick_m"), &Tf2MapDoc::make_hollow);
+    ClassDB::bind_method(D_METHOD("get_solid_vertices", "solid_idx"), &Tf2MapDoc::get_solid_vertices);
+    ClassDB::bind_method(D_METHOD("move_solid_vertex", "solid_idx", "vert_idx", "delta_g"), &Tf2MapDoc::move_solid_vertex);
+    ClassDB::bind_method(D_METHOD("get_face_uv", "solid_idx", "face_idx"), &Tf2MapDoc::get_face_uv);
+    ClassDB::bind_method(D_METHOD("set_face_uv", "solid_idx", "face_idx", "u_scale", "v_scale", "u_shift", "v_shift", "rot_deg", "lightmap_scale"),
+                         &Tf2MapDoc::set_face_uv);
+    ClassDB::bind_method(D_METHOD("justify_face_uv", "solid_idx", "face_idx", "mode"), &Tf2MapDoc::justify_face_uv);
+    ClassDB::bind_method(D_METHOD("align_face_uv", "solid_idx", "face_idx", "to_face"), &Tf2MapDoc::align_face_uv);
+    ClassDB::bind_method(D_METHOD("replace_material", "find_mat", "replace_mat"), &Tf2MapDoc::replace_material);
+    ClassDB::bind_method(D_METHOD("set_solid_hidden", "solid_idx", "hidden"), &Tf2MapDoc::set_solid_hidden);
+    ClassDB::bind_method(D_METHOD("unhide_all"), &Tf2MapDoc::unhide_all);
+    ClassDB::bind_method(D_METHOD("set_solid_group", "solid_idx", "group_id"), &Tf2MapDoc::set_solid_group);
+    ClassDB::bind_method(D_METHOD("check_problems"), &Tf2MapDoc::check_problems);
 
     ClassDB::bind_method(D_METHOD("auto_carve_opening", "min_g", "max_g", "cut_material"), &Tf2MapDoc::auto_carve_opening);
     ClassDB::bind_method(D_METHOD("push_pull_face", "solid_idx", "face_idx", "delta_m"), &Tf2MapDoc::push_pull_face);
@@ -304,8 +326,16 @@ void Tf2MapDoc::_bind_methods() {
     ClassDB::bind_method(D_METHOD("raycast_entity", "ray_origin_g", "ray_dir_g"), &Tf2MapDoc::raycast_entity);
 
     ClassDB::bind_method(D_METHOD("make_terrain_patch", "min_g", "max_g", "power", "material"), &Tf2MapDoc::make_terrain_patch);
+    ClassDB::bind_method(D_METHOD("make_cliff_wall", "p0_g", "p1_g", "height_m", "depth_m", "power", "material", "noise_amp_m"),
+                         &Tf2MapDoc::make_cliff_wall, DEFVAL(0.65f));
+    ClassDB::bind_method(D_METHOD("create_displacement_on_face", "solid_idx", "face_idx", "power"),
+                         &Tf2MapDoc::create_displacement_on_face, DEFVAL(3));
     ClassDB::bind_method(D_METHOD("sculpt_terrain", "center_g", "radius_m", "strength_m", "mode"),
                          &Tf2MapDoc::sculpt_terrain, DEFVAL(0));
+    ClassDB::bind_method(D_METHOD("sculpt_terrain_ex", "center_g", "radius_m", "strength_m", "mode", "axis_mode"),
+                         &Tf2MapDoc::sculpt_terrain_ex, DEFVAL(0), DEFVAL(0));
+    ClassDB::bind_method(D_METHOD("sew_displacements"), &Tf2MapDoc::sew_displacements);
+    ClassDB::bind_method(D_METHOD("subdivide_displacement", "solid_idx"), &Tf2MapDoc::subdivide_displacement);
 
     ClassDB::bind_method(D_METHOD("auto_seal_skybox"), &Tf2MapDoc::auto_seal_skybox);
     ClassDB::bind_method(D_METHOD("is_map_sealed"), &Tf2MapDoc::is_map_sealed);
@@ -1033,6 +1063,8 @@ Dictionary Tf2MapDoc::get_solid_info(int solid_idx) const {
 
     out["valid"] = s.valid;
     out["id"] = s.id;
+    out["hidden"] = s.hidden;
+    out["group"] = s.group;
     out["bounds_min"] = mn;
     out["bounds_max"] = mx;
     out["center"] = (mn + mx) * 0.5f;
@@ -1040,7 +1072,9 @@ Dictionary Tf2MapDoc::get_solid_info(int solid_idx) const {
     out["face_count"] = static_cast<int64_t>(s.faces.size());
     out["is_skybox"] = isSkyboxSolid(s);
     out["is_disp"] = hasDisp;
-    out["primary_material"] = toGodot(s.faces.empty() ? "" : s.faces[0].material);
+    const String pm = toGodot(s.faces.empty() ? "" : s.faces[0].material);
+    out["material"] = pm;
+    out["primary_material"] = pm;
     return out;
 }
 
@@ -1080,8 +1114,11 @@ Dictionary Tf2MapDoc::raycast_face(const Vector3& ray_origin_g, const Vector3& r
     out["hit"] = true;
     out["solid_idx"] = bestSolid;
     out["face_idx"] = bestFace;
+    out["t"] = bestT * kInvUpm;
     out["hit_pos"] = toGodotPos(ro + rd * bestT);
-    out["face_normal"] = toGodotDir(f.planeN);
+    const Vector3 gn = toGodotDir(f.planeN);
+    out["normal"] = gn;
+    out["face_normal"] = gn;
     out["face_center"] = toGodotPos(fc);
     out["material"] = toGodot(f.material);
     return out;
@@ -1266,7 +1303,573 @@ Dictionary Tf2MapDoc::raycast_entity(const Vector3& ray_origin_g, const Vector3&
     out["entity_idx"] = bestIdx;
     out["classname"] = toGodot(e.classname);
     out["pos"] = toGodotPos(e.origin);
+    out["hit_pos"] = ray_origin_g + rd * bestT;
     out["t"] = bestT;
+    return out;
+}
+
+int Tf2MapDoc::add_wall_segment(const Vector3& p0_g, const Vector3& p1_g, float height_m, float thick_m,
+                                const String& material) {
+    const glm::vec3 a = toSourcePos(p0_g);
+    const glm::vec3 b = toSourcePos(p1_g);
+    glm::vec2 dir2(b.x - a.x, b.y - a.y);
+    const float len = glm::length(dir2);
+    if (len < 8.0f) return -1;
+    dir2 /= len;
+    const glm::vec3 fwd(dir2.x, dir2.y, 0.0f);
+    const glm::vec3 right(dir2.y, -dir2.x, 0.0f);
+    const float halfT = std::max(4.0f, thick_m * kUpm * 0.5f);
+    const float hU = std::max(16.0f, height_m * kUpm);
+    const float z0 = std::min(a.z, b.z);
+    const float z1 = z0 + hU;
+
+    const glm::vec3 mid = 0.5f * (a + b);
+    std::vector<std::pair<glm::vec3, float>> planes = {
+        { right,  glm::dot(right,  mid + right * halfT) },
+        {-right,  glm::dot(-right, mid - right * halfT) },
+        { fwd,    glm::dot(fwd,    b) },
+        {-fwd,    glm::dot(-fwd,   a) },
+        { glm::vec3(0, 0,  1),  z1 },
+        { glm::vec3(0, 0, -1), -z0 },
+    };
+    pb::map::Solid s = pb::map::Solid::fromPlanes(planes, toStd(material));
+    if (!s.valid) return -1;
+    s.id = doc_.nextId();
+    const int idx = static_cast<int>(doc_.worldSolids().size());
+    doc_.worldSolids().push_back(std::move(s));
+    doc_.markDirty();
+    return idx;
+}
+
+PackedInt32Array Tf2MapDoc::make_hollow(int solid_idx, float wall_thick_m) {
+    PackedInt32Array out;
+    if (solid_idx < 0 || solid_idx >= static_cast<int>(doc_.worldSolids().size())) return out;
+    const pb::map::Solid orig = doc_.worldSolids()[solid_idx];
+    const float rawU = (std::fabs(wall_thick_m) < 0.05f) ? -16.0f : (wall_thick_m * kUpm);
+    const float t = std::max(4.0f, std::fabs(rawU));
+    pb::map::Solid shellSrc = orig;
+    if (rawU < 0.0f) {
+        // Hammer convention: negative thickness hollows OUTWARD so the interior stays the original size!
+        const std::string mat = orig.faces.empty() ? "tools/toolsnodraw" : orig.faces.front().material;
+        shellSrc = pb::map::Solid::makeBox(orig.boundsMin - glm::vec3(t), orig.boundsMax + glm::vec3(t), mat);
+    }
+    auto pieces = pb::map::hollow(shellSrc, t);
+    std::vector<pb::map::Solid> validPieces;
+    for (auto& p : pieces) {
+        if (p.valid && p.faces.size() >= 4) validPieces.push_back(std::move(p));
+    }
+    if (validPieces.empty()) return out;
+    doc_.worldSolids().erase(doc_.worldSolids().begin() + solid_idx);
+    for (auto& p : validPieces) {
+        p.id = doc_.nextId();
+        const int idx = static_cast<int>(doc_.worldSolids().size());
+        doc_.worldSolids().push_back(std::move(p));
+        out.push_back(idx);
+    }
+    doc_.markDirty();
+    return out;
+}
+
+PackedVector3Array Tf2MapDoc::get_solid_vertices(int solid_idx) const {
+    PackedVector3Array out;
+    if (solid_idx < 0 || solid_idx >= static_cast<int>(doc_.worldSolids().size())) return out;
+    const pb::map::BrushHandles h = pb::map::extractHandles(doc_.worldSolids()[solid_idx]);
+    for (const auto& v : h.verts) out.push_back(toGodotPos(v.pos));
+    return out;
+}
+
+bool Tf2MapDoc::move_solid_vertex(int solid_idx, int vert_idx, const Vector3& delta_g) {
+    if (solid_idx < 0 || solid_idx >= static_cast<int>(doc_.worldSolids().size())) return false;
+    pb::map::Solid& s = doc_.worldSolids()[solid_idx];
+    const pb::map::BrushHandles h = pb::map::extractHandles(s);
+    if (vert_idx < 0 || vert_idx >= static_cast<int>(h.verts.size())) return false;
+    pb::map::Solid backup = s;
+    const glm::vec3 dU = glm::round(toSourcePos(delta_g));
+    if (!pb::map::moveVertexHandles(s, h, {vert_idx}, dU)) {
+        s = std::move(backup);
+        return false;
+    }
+    doc_.markDirty();
+    return true;
+}
+
+bool Tf2MapDoc::create_displacement_on_face(int solid_idx, int face_idx, int power) {
+    if (solid_idx < 0 || solid_idx >= static_cast<int>(doc_.worldSolids().size())) return false;
+    auto& s = doc_.worldSolids()[solid_idx];
+    if (face_idx < 0 || face_idx >= static_cast<int>(s.faces.size())) return false;
+    auto& f = s.faces[face_idx];
+    if (f.verts.size() != 4) return false;
+    pb::map::faceMakeDisplacement(f, std::clamp(power, 2, 4));
+    doc_.markDirty();
+    return true;
+}
+
+int Tf2MapDoc::make_cliff_wall(const Vector3& p0_g, const Vector3& p1_g, float height_m, float depth_m,
+                               int power, const String& material, float noise_amp_m) {
+    const int idx = add_wall_segment(p0_g, p1_g, height_m, std::max(1.5f, depth_m), material);
+    if (idx < 0) return -1;
+    auto& s = doc_.worldSolids()[idx];
+    power = std::clamp(power, 2, 4);
+    // Pick the front vertical face (largest area side face facing outward along right normal)
+    const glm::vec3 a = toSourcePos(p0_g);
+    const glm::vec3 b = toSourcePos(p1_g);
+    glm::vec2 dir2 = glm::normalize(glm::vec2(b.x - a.x, b.y - a.y));
+    const glm::vec3 frontN(dir2.y, -dir2.x, 0.0f);
+    int bestFace = -1;
+    float bestDot = 0.5f;
+    for (int fi = 0; fi < static_cast<int>(s.faces.size()); ++fi) {
+        if (s.faces[fi].verts.size() != 4) continue;
+        float d = glm::dot(s.faces[fi].planeN, frontN);
+        if (d > bestDot) { bestDot = d; bestFace = fi; }
+    }
+    if (bestFace < 0) return idx;
+    auto& f = s.faces[bestFace];
+    pb::map::faceMakeDisplacement(f, power);
+
+    // Pre-sculpt dramatic stratified TF2 Badlands/Upward canyon cliff rock face + base alpha blend!
+    const int gn = (1 << power) + 1;
+    std::vector<float> dst(static_cast<size_t>(gn) * gn, 0.0f);
+    std::vector<float> alp(static_cast<size_t>(gn) * gn, 0.0f);
+    glm::vec3 start(0.0f);
+    std::sscanf(f.dispInfo.get("startposition").c_str(), " [ %f %f %f ]",
+                &start.x, &start.y, &start.z);
+    glm::vec3 A, B, C, D;
+    dispCornersLocal(f, start, A, B, C, D);
+    const float zMin = std::min({A.z, B.z, C.z, D.z});
+    const float zMax = std::max({A.z, B.z, C.z, D.z});
+    const float zSpan = std::max(32.0f, zMax - zMin);
+    const float ampU = std::max(28.0f, noise_amp_m * kUpm * 2.1f);
+    for (int r = 0; r < gn; ++r) {
+        const float tb = static_cast<float>(r) / (gn - 1);
+        const glm::vec3 e0 = A + (D - A) * tb;
+        const glm::vec3 e1 = B + (C - B) * tb;
+        for (int c = 0; c < gn; ++c) {
+            const float ta = static_cast<float>(c) / (gn - 1);
+            const glm::vec3 base = e0 + (e1 - e0) * ta;
+            const float h01 = std::clamp((base.z - zMin) / zSpan, 0.0f, 1.0f);
+            // Stratified horizontal TF2 rock shelves + bold angular crag ridges
+            const float ridge = std::sin(base.x * 0.017f + base.y * 0.015f) * 0.55f +
+                                std::cos(base.x * 0.039f - base.z * 0.022f) * 0.45f;
+            const float shelf = std::sin(h01 * 12.566f + ridge * 1.1f) * 0.38f;
+            // Base flares forward naturally like real canyon rock talus!
+            const float talus = (1.0f - h01) * (1.0f - h01) * ampU * 1.15f;
+            const float crag = (0.35f + 0.65f * (1.0f - h01 * 0.45f)) * (ridge + shelf) * ampU * 0.72f;
+            dst[r * gn + c] = std::max(-ampU * 0.35f, talus + crag);
+            // Pre-paint dusty dirt-to-rock alpha transition along the bottom 35% of the cliff!
+            const float dirtBlend = std::clamp((0.42f - h01) / 0.42f + ridge * 0.12f, 0.0f, 1.0f);
+            alp[r * gn + c] = dirtBlend * 255.0f;
+        }
+    }
+    for (auto& ch : f.dispInfo.children) {
+        if (ch.name == "distances") writeDispRows(ch, gn, 1, dst);
+        if (ch.name == "alphas") writeDispRows(ch, gn, 1, alp);
+    }
+    doc_.markDirty();
+    return idx;
+}
+
+int Tf2MapDoc::sculpt_terrain_ex(const Vector3& center_g, float radius_m, float strength_m,
+                                 int mode, int axis_mode) {
+    // mode: 0=Raise, 1=Lower, 2=Smooth, 3=Flatten, 4=PaintAlpha+, 5=PaintAlpha-, 6=OrganicNoise
+    // axis_mode: 0=FaceNormal (works on cliffs & floors!), 1=WorldY, 2=WorldX, 3=WorldZ
+    const glm::vec3 centerU = toSourcePos(center_g);
+    const float radU = std::max(16.0f, radius_m * kUpm);
+    const float amtU = strength_m * kUpm;
+    int touched = 0;
+
+    for (auto& s : doc_.worldSolids()) {
+        for (auto& f : s.faces) {
+            if (!f.hasDisp || f.verts.size() != 4) continue;
+            const int power = f.dispInfo.getInt("power");
+            if (power < 2 || power > 4) continue;
+            const int gn = (1 << power) + 1;
+            std::vector<float> nrm, dst, alp;
+            if (!readDispRows(f.dispInfo.child("normals"), gn, 3, nrm) ||
+                !readDispRows(f.dispInfo.child("distances"), gn, 1, dst))
+                continue;
+            const bool hasAlp = readDispRows(f.dispInfo.child("alphas"), gn, 1, alp);
+            if (!hasAlp) alp.assign(static_cast<size_t>(gn) * gn, 0.0f);
+
+            glm::vec3 start(0.0f);
+            std::sscanf(f.dispInfo.get("startposition").c_str(), " [ %f %f %f ]",
+                        &start.x, &start.y, &start.z);
+            glm::vec3 A, B, C, D;
+            dispCornersLocal(f, start, A, B, C, D);
+
+            std::vector<float> nextDst = dst;
+            std::vector<float> nextAlp = alp;
+            std::vector<float> nextNrm = nrm;
+            bool anyDst = false, anyAlp = false, anyNrm = false;
+            const float r2 = radU * radU;
+
+            for (int r = 0; r < gn; ++r) {
+                const float tb = static_cast<float>(r) / (gn - 1);
+                const glm::vec3 e0 = A + (D - A) * tb;
+                const glm::vec3 e1 = B + (C - B) * tb;
+                for (int c = 0; c < gn; ++c) {
+                    const int i = r * gn + c;
+                    const float ta = static_cast<float>(c) / (gn - 1);
+                    const glm::vec3 base = e0 + (e1 - e0) * ta;
+                    const glm::vec3 nv(nrm[i * 3], nrm[i * 3 + 1], nrm[i * 3 + 2]);
+                    const glm::vec3 cur = base + nv * dst[i];
+                    const float d2 = glm::dot(cur - centerU, cur - centerU);
+                    if (d2 > r2) continue;
+                    const float t = 1.0f - std::sqrt(d2) / radU;
+                    const float fall = t * t * (3.0f - 2.0f * t); // smoothstep
+
+                    if (mode == 4 || mode == 5) {
+                        const float deltaA = (mode == 4 ? 1.0f : -1.0f) * std::fabs(strength_m) * 90.0f * fall;
+                        nextAlp[i] = std::clamp(alp[i] + deltaA, 0.0f, 255.0f);
+                        anyAlp = true;
+                    } else if (mode == 0 || mode == 1 || mode == 6) {
+                        glm::vec3 pushDir = f.planeN;
+                        if (axis_mode == 1) pushDir = glm::vec3(0, 0, 1);
+                        else if (axis_mode == 2) pushDir = glm::vec3(1, 0, 0);
+                        else if (axis_mode == 3) pushDir = glm::vec3(0, -1, 0);
+                        float signedAmt = (mode == 1 ? -std::fabs(amtU) : std::fabs(amtU)) * fall;
+                        if (mode == 6) {
+                            const float h = std::sin(cur.x * 0.047f + cur.z * 0.061f) * std::cos(cur.y * 0.053f);
+                            signedAmt = h * std::fabs(amtU) * fall;
+                        }
+                        const glm::vec3 target = cur + pushDir * signedAmt;
+                        const glm::vec3 off = target - base;
+                        const float dlen = glm::length(off);
+                        if (dlen > 0.001f) {
+                            const glm::vec3 dn = off / dlen;
+                            nextNrm[i * 3 + 0] = dn.x;
+                            nextNrm[i * 3 + 1] = dn.y;
+                            nextNrm[i * 3 + 2] = dn.z;
+                            nextDst[i] = dlen;
+                            anyNrm = true;
+                        } else {
+                            nextDst[i] = 0.0f;
+                        }
+                        anyDst = true;
+                    } else if (mode == 2) {
+                        // Smooth neighbor positions
+                        float sum = 0.0f; int cnt = 0;
+                        for (int dr = -1; dr <= 1; ++dr)
+                            for (int dc = -1; dc <= 1; ++dc) {
+                                int rr = r + dr, cc = c + dc;
+                                if (rr >= 0 && rr < gn && cc >= 0 && cc < gn) {
+                                    sum += dst[rr * gn + cc]; ++cnt;
+                                }
+                            }
+                        nextDst[i] = dst[i] + ((sum / cnt) - dst[i]) * fall * 0.72f;
+                        anyDst = true;
+                    } else if (mode == 3) {
+                        const float targetD = glm::dot(centerU - base, nv);
+                        nextDst[i] = dst[i] + (targetD - dst[i]) * fall * 0.78f;
+                        anyDst = true;
+                    }
+                }
+            }
+            if (anyDst || anyNrm) {
+                for (auto& ch : f.dispInfo.children) {
+                    if (anyDst && ch.name == "distances") writeDispRows(ch, gn, 1, nextDst);
+                    if (anyNrm && ch.name == "normals") writeDispRows(ch, gn, 3, nextNrm);
+                }
+                ++touched;
+            }
+            if (anyAlp) {
+                bool wrote = false;
+                for (auto& ch : f.dispInfo.children) {
+                    if (ch.name == "alphas") { writeDispRows(ch, gn, 1, nextAlp); wrote = true; break; }
+                }
+                if (!wrote) {
+                    pb::map::KvNode an; an.name = "alphas";
+                    writeDispRows(an, gn, 1, nextAlp);
+                    f.dispInfo.children.push_back(std::move(an));
+                }
+                ++touched;
+            }
+        }
+    }
+    if (touched > 0) doc_.markDirty();
+    return touched;
+}
+
+int Tf2MapDoc::sew_displacements() {
+    struct DispRef {
+        pb::map::BrushFace* face = nullptr;
+        int gn = 0;
+        std::vector<glm::vec3> base;
+        std::vector<glm::vec3> cur;
+        bool dirty = false;
+    };
+    std::vector<DispRef> list;
+    for (auto& s : doc_.worldSolids()) {
+        for (auto& f : s.faces) {
+            if (!f.hasDisp || f.verts.size() != 4) continue;
+            const int power = f.dispInfo.getInt("power");
+            if (power < 2 || power > 4) continue;
+            const int gn = (1 << power) + 1;
+            std::vector<float> nrm, dst;
+            if (!readDispRows(f.dispInfo.child("normals"), gn, 3, nrm) ||
+                !readDispRows(f.dispInfo.child("distances"), gn, 1, dst))
+                continue;
+            glm::vec3 start(0.0f);
+            std::sscanf(f.dispInfo.get("startposition").c_str(), " [ %f %f %f ]",
+                        &start.x, &start.y, &start.z);
+            glm::vec3 A, B, C, D;
+            dispCornersLocal(f, start, A, B, C, D);
+            DispRef dr;
+            dr.face = &f;
+            dr.gn = gn;
+            dr.base.resize(static_cast<size_t>(gn) * gn);
+            dr.cur.resize(static_cast<size_t>(gn) * gn);
+            for (int r = 0; r < gn; ++r) {
+                const float tb = static_cast<float>(r) / (gn - 1);
+                const glm::vec3 e0 = A + (D - A) * tb;
+                const glm::vec3 e1 = B + (C - B) * tb;
+                for (int c = 0; c < gn; ++c) {
+                    const int i = r * gn + c;
+                    const float ta = static_cast<float>(c) / (gn - 1);
+                    dr.base[i] = e0 + (e1 - e0) * ta;
+                    const glm::vec3 nv(nrm[i * 3], nrm[i * 3 + 1], nrm[i * 3 + 2]);
+                    dr.cur[i] = dr.base[i] + nv * dst[i];
+                }
+            }
+            list.push_back(std::move(dr));
+        }
+    }
+    int sewn = 0;
+    for (size_t a = 0; a < list.size(); ++a) {
+        for (size_t b = a + 1; b < list.size(); ++b) {
+            auto& da = list[a];
+            auto& db = list[b];
+            for (int ra = 0; ra < da.gn; ++ra) {
+                for (int ca = 0; ca < da.gn; ++ca) {
+                    if (ra != 0 && ra != da.gn - 1 && ca != 0 && ca != da.gn - 1) continue;
+                    const int ia = ra * da.gn + ca;
+                    for (int rb = 0; rb < db.gn; ++rb) {
+                        for (int cb = 0; cb < db.gn; ++cb) {
+                            if (rb != 0 && rb != db.gn - 1 && cb != 0 && cb != db.gn - 1) continue;
+                            const int ib = rb * db.gn + cb;
+                            if (glm::distance(da.base[ia], db.base[ib]) < 6.0f) {
+                                const glm::vec3 mid = 0.5f * (da.cur[ia] + db.cur[ib]);
+                                da.cur[ia] = mid;
+                                db.cur[ib] = mid;
+                                da.dirty = db.dirty = true;
+                                ++sewn;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    for (auto& dr : list) {
+        if (!dr.dirty) continue;
+        const int total = dr.gn * dr.gn;
+        std::vector<float> nrm(total * 3), dst(total);
+        for (int i = 0; i < total; ++i) {
+            const glm::vec3 off = dr.cur[i] - dr.base[i];
+            const float len = glm::length(off);
+            const glm::vec3 nv = (len > 1e-4f) ? (off / len) : dr.face->planeN;
+            nrm[i * 3 + 0] = nv.x; nrm[i * 3 + 1] = nv.y; nrm[i * 3 + 2] = nv.z;
+            dst[i] = len;
+        }
+        for (auto& ch : dr.face->dispInfo.children) {
+            if (ch.name == "normals") writeDispRows(ch, dr.gn, 3, nrm);
+            if (ch.name == "distances") writeDispRows(ch, dr.gn, 1, dst);
+        }
+    }
+    if (sewn > 0) doc_.markDirty();
+    return sewn;
+}
+
+bool Tf2MapDoc::subdivide_displacement(int solid_idx) {
+    if (solid_idx < 0 || solid_idx >= static_cast<int>(doc_.worldSolids().size())) return false;
+    bool any = false;
+    for (auto& f : doc_.worldSolids()[solid_idx].faces) {
+        if (!f.hasDisp) continue;
+        const int power = f.dispInfo.getInt("power");
+        if (power < 2 || power > 4) continue;
+        const int gn = (1 << power) + 1;
+        std::vector<float> dst;
+        if (!readDispRows(f.dispInfo.child("distances"), gn, 1, dst)) continue;
+        std::vector<float> out = dst;
+        for (int r = 1; r < gn - 1; ++r)
+            for (int c = 1; c < gn - 1; ++c) {
+                out[r * gn + c] = (dst[(r - 1) * gn + c] + dst[(r + 1) * gn + c] +
+                                   dst[r * gn + (c - 1)] + dst[r * gn + (c + 1)] +
+                                   dst[r * gn + c] * 2.0f) / 6.0f;
+            }
+        for (auto& ch : f.dispInfo.children) {
+            if (ch.name == "distances") { writeDispRows(ch, gn, 1, out); any = true; break; }
+        }
+    }
+    if (any) doc_.markDirty();
+    return any;
+}
+
+Dictionary Tf2MapDoc::get_face_uv(int solid_idx, int face_idx) const {
+    Dictionary d;
+    d["ok"] = false;
+    if (solid_idx < 0 || solid_idx >= static_cast<int>(doc_.worldSolids().size())) return d;
+    const auto& s = doc_.worldSolids()[solid_idx];
+    if (face_idx < 0 || face_idx >= static_cast<int>(s.faces.size())) return d;
+    const auto& f = s.faces[face_idx];
+    d["ok"] = true;
+    d["material"] = toGodot(f.material);
+    d["u_scale"] = f.uScale;
+    d["v_scale"] = f.vScale;
+    d["u_shift"] = f.uAxis.w;
+    d["v_shift"] = f.vAxis.w;
+    d["rotation"] = f.rotation;
+    d["lightmap_scale"] = f.lightmapScale;
+    d["has_disp"] = f.hasDisp;
+    return d;
+}
+
+bool Tf2MapDoc::set_face_uv(int solid_idx, int face_idx, float u_scale, float v_scale,
+                            float u_shift, float v_shift, float rot_deg, float lightmap_scale) {
+    if (solid_idx < 0 || solid_idx >= static_cast<int>(doc_.worldSolids().size())) return false;
+    auto& s = doc_.worldSolids()[solid_idx];
+    if (face_idx < 0 || face_idx >= static_cast<int>(s.faces.size())) return false;
+    auto& f = s.faces[face_idx];
+    f.uScale = std::clamp(u_scale, 0.02f, 16.0f);
+    f.vScale = std::clamp(v_scale, 0.02f, 16.0f);
+    f.uAxis.w = u_shift;
+    f.vAxis.w = v_shift;
+    if (std::fabs(rot_deg - f.rotation) > 0.01f) {
+        pb::map::faceRotateUV(f, rot_deg - f.rotation);
+    }
+    f.lightmapScale = std::clamp(lightmap_scale, 2.0f, 128.0f);
+    doc_.markDirty();
+    return true;
+}
+
+bool Tf2MapDoc::justify_face_uv(int solid_idx, int face_idx, int mode) {
+    if (solid_idx < 0 || solid_idx >= static_cast<int>(doc_.worldSolids().size())) return false;
+    auto& s = doc_.worldSolids()[solid_idx];
+    if (face_idx < 0 || face_idx >= static_cast<int>(s.faces.size())) return false;
+    pb::map::faceJustifyUV(s.faces[face_idx], 512, 512, mode);
+    doc_.markDirty();
+    return true;
+}
+
+bool Tf2MapDoc::align_face_uv(int solid_idx, int face_idx, bool to_face) {
+    if (solid_idx < 0 || solid_idx >= static_cast<int>(doc_.worldSolids().size())) return false;
+    auto& s = doc_.worldSolids()[solid_idx];
+    if (face_idx < 0 || face_idx >= static_cast<int>(s.faces.size())) return false;
+    if (to_face) pb::map::faceAlignToFace(s.faces[face_idx]);
+    else pb::map::faceAlignWorld(s.faces[face_idx]);
+    doc_.markDirty();
+    return true;
+}
+
+int Tf2MapDoc::replace_material(const String& find_mat, const String& replace_mat) {
+    std::string fm = toStd(find_mat);
+    std::string rm = toStd(replace_mat);
+    std::string fmLow = fm;
+    std::transform(fmLow.begin(), fmLow.end(), fmLow.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    int count = 0;
+    for (auto& s : doc_.worldSolids()) {
+        for (auto& f : s.faces) {
+            std::string cur = f.material;
+            std::transform(cur.begin(), cur.end(), cur.begin(),
+                           [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            if (cur == fmLow) {
+                f.material = rm;
+                ++count;
+            }
+        }
+    }
+    if (count > 0) doc_.markDirty();
+    return count;
+}
+
+bool Tf2MapDoc::set_solid_hidden(int solid_idx, bool hidden) {
+    if (solid_idx < 0 || solid_idx >= static_cast<int>(doc_.worldSolids().size())) return false;
+    doc_.worldSolids()[solid_idx].hidden = hidden;
+    return true;
+}
+
+int Tf2MapDoc::unhide_all() {
+    int n = 0;
+    for (auto& s : doc_.worldSolids()) { if (s.hidden) { s.hidden = false; ++n; } }
+    for (auto& e : doc_.entities()) { if (e.hidden) { e.hidden = false; ++n; } }
+    return n;
+}
+
+bool Tf2MapDoc::set_solid_group(int solid_idx, int group_id) {
+    if (solid_idx < 0 || solid_idx >= static_cast<int>(doc_.worldSolids().size())) return false;
+    doc_.worldSolids()[solid_idx].group = group_id;
+    doc_.markDirty();
+    return true;
+}
+
+Array Tf2MapDoc::check_problems() const {
+    Array out;
+    auto pushProb = [&](const char* sev, const char* code, const std::string& msg,
+                        const Vector3& pos, int sidx, int eidx, const char* fix) {
+        Dictionary d;
+        d["severity"] = String(sev);
+        d["code"] = String(code);
+        d["message"] = toGodot(msg);
+        d["pos"] = pos;
+        d["solid_idx"] = sidx;
+        d["ent_idx"] = eidx;
+        d["fix_kind"] = String(fix);
+        out.push_back(d);
+    };
+
+    if (!is_map_sealed()) {
+        pushProb("ERROR", "UNSEALED", "Map has no sealing TOOLSSKYBOX shell (will leak in vbsp!)",
+                 Vector3(0, 4, 0), -1, -1, "auto_seal");
+    }
+
+    int redSpawns = 0, bluSpawns = 0, lights = 0;
+    std::unordered_map<std::string, int> targetCounts;
+    for (int i = 0; i < static_cast<int>(doc_.entities().size()); ++i) {
+        const auto& e = doc_.entities()[i];
+        if (e.classname == "info_player_teamspawn") {
+            if (e.kv.get("TeamNum") == "3") ++bluSpawns;
+            else ++redSpawns;
+        }
+        if (e.classname == "light" || e.classname == "light_environment" || e.classname == "light_spot")
+            ++lights;
+        const std::string tn = e.targetname();
+        if (!tn.empty()) targetCounts[tn]++;
+    }
+    if (redSpawns == 0) {
+        pushProb("ERROR", "NO_RED_SPAWN", "Missing RED info_player_teamspawn!",
+                 Vector3(-12, 1, 0), -1, -1, "add_red_spawn");
+    }
+    if (bluSpawns == 0) {
+        pushProb("ERROR", "NO_BLU_SPAWN", "Missing BLU info_player_teamspawn!",
+                 Vector3(12, 1, 0), -1, -1, "add_blu_spawn");
+    }
+    if (lights == 0) {
+        pushProb("WARN", "NO_LIGHT", "No light_environment or light entity (map will compile fullbright!)",
+                 Vector3(0, 8, 0), -1, -1, "add_sun");
+    }
+
+    // Check broken I/O targets & invalid solids
+    for (int i = 0; i < static_cast<int>(doc_.entities().size()); ++i) {
+        const auto& e = doc_.entities()[i];
+        for (const auto& c : e.connections) {
+            auto comma = c.second.find(',');
+            std::string tgt = (comma == std::string::npos) ? c.second : c.second.substr(0, comma);
+            if (!tgt.empty() && tgt[0] != '!' && targetCounts.find(tgt) == targetCounts.end()) {
+                pushProb("WARN", "BROKEN_IO",
+                         "Entity #" + std::to_string(i) + " (" + e.classname + ") output '" + c.first +
+                             "' targets missing entity '" + tgt + "'",
+                         toGodotPos(e.origin), -1, i, "");
+            }
+        }
+    }
+    for (int i = 0; i < static_cast<int>(doc_.worldSolids().size()); ++i) {
+        const auto& s = doc_.worldSolids()[i];
+        if (!s.valid || s.faces.size() < 4) {
+            pushProb("ERROR", "INVALID_SOLID",
+                     "Solid #" + std::to_string(i) + " has degenerate geometry (<4 valid faces)",
+                     toGodotPos(s.center()), i, -1, "delete_solid");
+        }
+    }
     return out;
 }
 

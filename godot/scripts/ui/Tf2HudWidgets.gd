@@ -269,23 +269,26 @@ class IsoIconCanvas extends Control:
 
 class RailSlot extends Button:
 	var iso_canvas: IsoIconCanvas
+	var tex_rect: TextureRect
 	var lbl: Label
+	var drag_payload: Dictionary = {}
 
 	func _init(p_piece: String, p_label: String, p_tex: Texture2D, p_active: bool,
-			p_team: int, p_is_tool: bool, p_tkind: String, p_font: Font) -> void:
+			p_team: int, p_is_tool: bool, p_tkind: String, p_font: Font, p_drag: Dictionary = {}) -> void:
 		focus_mode = Control.FOCUS_NONE
-		custom_minimum_size = Vector2(68, 62)
+		custom_minimum_size = Vector2(76, 74)
+		drag_payload = p_drag
 
 		var bd_col := COL_ACC if p_active else (COL_RED if p_team == 1 else (COL_BLU if p_team == 2 else COL_SLOT_BD))
-		var bg_col := COL_SLOT_ACT if p_active else COL_SLOT_BG
+		var bg_col := COL_SLOT_ACT if p_active else (Color(0.28, 0.13, 0.13, 0.95) if p_team == 1 else (Color(0.13, 0.21, 0.29, 0.95) if p_team == 2 else COL_SLOT_BG))
 
 		var sn := StyleBoxFlat.new()
 		sn.bg_color = bg_col
 		sn.border_color = bd_col
 		sn.set_border_width_all(2 if p_active else 1)
 		sn.set_corner_radius_all(8)
-		sn.content_margin_left = 2; sn.content_margin_right = 2
-		sn.content_margin_top = 3; sn.content_margin_bottom = 2
+		sn.content_margin_left = 3; sn.content_margin_right = 3
+		sn.content_margin_top = 4; sn.content_margin_bottom = 3
 		var sh := sn.duplicate()
 		sh.bg_color = COL_SLOT_HOV
 		sh.border_color = COL_ACC
@@ -295,24 +298,30 @@ class RailSlot extends Button:
 
 		var vb := VBoxContainer.new()
 		vb.set_anchors_preset(Control.PRESET_FULL_RECT)
-		vb.add_theme_constant_override("separation", 0)
+		vb.add_theme_constant_override("separation", 1)
 		vb.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		add_child(vb)
 
+		tex_rect = TextureRect.new()
+		tex_rect.custom_minimum_size = Vector2(60, 48)
+		tex_rect.size_flags_vertical = Control.SIZE_EXPAND_FILL
+		tex_rect.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+		tex_rect.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+		tex_rect.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		vb.add_child(tex_rect)
+
+		iso_canvas = IsoIconCanvas.new(p_piece, p_active, p_team, p_is_tool, p_tkind)
+		iso_canvas.custom_minimum_size = Vector2(60, 48)
+		iso_canvas.size_flags_vertical = Control.SIZE_EXPAND_FILL
+		vb.add_child(iso_canvas)
+
 		if p_tex != null:
-			var tr := TextureRect.new()
-			tr.texture = p_tex
-			tr.custom_minimum_size = Vector2(58, 38)
-			tr.size_flags_vertical = Control.SIZE_EXPAND_FILL
-			tr.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
-			tr.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
-			tr.mouse_filter = Control.MOUSE_FILTER_IGNORE
-			vb.add_child(tr)
+			tex_rect.texture = p_tex
+			tex_rect.visible = true
+			iso_canvas.visible = false
 		else:
-			iso_canvas = IsoIconCanvas.new(p_piece, p_active, p_team, p_is_tool, p_tkind)
-			iso_canvas.custom_minimum_size = Vector2(58, 38)
-			iso_canvas.size_flags_vertical = Control.SIZE_EXPAND_FILL
-			vb.add_child(iso_canvas)
+			tex_rect.visible = false
+			iso_canvas.visible = true
 
 		lbl = Label.new()
 		lbl.text = p_label
@@ -323,6 +332,41 @@ class RailSlot extends Button:
 		lbl.add_theme_color_override("font_color", COL_ACC if p_active else COL_TX)
 		lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		vb.add_child(lbl)
+
+	func set_icon_texture(tex: Texture2D) -> void:
+		if tex != null and tex_rect != null:
+			tex_rect.texture = tex
+			tex_rect.visible = true
+			if iso_canvas != null:
+				iso_canvas.visible = false
+
+	func _get_drag_data(_at_position: Vector2) -> Variant:
+		if drag_payload.is_empty():
+			return null
+		var pv := PanelContainer.new()
+		var sb := StyleBoxFlat.new()
+		sb.bg_color = Color(0.11, 0.09, 0.08, 0.90)
+		sb.border_color = COL_CYAN
+		sb.set_border_width_all(2)
+		sb.set_corner_radius_all(8)
+		pv.add_theme_stylebox_override("panel", sb)
+		var vb := VBoxContainer.new()
+		pv.add_child(vb)
+		if tex_rect != null and tex_rect.texture != null:
+			var tr := TextureRect.new()
+			tr.texture = tex_rect.texture
+			tr.custom_minimum_size = Vector2(72, 72)
+			tr.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+			tr.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+			vb.add_child(tr)
+		var dl := Label.new()
+		dl.text = "Drop: " + lbl.text
+		dl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		dl.add_theme_font_size_override("font_size", 11)
+		dl.add_theme_color_override("font_color", COL_CYAN)
+		vb.add_child(dl)
+		set_drag_preview(pv)
+		return drag_payload
 
 ## Authentic TF2 "Q" Voice-Menu Radial Pie Wheel!
 class RadialPieWheel extends Control:
@@ -411,7 +455,17 @@ class ViewportOverlay extends Control:
 	func _init(p_owner: Node3D) -> void:
 		owner_ed = p_owner
 		set_anchors_preset(Control.PRESET_FULL_RECT)
-		mouse_filter = Control.MOUSE_FILTER_IGNORE
+		mouse_filter = Control.MOUSE_FILTER_PASS
+
+	func _can_drop_data(at_position: Vector2, data: Variant) -> bool:
+		if data is Dictionary and data.has("kind") and owner_ed != null:
+			owner_ed.on_viewport_drag_hover(at_position, data)
+			return true
+		return false
+
+	func _drop_data(at_position: Vector2, data: Variant) -> void:
+		if data is Dictionary and data.has("kind") and owner_ed != null:
+			owner_ed.on_viewport_drop(at_position, data)
 
 	func _draw() -> void:
 		if owner_ed == null:

@@ -205,29 +205,86 @@ WorldMesh buildWorldMesh(const BspFile& bsp, const MeshBuildOptions& opts) {
     bool lightingHdr = false;
     const uint8_t* lighting = bsp.lighting(lightingSize, lightingHdr);
 
-    // ---- entity brush-model offsets -------------------------------------
+    // ---- entity brush-model offsets + interactive func_door separation ----
     struct FaceRange {
         int first, count;
         glm::vec3 offset;
+        int doorIdx = -1;
     };
     std::vector<FaceRange> ranges;
     if (!models.empty())
-        ranges.push_back({models[0].firstface, models[0].numfaces, glm::vec3(0.0f)});
+        ranges.push_back({models[0].firstface, models[0].numfaces, glm::vec3(0.0f), -1});
     for (const auto& ent : bsp.entities()) {
         auto it = ent.find("model");
         if (it == ent.end() || it->second.empty() || it->second[0] != '*') continue;
         const int idx = std::atoi(it->second.c_str() + 1);
         if (idx <= 0 || idx >= static_cast<int>(models.size())) continue;
+
+        std::string cls;
+        if (auto ci = ent.find("classname"); ci != ent.end()) cls = ci->second;
+        // Skip invisible trigger/clip/volume brush entities from world geometry & collision!
+        if (!opts.includeTriggers &&
+            (cls.rfind("trigger_", 0) == 0 || cls == "func_respawnroom" ||
+             cls == "func_capturezone" || cls == "func_nobuild" ||
+             cls == "func_regenerate" || cls == "func_respawnroomvisualizer" ||
+             cls.rfind("func_areaportal", 0) == 0 || cls == "func_occluder" ||
+             cls == "func_nav_blocker" || cls == "func_nav_avoid" ||
+             cls == "func_nav_prefer" || cls == "func_viscluster")) {
+            continue;
+        }
+        // Skip explicitly StartDisabled brush blockers (e.g. stage gates that start hidden/disabled)
+        if (auto sd = ent.find("StartDisabled"); sd != ent.end() && sd->second == "1" && cls == "func_brush") {
+            continue;
+        }
+
         glm::vec3 origin(0.0f);
-        auto oit = ent.find("origin");
-        if (oit != ent.end()) origin = parseVec3(oit->second);
-        ranges.push_back({models[idx].firstface, models[idx].numfaces, origin});
+        if (auto oit = ent.find("origin"); oit != ent.end()) origin = parseVec3(oit->second);
+
+        if (cls == "func_door") {
+            InteractiveDoor door;
+            if (auto ti = ent.find("targetname"); ti != ent.end()) door.targetname = ti->second;
+            door.origin = origin;
+            glm::vec3 mdir(0.0f, 0.0f, 1.0f);
+            if (auto mi = ent.find("movedir"); mi != ent.end()) {
+                const glm::vec3 pyr = parseVec3(mi->second);
+                const float pr = glm::radians(pyr.x);
+                const float yr = glm::radians(pyr.y);
+                // Source movedir: pitch=-90 is UP (+Z), pitch=90 is DOWN (-Z), yaw=around +Z
+                mdir = glm::vec3(std::cos(pr) * std::cos(yr),
+                                 std::cos(pr) * std::sin(yr),
+                                 -std::sin(pr));
+                if (glm::length(mdir) > 0.01f) mdir = glm::normalize(mdir);
+                else mdir = glm::vec3(0.0f, 0.0f, 1.0f);
+            }
+            door.movedir = mdir;
+            if (auto si = ent.find("speed"); si != ent.end()) {
+                float sp = static_cast<float>(std::atof(si->second.c_str()));
+                if (sp > 10.0f) door.speed = sp;
+            }
+            float lip = 8.0f;
+            if (auto li = ent.find("lip"); li != ent.end())
+                lip = static_cast<float>(std::atof(li->second.c_str()));
+            const glm::vec3 dmin = toVec(models[idx].mins) + origin;
+            const glm::vec3 dmax = toVec(models[idx].maxs) + origin;
+            door.boundsMin = dmin;
+            door.boundsMax = dmax;
+            const glm::vec3 dsz = dmax - dmin;
+            const float proj = std::fabs(mdir.x) * dsz.x + std::fabs(mdir.y) * dsz.y + std::fabs(mdir.z) * dsz.z;
+            door.travel = std::max(32.0f, proj - lip);
+
+            const int dIdx = static_cast<int>(mesh.doors.size());
+            mesh.doors.push_back(std::move(door));
+            ranges.push_back({models[idx].firstface, models[idx].numfaces, origin, dIdx});
+        } else {
+            ranges.push_back({models[idx].firstface, models[idx].numfaces, origin, -1});
+        }
     }
 
     // ---- pass 1: choose drawable faces + pack lightmaps ----------------
     struct EmitFace {
         int faceIndex;
         glm::vec3 offset;
+        int doorIdx = -1;
         int lmX = 0, lmY = 0, lmW = 0, lmH = 0;
         bool lit = false;
     };
@@ -259,6 +316,7 @@ WorldMesh buildWorldMesh(const BspFile& bsp, const MeshBuildOptions& opts) {
             EmitFace ef;
             ef.faceIndex = f;
             ef.offset = range.offset;
+            ef.doorIdx = range.doorIdx;
 
             const int lw = face.lightmapSize[0] + 1;
             const int lh = face.lightmapSize[1] + 1;
@@ -310,9 +368,12 @@ WorldMesh buildWorldMesh(const BspFile& bsp, const MeshBuildOptions& opts) {
 
     // ---- pass 2: emit geometry, grouped by material -----------------
     std::unordered_map<std::string, std::vector<uint32_t>> opaqueIdx, transIdx;
-    auto addPolyVertex = [&](const Face_t& face, const TexInfo_t& ti,
-                             const glm::vec3& p, const glm::vec3& n, const EmitFace& ef,
-                             float texW, float texH) {
+    std::vector<std::unordered_map<std::string, std::vector<uint32_t>>> doorOpaque(mesh.doors.size());
+    std::vector<std::unordered_map<std::string, std::vector<uint32_t>>> doorTrans(mesh.doors.size());
+
+    auto addPolyVertexTo = [&](std::vector<WorldVertex>& dstVerts, const Face_t& face,
+                               const TexInfo_t& ti, const glm::vec3& p, const glm::vec3& n,
+                               const EmitFace& ef, float texW, float texH) {
         WorldVertex v;
         v.pos = p;
         v.normal = n;
@@ -337,9 +398,14 @@ WorldMesh buildWorldMesh(const BspFile& bsp, const MeshBuildOptions& opts) {
             v.uv = {whiteU, whiteV};
             v.tint = glm::vec3(s);
         }
-        const uint32_t index = static_cast<uint32_t>(mesh.vertices.size());
-        mesh.vertices.push_back(v);
+        const uint32_t index = static_cast<uint32_t>(dstVerts.size());
+        dstVerts.push_back(v);
         return index;
+    };
+    auto addPolyVertex = [&](const Face_t& face, const TexInfo_t& ti,
+                             const glm::vec3& p, const glm::vec3& n, const EmitFace& ef,
+                             float texW, float texH) {
+        return addPolyVertexTo(mesh.vertices, face, ti, p, n, ef, texW, texH);
     };
 
     std::unordered_map<uint64_t, uint8_t> wireSeen;
@@ -393,7 +459,10 @@ WorldMesh buildWorldMesh(const BspFile& bsp, const MeshBuildOptions& opts) {
                                  (static_cast<uint32_t>(ti.flags) & SURF_WARP) ||
                                  mat.rfind("glass/", 0) == 0 ||
                                  mat.find("water") != std::string::npos;
-        auto& bucket = translucent ? transIdx[mat] : opaqueIdx[mat];
+        auto& dstVerts = (ef.doorIdx >= 0) ? mesh.doors[ef.doorIdx].vertices : mesh.vertices;
+        auto& bucket = (ef.doorIdx >= 0)
+            ? (translucent ? doorTrans[ef.doorIdx][mat] : doorOpaque[ef.doorIdx][mat])
+            : (translucent ? transIdx[mat] : opaqueIdx[mat]);
 
         int tw = 0, th = 0;
         if (!bsp.texdataDims(ti.texdata, tw, th)) {
@@ -470,8 +539,8 @@ WorldMesh buildWorldMesh(const BspFile& bsp, const MeshBuildOptions& opts) {
         std::vector<uint32_t> ring;
         ring.reserve(poly.size());
         for (const glm::vec3& p : poly) {
-            ring.push_back(addPolyVertex(face, ti, p, n, ef, static_cast<float>(tw),
-                                         static_cast<float>(th)));
+            ring.push_back(addPolyVertexTo(dstVerts, face, ti, p, n, ef, static_cast<float>(tw),
+                                           static_cast<float>(th)));
             bmin = glm::min(bmin, p);
             bmax = glm::max(bmax, p);
         }
@@ -502,6 +571,25 @@ WorldMesh buildWorldMesh(const BspFile& bsp, const MeshBuildOptions& opts) {
     flush(opaqueIdx, false);
     flush(transIdx, true);
 
+    // Flatten interactive func_door batches
+    for (size_t di = 0; di < mesh.doors.size(); ++di) {
+        auto& dr = mesh.doors[di];
+        auto flushDoor = [&](std::unordered_map<std::string, std::vector<uint32_t>>& src, bool trans) {
+            for (auto& [mat, idx] : src) {
+                if (idx.empty()) continue;
+                DrawBatch b;
+                b.material = mat;
+                b.translucent = trans;
+                b.firstIndex = static_cast<uint32_t>(dr.indices.size());
+                b.indexCount = static_cast<uint32_t>(idx.size());
+                dr.indices.insert(dr.indices.end(), idx.begin(), idx.end());
+                dr.batches.push_back(std::move(b));
+            }
+        };
+        flushDoor(doorOpaque[di], false);
+        flushDoor(doorTrans[di], true);
+    }
+
     if (mesh.vertices.empty()) {
         bmin = glm::vec3(-512.0f);
         bmax = glm::vec3(512.0f);
@@ -509,20 +597,119 @@ WorldMesh buildWorldMesh(const BspFile& bsp, const MeshBuildOptions& opts) {
     mesh.boundsMin = bmin;
     mesh.boundsMax = bmax;
 
-    // ---- entities + props ------------------------------------------
+    // ---- entities + static props + dynamic/gameplay entity models ----
+    // Map targetname -> origin (and func_tracktrain start node) so parented props like
+    // pl_upward's Payload Bomb Cart resolve to their exact live track position!
+    std::unordered_map<std::string, glm::vec3> targetOrigins;
+    for (const auto& ent : bsp.entities()) {
+        auto tit = ent.find("targetname");
+        auto oit = ent.find("origin");
+        if (tit != ent.end() && !tit->second.empty() && oit != ent.end()) {
+            targetOrigins[tit->second] = parseVec3(oit->second);
+        }
+    }
+    // Resolve func_tracktrain initial position to its first path_track target when available
+    for (const auto& ent : bsp.entities()) {
+        auto cit = ent.find("classname");
+        auto tit = ent.find("targetname");
+        auto tgt = ent.find("target");
+        if (cit != ent.end() && cit->second == "func_tracktrain" &&
+            tit != ent.end() && !tit->second.empty() &&
+            tgt != ent.end() && !tgt->second.empty()) {
+            if (auto pt = targetOrigins.find(tgt->second); pt != targetOrigins.end()) {
+                targetOrigins[tit->second] = pt->second;
+            }
+        }
+    }
+
+    static const std::unordered_map<std::string, std::string> kItemModels = {
+        {"item_healthkit_small",  "models/items/medkit_small.mdl"},
+        {"item_healthkit_medium", "models/items/medkit_medium.mdl"},
+        {"item_healthkit_full",   "models/items/medkit_large.mdl"},
+        {"item_ammopack_small",   "models/items/ammopack_small.mdl"},
+        {"item_ammopack_medium",  "models/items/ammopack_medium.mdl"},
+        {"item_ammopack_full",    "models/items/ammopack_large.mdl"},
+        {"item_teamflag",         "models/flag/briefcase.mdl"},
+    };
+
+    size_t dynPropsAdded = 0;
     for (const auto& ent : bsp.entities()) {
         auto cit = ent.find("classname");
         if (cit == ent.end() || cit->second == "worldspawn") continue;
+        const std::string& cls = cit->second;
         auto oit = ent.find("origin");
-        if (oit == ent.end()) continue;
-        PointEntity pe;
-        pe.classname = cit->second;
-        auto tit = ent.find("targetname");
-        pe.targetname = tit != ent.end() ? tit->second : std::string();
-        pe.pos = parseVec3(oit->second);
-        mesh.pointEntities.push_back(std::move(pe));
+        glm::vec3 pos(0.0f);
+        bool hasPos = false;
+        if (oit != ent.end()) {
+            pos = parseVec3(oit->second);
+            hasPos = true;
+            PointEntity pe;
+            pe.classname = cls;
+            auto tit = ent.find("targetname");
+            pe.targetname = tit != ent.end() ? tit->second : std::string();
+            pe.pos = pos;
+            mesh.pointEntities.push_back(std::move(pe));
+        }
+
+        // Skip explicitly invisible/disabled entities (rendermode=10 EF_NODRAW or StartDisabled=1)
+        if (auto rm = ent.find("rendermode"); rm != ent.end() && rm->second == "10") continue;
+        if (auto sd = ent.find("StartDisabled"); sd != ent.end() && sd->second == "1") continue;
+
+        std::string mdlPath;
+        if (cls == "prop_dynamic" || cls == "prop_dynamic_override" ||
+            cls == "prop_physics" || cls == "prop_physics_multiplayer" ||
+            cls == "prop_physics_override" || cls == "prop_ragdoll") {
+            if (auto mi = ent.find("model"); mi != ent.end() && !mi->second.empty() && mi->second[0] != '*') {
+                mdlPath = mi->second;
+            }
+        } else if (auto itm = kItemModels.find(cls); itm != kItemModels.end()) {
+            mdlPath = itm->second;
+            if (auto pm = ent.find("powerup_model"); pm != ent.end() && !pm->second.empty()) {
+                mdlPath = pm->second;
+            }
+        } else if (cls == "team_control_point") {
+            // Official TF2 control points place their cap base prop nearby and project hologram here
+            if (auto m0 = ent.find("team_model_0"); m0 != ent.end() && !m0->second.empty())
+                mdlPath = m0->second;
+            else if (auto m2 = ent.find("team_model_2"); m2 != ent.end() && !m2->second.empty())
+                mdlPath = m2->second;
+            else
+                mdlPath = "models/effects/cappoint_hologram.mdl";
+        }
+
+        if (!mdlPath.empty()) {
+            // Normalize model slashes & check lowercase .mdl suffix
+            std::string normMdl = mdlPath;
+            std::replace(normMdl.begin(), normMdl.end(), '\\', '/');
+            std::string lowMdl = normMdl;
+            std::transform(lowMdl.begin(), lowMdl.end(), lowMdl.begin(),
+                           [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            if (lowMdl.size() > 4 && lowMdl.substr(lowMdl.size() - 4) == ".mdl") {
+                if (!hasPos) {
+                    if (auto pit = ent.find("parentname"); pit != ent.end()) {
+                        if (auto po = targetOrigins.find(pit->second); po != targetOrigins.end()) {
+                            pos = po->second;
+                            hasPos = true;
+                        }
+                    }
+                }
+                if (hasPos) {
+                    PropInstance pi;
+                    pi.model = normMdl;
+                    pi.pos = pos;
+                    if (auto ai = ent.find("angles"); ai != ent.end()) pi.anglesPYR = parseVec3(ai->second);
+                    if (auto sc = ent.find("modelscale"); sc != ent.end()) {
+                        float v = static_cast<float>(std::atof(sc->second.c_str()));
+                        if (v > 0.05f && v < 25.0f) pi.scale = v;
+                    }
+                    mesh.props.push_back(std::move(pi));
+                    ++dynPropsAdded;
+                }
+            }
+        }
     }
     parseStaticProps(bsp, mesh);
+    PB_INFO("  dynamic/gameplay props: %zu, interactive doors: %zu", dynPropsAdded, mesh.doors.size());
 
     // Representative spawn point for the default 3D camera.
     for (const char* cls : {"info_player_teamspawn", "info_player_start",

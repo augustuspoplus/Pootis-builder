@@ -27,7 +27,7 @@ func get_material_info(mat_path: String) -> Dictionary:
 
 	var res := {
 		"ok": false, "tex": null, "tex2": null, "has_blend": false,
-		"alpha_test": false, "translucent": false, "no_cull": false,
+		"alpha_test": false, "translucent": false, "additive": false, "no_cull": false,
 		"self_illum": false, "has_alpha": false,
 	}
 	var d: Dictionary = core.read_material_rgba(mat_path)
@@ -41,6 +41,7 @@ func get_material_info(mat_path: String) -> Dictionary:
 		res["has_alpha"] = bool(d.get("has_alpha", false))
 		res["alpha_test"] = bool(d.get("alpha_test", false))
 		res["translucent"] = bool(d.get("translucent", false))
+		res["additive"] = bool(d.get("additive", false))
 		res["no_cull"] = bool(d.get("no_cull", false))
 		res["self_illum"] = bool(d.get("self_illum", false))
 		if d.get("has_blend", false):
@@ -72,7 +73,13 @@ func get_material(mat_path: String, triplanar := false, is_prop := false) -> Sta
 		var tex: ImageTexture = info["tex"]
 		mat.albedo_texture = tex
 		mat.texture_filter = BaseMaterial3D.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS_ANISOTROPIC
-		if info["alpha_test"]:
+		if info["additive"]:
+			# Authentic Valve $additive hologram / glow / light-beam material (e.g. cappoint_hologram.mdl!)
+			mat.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
+			mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+			mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+			mat.depth_draw_mode = BaseMaterial3D.DEPTH_DRAW_DISABLED
+		elif info["alpha_test"]:
 			mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA_SCISSOR
 			mat.alpha_scissor_threshold = 0.42
 		elif info["translucent"]:

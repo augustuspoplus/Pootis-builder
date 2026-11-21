@@ -39,6 +39,21 @@ struct PointEntity {
     glm::vec3 pos{0.0f};
 };
 
+// Interactive sliding door brush sub-model (*N) separated from static world geometry
+// so F5 playtest can smoothly slide spawn doors & gates open when approached!
+struct InteractiveDoor {
+    std::string targetname;
+    glm::vec3 origin{0.0f};
+    glm::vec3 movedir{0.0f, 0.0f, 1.0f}; // Source Z-up unit slide direction
+    float travel = 112.0f;               // Hammer units to slide
+    float speed = 320.0f;                // Hammer units / sec
+    glm::vec3 boundsMin{0.0f};
+    glm::vec3 boundsMax{0.0f};
+    std::vector<WorldVertex> vertices;
+    std::vector<uint32_t> indices;
+    std::vector<DrawBatch> batches;
+};
+
 // CPU-side result of turning a BSP into something drawable.
 struct WorldMesh {
     std::vector<WorldVertex> vertices;
@@ -55,6 +70,7 @@ struct WorldMesh {
 
     std::vector<PropInstance> props;
     std::vector<PointEntity> pointEntities;
+    std::vector<InteractiveDoor> doors;
 
     glm::vec3 boundsMin{0.0f};
     glm::vec3 boundsMax{0.0f};

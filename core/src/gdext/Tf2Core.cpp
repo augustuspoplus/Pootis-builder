@@ -67,6 +67,18 @@ void Tf2Core::_bind_methods() {
                          &Tf2Core::list_materials, DEFVAL(String()), DEFVAL(256));
     ClassDB::bind_method(D_METHOD("list_models", "prefix", "limit"),
                          &Tf2Core::list_models, DEFVAL(String()), DEFVAL(256));
+    ClassDB::bind_method(D_METHOD("search_materials", "query", "limit"),
+                         &Tf2Core::search_materials, DEFVAL(String()), DEFVAL(160));
+    ClassDB::bind_method(D_METHOD("search_models", "query", "limit"),
+                         &Tf2Core::search_models, DEFVAL(String()), DEFVAL(160));
+    ClassDB::bind_method(D_METHOD("list_material_folders"), &Tf2Core::list_material_folders);
+    ClassDB::bind_method(D_METHOD("list_model_folders"), &Tf2Core::list_model_folders);
+    ClassDB::bind_method(D_METHOD("list_sounds", "query", "limit"),
+                         &Tf2Core::list_sounds, DEFVAL(String()), DEFVAL(160));
+    ClassDB::bind_method(D_METHOD("list_fgd_point_classes", "filter"),
+                         &Tf2Core::list_fgd_point_classes, DEFVAL(String()));
+    ClassDB::bind_method(D_METHOD("list_fgd_solid_classes", "filter"),
+                         &Tf2Core::list_fgd_solid_classes, DEFVAL(String()));
     ClassDB::bind_method(D_METHOD("get_fgd_class_info", "classname"), &Tf2Core::get_fgd_class_info);
     ClassDB::bind_method(D_METHOD("read_material_rgba", "material_path"), &Tf2Core::read_material_rgba);
     ClassDB::bind_method(D_METHOD("read_model_data", "mdl_path"), &Tf2Core::read_model_data);
@@ -88,7 +100,7 @@ Dictionary Tf2Core::mount_tf2(const String& repo_root) {
     fs_.mountDefaults(root);
     mounted_ = fs_.ready();
 
-    // Load TF2 FGD (prefer TF2's full bin/tf.fgd which resolves @include base.fgd/halflife2.fgd -> 446 classes!)
+    // Load TF2 FGD (base.fgd + tf.fgd -> 446 classes), then overlay ABS tf-abs.fgd on top!
     std::vector<std::string> fgdCandidates;
     if (!tf2_dir_.empty()) {
         fgdCandidates.push_back(tf2_dir_ + "/bin/tf.fgd");
@@ -100,6 +112,13 @@ Dictionary Tf2Core::mount_tf2(const String& repo_root) {
     for (const auto& p : fgdCandidates) {
         if (pb::fileExists(p) && fgd_.load(p)) {
             loadedFgd = p;
+            break;
+        }
+    }
+    for (const std::string& absCand : {root + "/assets/mapping_resource_pack/tf-abs.fgd",
+                                       root + "/../assets/mapping_resource_pack/tf-abs.fgd"}) {
+        if (absCand != loadedFgd && pb::fileExists(absCand)) {
+            fgd_.merge(absCand);
             break;
         }
     }
@@ -174,6 +193,133 @@ PackedStringArray Tf2Core::list_models(const String& prefix, int limit) const {
     return out;
 }
 
+static std::string toLowerCopy(std::string s) {
+    std::transform(s.begin(), s.end(), s.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return s;
+}
+
+PackedStringArray Tf2Core::search_materials(const String& query, int limit) const {
+    PackedStringArray out;
+    if (!mounted_) return out;
+    const std::string q = toLowerCopy(toStd(query));
+    const auto files = fs_.listFiles("materials/", ".vmt");
+    const int cap = (limit > 0) ? limit : 160;
+    for (const auto& f : files) {
+        std::string s = f;
+        if (s.rfind("materials/", 0) == 0) s = s.substr(10);
+        if (s.size() > 4 && s.substr(s.size() - 4) == ".vmt") s.resize(s.size() - 4);
+        const std::string low = toLowerCopy(s);
+        // Skip internal model/vgui/hud/particle/cable textures unless explicitly queried
+        if (q.empty() && (low.rfind("models/", 0) == 0 || low.rfind("vgui/", 0) == 0 ||
+                          low.rfind("hud/", 0) == 0 || low.rfind("effects/", 0) == 0 ||
+                          low.rfind("particle/", 0) == 0 || low.rfind("cable/", 0) == 0 ||
+                          low.rfind("sprites/", 0) == 0 || low.rfind("console/", 0) == 0))
+            continue;
+        if (q.empty() || low.find(q) != std::string::npos) {
+            out.push_back(toGodot(s));
+            if (out.size() >= cap) break;
+        }
+    }
+    return out;
+}
+
+PackedStringArray Tf2Core::search_models(const String& query, int limit) const {
+    PackedStringArray out;
+    if (!mounted_) return out;
+    const std::string q = toLowerCopy(toStd(query));
+    const auto files = fs_.listFiles("models/", ".mdl");
+    const int cap = (limit > 0) ? limit : 160;
+    for (const auto& f : files) {
+        const std::string low = toLowerCopy(f);
+        // Default browsing focuses on map props/items/buildables/foliage (hides cosmetic hats/weapons unless searched)
+        if (q.empty() && low.rfind("models/props_", 0) != 0 && low.rfind("models/items/", 0) != 0 &&
+            low.rfind("models/flag/", 0) != 0 && low.rfind("models/buildables/", 0) != 0)
+            continue;
+        if (q.empty() || low.find(q) != std::string::npos) {
+            out.push_back(toGodot(f));
+            if (out.size() >= cap) break;
+        }
+    }
+    return out;
+}
+
+PackedStringArray Tf2Core::list_material_folders() const {
+    PackedStringArray out;
+    if (!mounted_) return out;
+    std::vector<std::string> folders;
+    std::unordered_map<std::string, int> seen;
+    for (const auto& f : fs_.listFiles("materials/", ".vmt")) {
+        if (f.rfind("materials/", 0) != 0) continue;
+        std::string rest = f.substr(10);
+        auto slash = rest.find('/');
+        if (slash == std::string::npos) continue;
+        std::string top = toLowerCopy(rest.substr(0, slash));
+        if (top == "models" || top == "vgui" || top == "hud" || top == "effects" ||
+            top == "particle" || top == "sprites" || top == "console" || top == "cable")
+            continue;
+        if (seen[top]++ == 0) folders.push_back(top);
+    }
+    std::sort(folders.begin(), folders.end());
+    for (const auto& d : folders) out.push_back(toGodot(d));
+    return out;
+}
+
+PackedStringArray Tf2Core::list_model_folders() const {
+    PackedStringArray out;
+    if (!mounted_) return out;
+    std::vector<std::string> folders;
+    std::unordered_map<std::string, int> seen;
+    for (const auto& f : fs_.listFiles("models/", ".mdl")) {
+        if (f.rfind("models/", 0) != 0) continue;
+        std::string rest = f.substr(7);
+        auto slash = rest.find('/');
+        if (slash == std::string::npos) continue;
+        std::string top = toLowerCopy(rest.substr(0, slash));
+        if (seen[top]++ == 0) folders.push_back(top);
+    }
+    std::sort(folders.begin(), folders.end());
+    for (const auto& d : folders) out.push_back(toGodot(d));
+    return out;
+}
+
+PackedStringArray Tf2Core::list_sounds(const String& query, int limit) const {
+    PackedStringArray out;
+    if (!mounted_) return out;
+    const std::string q = toLowerCopy(toStd(query));
+    const int cap = (limit > 0) ? limit : 160;
+    for (const char* ext : {".wav", ".mp3"}) {
+        for (const auto& f : fs_.listFiles("sound/", ext)) {
+            const std::string low = toLowerCopy(f);
+            if (q.empty() || low.find(q) != std::string::npos) {
+                out.push_back(toGodot(f));
+                if (out.size() >= cap) return out;
+            }
+        }
+    }
+    return out;
+}
+
+PackedStringArray Tf2Core::list_fgd_point_classes(const String& filter) const {
+    PackedStringArray out;
+    const std::string q = toLowerCopy(toStd(filter));
+    for (const auto& c : fgd_.pointClasses()) {
+        if (q.empty() || toLowerCopy(c).find(q) != std::string::npos)
+            out.push_back(toGodot(c));
+    }
+    return out;
+}
+
+PackedStringArray Tf2Core::list_fgd_solid_classes(const String& filter) const {
+    PackedStringArray out;
+    const std::string q = toLowerCopy(toStd(filter));
+    for (const auto& c : fgd_.solidClasses()) {
+        if (q.empty() || toLowerCopy(c).find(q) != std::string::npos)
+            out.push_back(toGodot(c));
+    }
+    return out;
+}
+
 Dictionary Tf2Core::get_fgd_class_info(const String& classname) const {
     Dictionary out;
     const pb::fgd::EntityClass* ec = fgd_.flattened(toStd(classname));
@@ -187,6 +333,7 @@ Dictionary Tf2Core::get_fgd_class_info(const String& classname) const {
     out["is_point"] = ec->isPoint();
     out["is_solid"] = ec->isSolid();
     out["studio_model"] = toGodot(ec->studioModel);
+    out["icon_sprite"] = toGodot(ec->iconSprite);
     out["has_color"] = ec->hasColor;
     out["color"] = Color(ec->color.r, ec->color.g, ec->color.b, 1.0f);
     out["has_size"] = ec->hasSize;
@@ -195,6 +342,51 @@ Dictionary Tf2Core::get_fgd_class_info(const String& classname) const {
     out["var_count"] = static_cast<int64_t>(ec->vars.size());
     out["input_count"] = static_cast<int64_t>(ec->inputs.size());
     out["output_count"] = static_cast<int64_t>(ec->outputs.size());
+
+    Array varsArr;
+    for (const auto& v : ec->vars) {
+        Dictionary vd;
+        vd["key"] = toGodot(v.key);
+        vd["type"] = toGodot(pb::fgd::varTypeName(v.type));
+        vd["display_name"] = toGodot(v.displayName.empty() ? v.key : v.displayName);
+        vd["default"] = toGodot(v.defaultValue);
+        vd["help"] = toGodot(v.help);
+        if (!v.choices.empty()) {
+            Array chArr;
+            for (const auto& ch : v.choices) {
+                Dictionary cd;
+                cd["value"] = toGodot(ch.value);
+                cd["label"] = toGodot(ch.label);
+                chArr.push_back(cd);
+            }
+            vd["choices"] = chArr;
+        }
+        if (!v.flags.empty()) {
+            Array flArr;
+            for (const auto& fl : v.flags) {
+                Dictionary fd;
+                fd["bit"] = fl.bit;
+                fd["label"] = toGodot(fl.label);
+                fd["default_on"] = fl.defOn;
+                flArr.push_back(fd);
+            }
+            vd["flags"] = flArr;
+        }
+        varsArr.push_back(vd);
+    }
+    out["vars"] = varsArr;
+
+    Array insArr, outsArr;
+    for (const auto& io : ec->inputs) {
+        Dictionary d; d["name"] = toGodot(io.name); d["type"] = toGodot(io.type); d["help"] = toGodot(io.help);
+        insArr.push_back(d);
+    }
+    for (const auto& io : ec->outputs) {
+        Dictionary d; d["name"] = toGodot(io.name); d["type"] = toGodot(io.type); d["help"] = toGodot(io.help);
+        outsArr.push_back(d);
+    }
+    out["inputs"] = insArr;
+    out["outputs"] = outsArr;
     return out;
 }
 
@@ -219,6 +411,7 @@ Dictionary Tf2Core::read_material_rgba(const String& material_path) const {
     out["has_alpha"] = img.hasAlpha;
     out["alpha_test"] = rm.alphaTest;
     out["translucent"] = rm.translucent;
+    out["additive"] = rm.additive;
     out["no_cull"] = rm.noCull;
     out["self_illum"] = rm.selfIllum;
     out["base_texture"] = toGodot(tex);
@@ -647,6 +840,75 @@ Dictionary Tf2Core::load_bsp_data(const String& bsp_path) {
     const Vector3 p0 = toGodotPos(mesh.playBoundsMin);
     const Vector3 p1 = toGodotPos(mesh.playBoundsMax);
 
+    // Export interactive func_door brush sub-models so F5 playtest opens spawn doors smoothly!
+    Array doorsArr;
+    for (const auto& dr : mesh.doors) {
+        if (dr.vertices.empty() || dr.indices.empty()) continue;
+        const Vector3 da = toGodotPos(dr.boundsMin);
+        const Vector3 db = toGodotPos(dr.boundsMax);
+        const Vector3 dmin(std::min(da.x, db.x), std::min(da.y, db.y), std::min(da.z, db.z));
+        const Vector3 dmax(std::max(da.x, db.x), std::max(da.y, db.y), std::max(da.z, db.z));
+        const Vector3 dctr = (dmin + dmax) * 0.5f;
+
+        Array dSurfs;
+        PackedVector3Array dCol;
+        for (const auto& b : dr.batches) {
+            if (b.indexCount < 3 || b.firstIndex + b.indexCount > dr.indices.size()) continue;
+            if (b.material.rfind("tools/", 0) == 0) continue;
+            PackedVector3Array verts, norms;
+            PackedVector2Array uvs, uv2s;
+            PackedColorArray colors;
+            PackedInt32Array inds;
+            std::unordered_map<uint32_t, int32_t> remap;
+            auto addV = [&](uint32_t si) -> int32_t {
+                auto it = remap.find(si);
+                if (it != remap.end()) return it->second;
+                const int32_t di = static_cast<int32_t>(verts.size());
+                const auto& v = dr.vertices[si];
+                // Local to door center so moving the Godot Node3D slides mesh & collision cleanly!
+                verts.push_back(toGodotPos(v.pos) - dctr);
+                norms.push_back(toGodotNrm(v.normal));
+                uvs.push_back(Vector2(v.texUv.x, v.texUv.y));
+                uv2s.push_back(Vector2(v.uv.x, v.uv.y));
+                colors.push_back(Color(v.tint.r, v.tint.g, v.tint.b, v.blend));
+                remap.emplace(si, di);
+                return di;
+            };
+            for (uint32_t k = 0; k + 2 < b.indexCount; k += 3) {
+                const int32_t ia = addV(dr.indices[b.firstIndex + k + 0]);
+                const int32_t ib = addV(dr.indices[b.firstIndex + k + 1]);
+                const int32_t ic = addV(dr.indices[b.firstIndex + k + 2]);
+                inds.push_back(ia); inds.push_back(ic); inds.push_back(ib);
+                if (!b.translucent) {
+                    dCol.push_back(verts[ia]); dCol.push_back(verts[ic]); dCol.push_back(verts[ib]);
+                }
+            }
+            if (inds.is_empty()) continue;
+            Dictionary sd;
+            sd["material"] = toGodot(b.material);
+            sd["translucent"] = b.translucent;
+            sd["vertices"] = verts;
+            sd["normals"] = norms;
+            sd["uvs"] = uvs;
+            sd["uv2s"] = uv2s;
+            sd["colors"] = colors;
+            sd["indices"] = inds;
+            dSurfs.push_back(sd);
+        }
+        if (dSurfs.is_empty()) continue;
+        Dictionary dd;
+        dd["targetname"] = toGodot(dr.targetname);
+        dd["center"] = dctr;
+        dd["bounds_min"] = dmin;
+        dd["bounds_max"] = dmax;
+        dd["movedir"] = toGodotNrm(dr.movedir).normalized();
+        dd["travel_m"] = dr.travel * kInvUpm;
+        dd["speed_m"] = dr.speed * kInvUpm;
+        dd["surfaces"] = dSurfs;
+        dd["collision_faces"] = dCol;
+        doorsArr.push_back(dd);
+    }
+
     out["ok"] = true;
     out["name"] = toGodot(bsp.name());
     out["path"] = toGodot(path);
@@ -657,6 +919,7 @@ Dictionary Tf2Core::load_bsp_data(const String& bsp_path) {
     out["surface_count"] = surfaces.size();
     out["prop_count"] = static_cast<int64_t>(mesh.props.size());
     out["unique_prop_models"] = propGroups.size();
+    out["door_count"] = doorsArr.size();
     out["entity_count"] = entities.size();
     out["bounds_min"] = Vector3(std::min(b0.x, b1.x), std::min(b0.y, b1.y), std::min(b0.z, b1.z));
     out["bounds_max"] = Vector3(std::max(b0.x, b1.x), std::max(b0.y, b1.y), std::max(b0.z, b1.z));
@@ -671,6 +934,7 @@ Dictionary Tf2Core::load_bsp_data(const String& bsp_path) {
     out["surfaces"] = surfaces;
     out["collision_faces"] = colFaces;
     out["prop_groups"] = propGroups;
+    out["doors"] = doorsArr;
     out["entities"] = entities;
     return out;
 }

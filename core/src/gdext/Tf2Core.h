@@ -36,8 +36,16 @@ public:
     PackedStringArray list_maps() const;
     PackedStringArray list_materials(const String& prefix = String(), int limit = 256) const;
     PackedStringArray list_models(const String& prefix = String(), int limit = 256) const;
+    PackedStringArray search_materials(const String& query = String(), int limit = 160) const;
+    PackedStringArray search_models(const String& query = String(), int limit = 160) const;
+    PackedStringArray list_material_folders() const;
+    PackedStringArray list_model_folders() const;
+    PackedStringArray list_sounds(const String& query = String(), int limit = 160) const;
+    PackedStringArray list_fgd_point_classes(const String& filter = String()) const;
+    PackedStringArray list_fgd_solid_classes(const String& filter = String()) const;
 
-    // Returns FGD metadata (description, kind, studio_model, color, size, vars) for a TF2 entity class.
+    // Returns full FGD SmartEdit metadata (description, kind, studio_model, icon_sprite,
+    // color, size, vars with choices/flags, inputs, outputs) for any TF2 entity class.
     Dictionary get_fgd_class_info(const String& classname) const;
 
     // Resolves a Source material (.vmt -> $basetexture .vtf) and decodes RGBA8 pixels directly to Godot.

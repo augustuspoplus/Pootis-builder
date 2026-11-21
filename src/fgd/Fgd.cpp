@@ -439,6 +439,18 @@ bool Fgd::load(const std::string& path) {
     return true;
 }
 
+bool Fgd::merge(const std::string& path) {
+    flatCache_.clear();
+    const std::string text = readTextFile(path);
+    if (text.empty()) return false;
+    parseText(text, fs::path(path).parent_path().string(), 0);
+    indexClasses();
+    PB_INFO("fgd: merged %s -> %zu total classes (%zu point, %zu solid)",
+            fs::path(path).filename().string().c_str(), classes_.size(),
+            pointClasses_.size(), solidClasses_.size());
+    return true;
+}
+
 const EntityClass* Fgd::find(const std::string& name) const {
     auto it = classes_.find(name);
     return it == classes_.end() ? nullptr : &it->second;

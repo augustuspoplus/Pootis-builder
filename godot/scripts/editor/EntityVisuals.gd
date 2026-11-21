@@ -6,6 +6,7 @@ extends Node3D
 
 var doc: Object
 var assets: RefCounted
+var door_ctrl: Node = null
 var show_logic_wires: bool = true
 var show_volumes: bool = true
 var show_triggers: bool = true
@@ -76,6 +77,8 @@ func clear_all() -> void:
 func sync_all() -> void:
 	if doc == null:
 		return
+	if door_ctrl != null:
+		door_ctrl.clear()
 	for ch in ents_root.get_children():
 		ch.queue_free()
 	wires_mesh.mesh = null
@@ -207,8 +210,35 @@ func _spawn_entity_node(idx: int, e: Dictionary, pos: Vector3) -> void:
 		if cls == "func_respawnroom":
 			col = Color(0.85, 0.22, 0.18, 0.16) if str(kv.get("TeamNum", "2")) == "2" else Color(0.22, 0.52, 0.85, 0.16)
 		elif cls == "func_door":
-			col = Color(0.55, 0.60, 0.65, 0.82)
+			col = Color(0.55, 0.60, 0.65, 0.94)
 			mat.shading_mode = BaseMaterial3D.SHADING_MODE_PER_PIXEL
+			mat.transparency = BaseMaterial3D.TRANSPARENCY_DISABLED
+			# Make custom func_door solid & interactive so F5 playtest slides it open!
+			var ab := AnimatableBody3D.new()
+			ab.sync_to_physics = false
+			ab.collision_layer = 1
+			ab.collision_mask = 0
+			ab.position = pos
+			mat.albedo_color = col
+			mi.material_override = mat
+			ab.add_child(mi)
+			var cs := CollisionShape3D.new()
+			var bs := BoxShape3D.new()
+			bs.size = sz
+			cs.shape = bs
+			ab.add_child(cs)
+			ents_root.add_child(ab)
+			if door_ctrl != null:
+				var mdir := Vector3.UP
+				var mparts := str(kv.get("movedir", "-90 0 0")).split(" ", false)
+				if mparts.size() >= 2:
+					var pr := deg_to_rad(float(mparts[0]))
+					var yr := deg_to_rad(float(mparts[1]))
+					mdir = Vector3(cos(pr) * cos(yr), -sin(pr), -cos(pr) * sin(yr)).normalized()
+				var spd := maxf(4.0, float(str(kv.get("speed", "320"))) / 32.0)
+				var trav := maxf(2.4, absf(mdir.x) * sz.x + absf(mdir.y) * sz.y + absf(mdir.z) * sz.z - 0.15)
+				door_ctrl.register_door(ab, pos, mdir, trav, spd, maxf(4.5, sz.length() * 0.8 + 2.0), str(kv.get("targetname", "")))
+			return
 		elif cls == "func_detail":
 			col = Color(0.58, 0.72, 0.84, 0.76)
 			mat.shading_mode = BaseMaterial3D.SHADING_MODE_PER_PIXEL
@@ -228,13 +258,33 @@ func _spawn_entity_node(idx: int, e: Dictionary, pos: Vector3) -> void:
 		ents_root.add_child(holder)
 		return
 
-	# 3. Team Spawn Beacon (RED / BLU / MvM Bot Purple) + 83u Heavy Height Reference!
+	# 3. Team Spawn Beacon (Real ABS 3D Engineer Model when available, else 83u Heavy Reference!)
 	if cls == "info_player_teamspawn":
 		var team := int(str(kv.get("TeamNum", "2")).to_int())
 		var tname := str(kv.get("targetname", "")).to_lower()
 		var col := Color(0.86, 0.25, 0.20) if team == 2 else Color(0.22, 0.52, 0.84)
 		if tname.find("spawnbot") != -1:
 			col = Color(0.66, 0.28, 0.92) # MvM Robot spawn!
+		var engy_mesh: ArrayMesh = assets.get_model_mesh("models/editor-abs/dev_engy.mdl") if assets != null else null
+		if engy_mesh != null:
+			var emi := MeshInstance3D.new()
+			emi.mesh = engy_mesh
+			emi.rotation_degrees = Vector3(0, yaw_deg, 0)
+			# Subtle team tint pedestal ring underneath so RED/BLU/Bot is instant at a glance!
+			var ring := MeshInstance3D.new()
+			var rmesh := CylinderMesh.new()
+			rmesh.top_radius = 0.72; rmesh.bottom_radius = 0.76; rmesh.height = 0.10
+			ring.mesh = rmesh
+			ring.position = Vector3(0, 0.05, 0)
+			var rmat := StandardMaterial3D.new()
+			rmat.albedo_color = col
+			rmat.emission_enabled = true; rmat.emission = col; rmat.emission_energy_multiplier = 0.55
+			ring.material_override = rmat
+			holder.add_child(emi)
+			holder.add_child(ring)
+			ents_root.add_child(holder)
+			_ent_bounds[idx] = [pos + Vector3(-0.75, 0.0, -0.75), pos + Vector3(0.75, 2.55, 0.75)]
+			return
 		var cyl := MeshInstance3D.new()
 		var cm := CylinderMesh.new()
 		cm.top_radius = 0.62
@@ -294,19 +344,22 @@ func _spawn_entity_node(idx: int, e: Dictionary, pos: Vector3) -> void:
 		_ent_bounds[idx] = [pos - Vector3(0.4, 0.4, 0.4), pos + Vector3(0.4, 0.4, 0.4)]
 		return
 
-	# 6. Generic Logic Entity icon cube (tf_gamerules, logic_relay, etc.)
+	# 6. Generic Logic Entity icon badge (sleek small Mann Co. translucent diamond — never blocks map view!)
 	if cls != "light_environment":
 		var box := MeshInstance3D.new()
 		var bm := BoxMesh.new()
-		bm.size = Vector3(0.55, 0.55, 0.55)
+		bm.size = Vector3(0.32, 0.32, 0.32)
 		box.mesh = bm
+		box.rotation_degrees = Vector3(45, 45, 0)
 		var mat := StandardMaterial3D.new()
-		mat.albedo_color = Color(0.74, 0.45, 0.94, 0.85) if cls.begins_with("tf_logic") else Color(0.32, 0.78, 0.88, 0.85)
+		var base_c := Color(0.86, 0.56, 0.24, 0.55) if cls.begins_with("tf_logic") else Color(0.36, 0.68, 0.82, 0.50)
+		mat.albedo_color = base_c
+		mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
 		mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 		box.material_override = mat
 		holder.add_child(box)
 		ents_root.add_child(holder)
-		_ent_bounds[idx] = [pos - Vector3(0.35, 0.35, 0.35), pos + Vector3(0.35, 0.35, 0.35)]
+		_ent_bounds[idx] = [pos - Vector3(0.28, 0.28, 0.28), pos + Vector3(0.28, 0.28, 0.28)]
 
 func _rebuild_wires_and_tracks(ents: Array, target_pos: Dictionary) -> void:
 	# 1. Payload / Tank 3D Spline Track Lines

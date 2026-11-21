@@ -60,6 +60,25 @@ public:
                                   int door_side = 2);
     PackedInt32Array add_arch(const Vector3& center_g, float width_m, float depth_m, float height_m,
                               int segments, const String& material);
+    int add_wall_segment(const Vector3& p0_g, const Vector3& p1_g, float height_m, float thick_m,
+                         const String& material);
+    PackedInt32Array make_hollow(int solid_idx, float wall_thick_m);
+    PackedVector3Array get_solid_vertices(int solid_idx) const;
+    bool move_solid_vertex(int solid_idx, int vert_idx, const Vector3& delta_g);
+
+    // Hammer Face Edit UV & Material Tools (Shift+A)
+    Dictionary get_face_uv(int solid_idx, int face_idx) const;
+    bool set_face_uv(int solid_idx, int face_idx, float u_scale, float v_scale,
+                     float u_shift, float v_shift, float rot_deg, float lightmap_scale);
+    bool justify_face_uv(int solid_idx, int face_idx, int mode);
+    bool align_face_uv(int solid_idx, int face_idx, bool to_face);
+    int replace_material(const String& find_mat, const String& replace_mat);
+
+    // QuickHide, Groups & Check Map for Problems (Alt+P)
+    bool set_solid_hidden(int solid_idx, bool hidden);
+    int unhide_all();
+    bool set_solid_group(int solid_idx, int group_id);
+    Array check_problems() const;
 
     // CSG Editing
     int auto_carve_opening(const Vector3& min_g, const Vector3& max_g, const String& cut_material);
@@ -81,9 +100,16 @@ public:
     int duplicate_entity(int ent_idx, const Vector3& offset_g);
     Dictionary raycast_entity(const Vector3& ray_origin_g, const Vector3& ray_dir_g) const;
 
-    // Source Displacement Terrain
+    // Source Displacement Terrain & Vertical Cliff Walls
     int make_terrain_patch(const Vector3& min_g, const Vector3& max_g, int power, const String& material);
+    int make_cliff_wall(const Vector3& p0_g, const Vector3& p1_g, float height_m, float depth_m,
+                        int power, const String& material, float noise_amp_m = 0.65f);
+    bool create_displacement_on_face(int solid_idx, int face_idx, int power = 3);
     int sculpt_terrain(const Vector3& center_g, float radius_m, float strength_m, int mode = 0);
+    int sculpt_terrain_ex(const Vector3& center_g, float radius_m, float strength_m,
+                          int mode = 0, int axis_mode = 0);
+    int sew_displacements();
+    bool subdivide_displacement(int solid_idx);
 
     // Skybox Seal
     bool auto_seal_skybox();

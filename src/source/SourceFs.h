@@ -18,6 +18,7 @@ struct ResolvedMaterial {
     std::string toolTexture;    // %tooltexture / %compilewireframe fallbacks
     std::string surfaceProp;
     bool translucent = false;
+    bool additive = false;
     bool alphaTest = false;
     bool noCull = false;
     bool selfIllum = false;

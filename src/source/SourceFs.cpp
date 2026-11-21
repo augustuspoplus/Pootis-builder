@@ -313,13 +313,14 @@ void SourceFs::mountDefaults(const std::string& exeDir) {
     addVpk(hl2 + "/hl2_textures_dir.vpk");
     addVpk(hl2 + "/hl2_sound_misc_dir.vpk");
 
-    // Bundled ABS Mapping Resource Pack (common Hammer dev/measure textures).
+    // Bundled ABS Mapping Resource Pack (material browser + improved FGD helper models/sprites).
     for (const std::string& base : {exeDir, exeDir + "/..", std::string(".")}) {
-        const std::string p = base + "/assets/mapping_resource_pack/ABS_MRP_Material_Browser.vpk";
-        if (fs::exists(p)) {
-            addVpk(p);
-            break;
-        }
+        const std::string p1 = base + "/assets/mapping_resource_pack/ABS_MRP_Material_Browser.vpk";
+        const std::string p2 = base + "/assets/mapping_resource_pack/ABS_MRP_Improved_FGD.vpk";
+        bool any = false;
+        if (fs::exists(p1)) { addVpk(p1); any = true; }
+        if (fs::exists(p2)) { addVpk(p2); any = true; }
+        if (any) break;
     }
 
     PB_INFO("SourceFs: %zu VPKs, %zu loose roots mounted", vpks_.size(),
@@ -493,7 +494,8 @@ ResolvedMaterial SourceFs::resolveMaterial(std::string name) const {
     out.baseTexture = vmt.get("$basetexture");
     out.baseTexture2 = vmt.get("$basetexture2");
     out.surfaceProp = vmt.get("$surfaceprop");
-    out.translucent = vmt.flag("$translucent") || vmt.flag("$additive");
+    out.additive = vmt.flag("$additive");
+    out.translucent = vmt.flag("$translucent") || out.additive;
     out.alphaTest = vmt.flag("$alphatest");
     out.noCull = vmt.flag("$nocull");
     out.selfIllum = vmt.flag("$selfillum");

@@ -64,14 +64,14 @@ func _init(p_core: Object, p_assets: RefCounted) -> void:
 	_trans_shader = Shader.new()
 	_trans_shader.code = BSP_TRANS_SHADER
 
-func load_bsp_into(map_name_or_path: String, parent: Node3D) -> Dictionary:
+func load_bsp_into(map_name_or_path: String, parent: Node3D, door_ctrl: Node = null) -> Dictionary:
 	var bsp_path := map_name_or_path
 	if not FileAccess.file_exists(bsp_path):
 		var fname := map_name_or_path
 		if not fname.to_lower().ends_with(".bsp"):
 			fname += ".bsp"
 		bsp_path = core.get_tf2_dir().path_join("tf/maps").path_join(fname)
-	var res := build_bsp_scene(bsp_path)
+	var res := build_bsp_scene(bsp_path, door_ctrl)
 	if res.get("ok", false):
 		var node: Node3D = res["node"]
 		if parent != null and node != null:
@@ -80,7 +80,7 @@ func load_bsp_into(map_name_or_path: String, parent: Node3D) -> Dictionary:
 		res["prop_count"] = res["props_instanced"]
 	return res
 
-func build_bsp_scene(bsp_path: String) -> Dictionary:
+func build_bsp_scene(bsp_path: String, door_ctrl: Node = null) -> Dictionary:
 	var t0 := Time.get_ticks_msec()
 	if assets != null:
 		assets.clear_bsp_cache()
@@ -175,6 +175,59 @@ func build_bsp_scene(bsp_path: String) -> Dictionary:
 		total_instanced += xforms.size()
 		groups_loaded += 1
 
+	# 5. Build Interactive Sliding Doors (func_door brush sub-models!) so F5 opens spawn doors smoothly!
+	var doors_node := Node3D.new()
+	doors_node.name = "InteractiveDoors"
+	root.add_child(doors_node)
+	var doors_arr: Array = data.get("doors", [])
+	if door_ctrl != null:
+		door_ctrl.clear()
+	for di in range(doors_arr.size()):
+		var dd: Dictionary = doors_arr[di]
+		var dsurfs: Array = dd.get("surfaces", [])
+		if dsurfs.is_empty():
+			continue
+		var dmesh := ArrayMesh.new()
+		for s in dsurfs:
+			var arr := []
+			arr.resize(Mesh.ARRAY_MAX)
+			arr[Mesh.ARRAY_VERTEX] = s["vertices"]
+			arr[Mesh.ARRAY_NORMAL] = s["normals"]
+			arr[Mesh.ARRAY_TEX_UV] = s["uvs"]
+			arr[Mesh.ARRAY_TEX_UV2] = s["uv2s"]
+			arr[Mesh.ARRAY_COLOR] = s["colors"]
+			arr[Mesh.ARRAY_INDEX] = s["indices"]
+			dmesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arr)
+			var si := dmesh.get_surface_count() - 1
+			dmesh.surface_set_material(si, _make_bsp_material(str(s["material"]), lm_tex, bool(s["translucent"])))
+
+		var body := AnimatableBody3D.new()
+		body.name = "Door_%d_%s" % [di, str(dd.get("targetname", ""))]
+		body.position = dd["center"]
+		body.sync_to_physics = false
+		body.collision_layer = 1
+		body.collision_mask = 0
+		var dmi := MeshInstance3D.new()
+		dmi.mesh = dmesh
+		body.add_child(dmi)
+		var dcol: PackedVector3Array = dd.get("collision_faces", PackedVector3Array())
+		if dcol.size() >= 3:
+			var cs := CollisionShape3D.new()
+			var poly := ConcavePolygonShape3D.new()
+			poly.backface_collision = true
+			poly.set_faces(dcol)
+			cs.shape = poly
+			body.add_child(cs)
+		doors_node.add_child(body)
+		if door_ctrl != null:
+			var bsz: Vector3 = (dd["bounds_max"] as Vector3) - (dd["bounds_min"] as Vector3)
+			var trig_r := maxf(4.6, bsz.length() * 0.75 + 2.2)
+			door_ctrl.register_door(
+				body, dd["center"], dd["movedir"],
+				float(dd.get("travel_m", 3.5)), float(dd.get("speed_m", 10.0)),
+				trig_r, str(dd.get("targetname", ""))
+			)
+
 	var elapsed_ms := Time.get_ticks_msec() - t0
 	return {
 		"ok": true,
@@ -186,6 +239,7 @@ func build_bsp_scene(bsp_path: String) -> Dictionary:
 		"collision_tris": col_faces.size() / 3,
 		"props_instanced": total_instanced,
 		"prop_groups": groups_loaded,
+		"door_count": doors_arr.size(),
 		"play_bounds_min": data["play_bounds_min"],
 		"play_bounds_max": data["play_bounds_max"],
 		"has_spawn": bool(data["has_spawn"]),

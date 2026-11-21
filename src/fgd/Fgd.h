@@ -104,6 +104,9 @@ public:
     // with a warning. Returns false only if the top file can't be read.
     bool load(const std::string& path);
 
+    // Merges an overlay FGD (e.g. tf-abs.fgd) on top of already-loaded classes.
+    bool merge(const std::string& path);
+
     const EntityClass* find(const std::string& name) const;
 
     // `name`'s keys/inputs/outputs with every base class expanded (Hammer
