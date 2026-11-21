@@ -130,6 +130,7 @@ func sync_solid(idx: int) -> void:
 		sb.collision_mask = 0
 		var cs := CollisionShape3D.new()
 		var shape := ConcavePolygonShape3D.new()
+		shape.backface_collision = true
 		shape.set_faces(col_tris)
 		cs.shape = shape
 		sb.add_child(cs)

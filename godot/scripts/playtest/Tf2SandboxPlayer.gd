@@ -29,11 +29,16 @@ signal exploded(pos: Vector3)
 signal pickup_collected(kind: String)
 
 var active: bool = false
+var noclip: bool = false
 var class_idx: int = 1 # 0=Scout, 1=Soldier (default!), 2=Demo, 3=Sniper, 4=Engi, 5=Heavy
 var health: int = 200
 var max_health: int = 200
 var scoped: bool = false
 var crouching: bool = false
+var test_input_override: Vector2 = Vector2.ZERO # Used by automated movement tests
+var test_jump_override: bool = false
+var _spawn_pos_saved: Vector3 = Vector3.ZERO
+var _spawn_yaw_saved: float = 0.0
 var _double_jumped: bool = false
 var _yaw: float = 0.0
 var _pitch: float = 0.0
@@ -58,10 +63,11 @@ func _ready() -> void:
 	floor_snap_length = 0.35
 
 	col_shape = CollisionShape3D.new()
-	var box := BoxShape3D.new()
-	box.size = Vector3(48.0 / UPM, 82.0 / UPM, 48.0 / UPM)
-	col_shape.shape = box
-	col_shape.position = Vector3(0, 41.0 / UPM, 0)
+	var cap := CapsuleShape3D.new()
+	cap.radius = 20.0 / UPM    # Smooth capsule glides over stairs & BSP triangle seams!
+	cap.height = 80.0 / UPM
+	col_shape.shape = cap
+	col_shape.position = Vector3(0, 40.0 / UPM, 0)
 	add_child(col_shape)
 
 	cam = Camera3D.new()
@@ -78,7 +84,18 @@ func _ready() -> void:
 	set_tf2_class(1)
 
 func spawn_at(pos: Vector3, yaw_deg: float = 0.0, entities: Array = []) -> void:
-	global_position = pos + Vector3(0, 0.15, 0)
+	_spawn_pos_saved = pos
+	_spawn_yaw_saved = yaw_deg
+	noclip = false
+	var safe_pos := pos + Vector3(0, 0.35, 0)
+	# Raycast down from slightly above spawn so feet rest cleanly above the floor!
+	if is_inside_tree():
+		var space := get_world_3d().direct_space_state
+		var q := PhysicsRayQueryParameters3D.create(pos + Vector3(0, 2.2, 0), pos + Vector3(0, -4.0, 0), 3)
+		var hit := space.intersect_ray(q)
+		if not hit.is_empty():
+			safe_pos = (hit["position"] as Vector3) + Vector3(0, 0.12, 0)
+	global_position = safe_pos
 	velocity = Vector3.ZERO
 	_yaw = deg_to_rad(yaw_deg)
 	_pitch = 0.0
@@ -123,6 +140,7 @@ func get_telemetry() -> Dictionary:
 		"max_hp": max_health,
 		"speed_u": int(round(hspeed)),
 		"on_floor": is_on_floor(),
+		"noclip": noclip,
 		"crouching": crouching,
 		"scoped": scoped,
 		"jump_height_u": int(round(max(0.0, (_peak_y - _ground_y) * UPM))),
@@ -150,6 +168,11 @@ func handle_key_press(keycode: int) -> void:
 		KEY_4: set_tf2_class(3)
 		KEY_5: set_tf2_class(4)
 		KEY_6: set_tf2_class(5)
+		KEY_V:
+			noclip = not noclip
+			velocity = Vector3.ZERO
+		KEY_R:
+			spawn_at(_spawn_pos_saved, _spawn_yaw_saved)
 
 func handle_mouse_button(button: int, pressed: bool) -> void:
 	if not active:
@@ -191,14 +214,29 @@ func _physics_process(delta: float) -> void:
 		var target_eye := CROUCH_EYE if crouching else STAND_EYE
 		cam.position.y = lerpf(cam.position.y, target_eye, clamp(delta * 16.0, 0.0, 1.0))
 
-	# Movement input
-	var inp := Vector2.ZERO
-	if Input.is_key_pressed(KEY_W): inp.y += 1.0
-	if Input.is_key_pressed(KEY_S): inp.y -= 1.0
-	if Input.is_key_pressed(KEY_D): inp.x += 1.0
-	if Input.is_key_pressed(KEY_A): inp.x -= 1.0
+	# Movement input (supports live WASD + Arrow keys + automated test harness!)
+	var inp := test_input_override
+	if Input.is_key_pressed(KEY_W) or Input.is_key_pressed(KEY_UP): inp.y += 1.0
+	if Input.is_key_pressed(KEY_S) or Input.is_key_pressed(KEY_DOWN): inp.y -= 1.0
+	if Input.is_key_pressed(KEY_D) or Input.is_key_pressed(KEY_RIGHT): inp.x += 1.0
+	if Input.is_key_pressed(KEY_A) or Input.is_key_pressed(KEY_LEFT): inp.x -= 1.0
 	if inp.length() > 1.0:
 		inp = inp.normalized()
+
+	# Noclip / Free-Fly Mode (press V — just like TF2's noclip command!)
+	if noclip:
+		var fly_spd := (680.0 / UPM) * (2.0 if Input.is_key_pressed(KEY_SHIFT) else 1.0)
+		var cam_fwd := -cam.global_transform.basis.z
+		var cam_right := cam.global_transform.basis.x
+		var move := cam_fwd * inp.y + cam_right * inp.x
+		if Input.is_key_pressed(KEY_SPACE) or Input.is_key_pressed(KEY_E):
+			move += Vector3.UP
+		if crouching:
+			move -= Vector3.UP
+		if move.length_squared() > 0.001:
+			global_position += move.normalized() * fly_spd * delta
+		_update_sightline_rangefinder()
+		return
 
 	var fwd := Vector3(-sin(_yaw), 0, -cos(_yaw))
 	var right := Vector3(cos(_yaw), 0, -sin(_yaw))
@@ -207,6 +245,7 @@ func _physics_process(delta: float) -> void:
 		wish_dir = wish_dir.normalized()
 
 	var max_spd := (float(CLASSES[class_idx]["speed_u"]) / UPM) * (0.38 if crouching else (0.32 if scoped else 1.0))
+	var want_jump := test_jump_override or Input.is_key_pressed(KEY_SPACE)
 
 	if is_on_floor():
 		_double_jumped = false
@@ -217,7 +256,7 @@ func _physics_process(delta: float) -> void:
 		hvel = hvel.move_toward(wish_dir * max_spd, max_spd * 12.0 * delta)
 		velocity.x = hvel.x
 		velocity.z = hvel.z
-		if Input.is_key_pressed(KEY_SPACE):
+		if want_jump:
 			velocity.y = JUMP_SPEED * (1.12 if crouching else 1.0)
 	else:
 		# Authentic Source air-strafing!
@@ -236,6 +275,9 @@ func _physics_process(delta: float) -> void:
 		_peak_y = max(_peak_y, global_position.y)
 
 	move_and_slide()
+	# Safety floor recovery if player ever drops into the void below -250m
+	if global_position.y < -250.0:
+		spawn_at(_spawn_pos_saved, _spawn_yaw_saved)
 	_process_triggers()
 	_step_projectiles(delta)
 	_update_sightline_rangefinder()

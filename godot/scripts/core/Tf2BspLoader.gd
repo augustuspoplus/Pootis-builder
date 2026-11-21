@@ -136,8 +136,11 @@ func build_bsp_scene(bsp_path: String) -> Dictionary:
 	if col_faces.size() >= 3:
 		var body := StaticBody3D.new()
 		body.name = "WorldCollision"
+		body.collision_layer = 1
+		body.collision_mask = 0
 		var cshape := CollisionShape3D.new()
 		var poly := ConcavePolygonShape3D.new()
+		poly.backface_collision = true
 		poly.set_faces(col_faces)
 		cshape.shape = poly
 		body.add_child(cshape)
