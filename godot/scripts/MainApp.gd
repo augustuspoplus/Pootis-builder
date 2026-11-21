@@ -127,6 +127,10 @@ var _prop_browse_all: bool = false
 var _prop_active_cat: String = ""
 var _prop_favorites_only: bool = false
 var _prop_favorites: Array[String] = []
+var _dock_prop_cat: String = "winter"
+var _dock_prop_page: int = 0
+var _dock_ent_cat: String = "objectives"
+var _dock_ent_page: int = 0
 var prop_skin: int = 0          # 0=Neutral, 1=RED, 2=BLU
 var prop_random_yaw: bool = false
 var prop_snap_normal: bool = true
@@ -675,8 +679,8 @@ func _rebuild_left_rail() -> void:
 func _build_selection_bar() -> void:
 	selection_bar_wrap = CenterContainer.new()
 	selection_bar_wrap.set_anchors_preset(Control.PRESET_BOTTOM_WIDE)
-	selection_bar_wrap.offset_top = -150
-	selection_bar_wrap.offset_bottom = -106
+	selection_bar_wrap.offset_top = -196
+	selection_bar_wrap.offset_bottom = -152
 	selection_bar_wrap.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	hud_layer.add_child(selection_bar_wrap)
 
@@ -862,11 +866,22 @@ func _build_top_bar() -> void:
 func _build_bottom_dock() -> void:
 	bottom_dock = CenterContainer.new()
 	bottom_dock.set_anchors_preset(Control.PRESET_BOTTOM_WIDE)
-	bottom_dock.offset_top = -102
-	bottom_dock.offset_bottom = -10
+	bottom_dock.offset_top = -148
+	bottom_dock.offset_bottom = -8
 	bottom_dock.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	hud_layer.add_child(bottom_dock)
 	_rebuild_bottom_dock()
+
+func _style_dock_tab(btn: Button, accent: Color, active: bool) -> void:
+	btn.focus_mode = Control.FOCUS_NONE
+	var bg := accent if active else Color(0.14, 0.12, 0.10, 0.96)
+	var bd := HudWidgets.COL_TX if active else accent
+	btn.add_theme_stylebox_override("normal", HudWidgets.make_button_style(bg, bd, 6, 9, 4))
+	btn.add_theme_stylebox_override("hover", HudWidgets.make_button_style(accent.lightened(0.12) if active else Color(0.22, 0.19, 0.16, 0.98), HudWidgets.COL_ACC, 6, 9, 4))
+	btn.add_theme_stylebox_override("pressed", HudWidgets.make_button_style(accent, HudWidgets.COL_TX, 6, 9, 4))
+	btn.add_theme_font_override("font", fonts["heading"] if active else fonts["body"])
+	btn.add_theme_font_size_override("font_size", 10)
+	btn.add_theme_color_override("font_color", Color(0.08, 0.07, 0.06) if active else HudWidgets.COL_TX)
 
 func _rebuild_bottom_dock() -> void:
 	dock_slot_map.clear()
@@ -876,6 +891,7 @@ func _rebuild_bottom_dock() -> void:
 		return
 
 	if viewing_bsp:
+		bottom_dock.offset_top = -76
 		var oframe := HudWidgets.HudFrame.new(HudWidgets.COL_BLU, 10.0, true)
 		bottom_dock.add_child(oframe)
 		var ohb := HBoxContainer.new(); ohb.alignment = BoxContainer.ALIGNMENT_CENTER; ohb.add_theme_constant_override("separation", 8)
@@ -908,14 +924,16 @@ func _rebuild_bottom_dock() -> void:
 		ohb.add_child(hub_b)
 		return
 
-	var frame := HudWidgets.HudFrame.new(HudWidgets.COL_LIP_AMB, 10.0, true)
-	bottom_dock.add_child(frame)
-	var hb := HBoxContainer.new(); hb.alignment = BoxContainer.ALIGNMENT_CENTER; hb.add_theme_constant_override("separation", 6)
-	frame.add_child(hb)
-
-	var slots: Array = []
+	# ==========================================================================
+	# 1. BUILD MODE: Sleek 1-row Geometry & Architecture Dock
+	# ==========================================================================
 	if stage == Stage.BUILD:
-		slots = [
+		bottom_dock.offset_top = -104
+		var frame := HudWidgets.HudFrame.new(HudWidgets.COL_LIP_AMB, 10.0, true)
+		bottom_dock.add_child(frame)
+		var hb := HBoxContainer.new(); hb.alignment = BoxContainer.ALIGNMENT_CENTER; hb.add_theme_constant_override("separation", 6)
+		frame.add_child(hb)
+		var slots := [
 			{"id": "select",   "piece": "Pull",     "lbl": "Select/Pull", "tool": true, "tkind": "Pull"},
 			{"id": "floor",    "piece": "Floor",    "lbl": "Drag Box"},
 			{"id": "wall",     "piece": "Wall",     "lbl": "Wall Chain"},
@@ -927,65 +945,235 @@ func _rebuild_bottom_dock() -> void:
 			{"id": "terrain",  "piece": "Terrain",  "lbl": "Cliff/Terr",  "tool": true, "tkind": "Terrain"},
 			{"id": "import3d", "piece": "Model",    "lbl": "Import 3D",   "icon": "crate"},
 		]
-	elif stage == Stage.GAMEPLAY:
-		# Select tool + ALL REAL 3D BAKED TF2 GAME-ASSET ICONS + DRAG-AND-DROP PAYLOADS!
-		slots = [
-			{"id": "select",          "piece": "Pull",     "lbl": "Select/Edit", "tool": true, "tkind": "Pull"},
-			{"id": "spawn_red",       "piece": "Spawn",    "lbl": "RED Spawn",   "team": 1, "icon": "spawn_red",       "drag": {"kind": "gameplay", "id": "spawn_red"}},
-			{"id": "spawn_blu",       "piece": "Spawn",    "lbl": "BLU Spawn",   "team": 2, "icon": "spawn_blu",       "drag": {"kind": "gameplay", "id": "spawn_blu"}},
-			{"id": "bomb_cart",       "piece": "Ramp",     "lbl": "Payload",     "icon": "bomb_cart",                  "drag": {"kind": "gameplay", "id": "bomb_cart"}},
-			{"id": "health_med",      "piece": "Floor",    "lbl": "Health Kit",  "icon": "health_med",                 "drag": {"kind": "gameplay", "id": "health_med"}},
-			{"id": "ammo_med",        "piece": "Floor",    "lbl": "Ammo Pack",   "icon": "ammo_med",                   "drag": {"kind": "gameplay", "id": "ammo_med"}},
-			{"id": "resupply",        "piece": "Box",      "lbl": "Resupply",    "icon": "resupply",                   "drag": {"kind": "gameplay", "id": "resupply"}},
-			{"id": "cap_point",       "piece": "Floor",    "lbl": "Cap Point",   "icon": "cap_point",                  "drag": {"kind": "gameplay", "id": "cap_point"}},
-			{"id": "intel",           "piece": "Box",      "lbl": "Intel Flag",  "icon": "intel",                      "drag": {"kind": "gameplay", "id": "intel"}},
-			{"id": "upgrade_station", "piece": "Building", "lbl": "MvM Upgr",    "icon": "upgrade_station",            "drag": {"kind": "gameplay", "id": "upgrade_station"}},
-			{"id": "path_node",       "piece": "Stairs",   "lbl": "Track",       "icon": "path_node",                  "drag": {"kind": "gameplay", "id": "path_node"}},
-			{"id": "fgd_all",         "piece": "Wire",     "lbl": "All 450+ Ent","tool": true, "tkind": "Wire"},
-		]
-	elif stage == Stage.STYLE:
-		# Select tool + REAL 3D TF2 PROP DRAG SHELF + MATERIAL PAINTER + BIOMES + SKY!
-		slots = [
-			{"id": "select",    "piece": "Pull",     "lbl": "Select Face","tool": true, "tkind": "Pull"},
-			{"id": "materials", "piece": "Wall",     "lbl": "Face Edit"},
-			{"id": "props",     "piece": "Box",      "lbl": "All Props",  "icon": "crate"},
-			{"id": "biomes",    "piece": "Building", "lbl": "Biomes"},
-			{"id": "sky_sun",   "piece": "Terrain",  "lbl": "Sky & Sun",  "tool": true, "tkind": "Terrain"},
-			{"id": "p_barrel",  "piece": "Box",      "lbl": "Barrel",     "icon": "barrel",   "drag": {"kind": "prop", "mdl": "models/props_farm/wooden_barrel.mdl"}},
-			{"id": "p_hay",     "piece": "Box",      "lbl": "Hay Bale",   "icon": "hay",      "drag": {"kind": "prop", "mdl": "models/props_farm/haypile001.mdl"}},
-			{"id": "p_console", "piece": "Box",      "lbl": "Console",    "icon": "console",  "drag": {"kind": "prop", "mdl": "models/props_spytech/control_room_console01.mdl"}},
-			{"id": "p_pine",    "piece": "Box",      "lbl": "Alpine Pine","icon": "pine",     "drag": {"kind": "prop", "mdl": "models/props_foliage/tree_pine01.mdl"}},
-			{"id": "p_rock",    "piece": "Box",      "lbl": "Boulder",    "icon": "rock",     "drag": {"kind": "prop", "mdl": "models/props_nature/rock_worn001.mdl"}},
-			{"id": "light",     "piece": "Floor",    "lbl": "Add Light",  "icon": "light",    "drag": {"kind": "gameplay", "id": "light"}},
-		]
+		for sl in slots:
+			var sid: String = sl["id"]
+			var is_act := (active_tool == sid)
+			var ikey: String = str(sl.get("icon", ""))
+			var tex: Texture2D = icon_cache.get_icon(ikey) if not ikey.is_empty() else null
+			var slot_btn := HudWidgets.RailSlot.new(
+				sl["piece"], sl["lbl"], tex, is_act,
+				int(sl.get("team", 0)), bool(sl.get("tool", false)), str(sl.get("tkind", "")),
+				fonts["body"], {}
+			)
+			if not ikey.is_empty():
+				if not dock_slot_map.has(ikey): dock_slot_map[ikey] = []
+				(dock_slot_map[ikey] as Array).append(slot_btn)
+			slot_btn.pressed.connect(func(): audio.play("click"); _select_tool(sid))
+			hb.add_child(slot_btn)
+		return
 
-	for sl in slots:
-		var sid: String = sl["id"]
-		var is_act := (active_tool == sid)
-		var ikey: String = str(sl.get("icon", ""))
-		var tex: Texture2D = icon_cache.get_icon(ikey) if not ikey.is_empty() else null
-		var slot_btn := HudWidgets.RailSlot.new(
-			sl["piece"], sl["lbl"], tex, is_act,
-			int(sl.get("team", 0)), bool(sl.get("tool", false)), str(sl.get("tkind", "")),
-			fonts["body"], sl.get("drag", {})
-		)
-		if not ikey.is_empty():
-			if not dock_slot_map.has(ikey):
-				dock_slot_map[ikey] = []
-			(dock_slot_map[ikey] as Array).append(slot_btn)
-		var drag_d: Dictionary = sl.get("drag", {})
-		slot_btn.pressed.connect(func():
+	# ==========================================================================
+	# 2. GAMEPLAY MODE: Multi-Box Entity Category Dock (All 452 Entities + Icons!)
+	# ==========================================================================
+	if stage == Stage.GAMEPLAY:
+		bottom_dock.offset_top = -148
+		var ebox: Dictionary = Tf2CatalogScript.get_entity_box(_dock_ent_cat)
+		var lip_col: Color = ebox.get("color", HudWidgets.COL_LIP_AMB)
+		var frame := HudWidgets.HudFrame.new(lip_col, 11.0, true)
+		bottom_dock.add_child(frame)
+		var vb := VBoxContainer.new(); vb.add_theme_constant_override("separation", 6)
+		frame.add_child(vb)
+
+		# Top Row: 8 Understandable Entity Category Box Tabs + Search 452!
+		var tabs := HBoxContainer.new(); tabs.alignment = BoxContainer.ALIGNMENT_CENTER; tabs.add_theme_constant_override("separation", 5)
+		vb.add_child(tabs)
+		for box in Tf2CatalogScript.ENTITY_FOLDER_BOXES:
+			var bid: String = str(box["id"])
+			var tb := Button.new()
+			tb.text = str(box["name"])
+			_style_dock_tab(tb, box["color"], _dock_ent_cat == bid)
+			tb.pressed.connect(func():
+				audio.play("click")
+				_dock_ent_cat = bid
+				_dock_ent_page = 0
+				_rebuild_bottom_dock()
+			)
+			tabs.add_child(tb)
+
+		var search_eb := Button.new(); search_eb.text = "Search 452..."
+		HudWidgets.style_tf2_button(search_eb, fonts["body"], 10)
+		search_eb.pressed.connect(func(): audio.play("click"); _open_fgd_entity_drawer())
+		tabs.add_child(search_eb)
+
+		# Bottom Row: < Prev | 9 Draggable Entity Cards with Icons | > Next
+		var items: Array[Dictionary] = Tf2CatalogScript.get_entities_for_box(core, _dock_ent_cat, 36)
+		var per_page := 8
+		var total_pages := maxi(1, int(ceil(float(items.size()) / float(per_page))))
+		_dock_ent_page = clampi(_dock_ent_page, 0, total_pages - 1)
+		var start_i := _dock_ent_page * per_page
+		var end_i := mini(items.size(), start_i + per_page)
+
+		var row := HBoxContainer.new(); row.alignment = BoxContainer.ALIGNMENT_CENTER; row.add_theme_constant_override("separation", 6)
+		vb.add_child(row)
+
+		var prev_b := Button.new(); prev_b.text = "<"; prev_b.custom_minimum_size = Vector2(28, 82)
+		prev_b.disabled = (_dock_ent_page <= 0)
+		HudWidgets.style_tf2_button(prev_b, fonts["heading"], 14)
+		prev_b.pressed.connect(func(): audio.play("click"); _dock_ent_page = maxi(0, _dock_ent_page - 1); _rebuild_bottom_dock())
+		row.add_child(prev_b)
+
+		for idx in range(start_i, end_i):
+			var it: Dictionary = items[idx]
+			var nm: String = str(it["name"])
+			var cls: String = str(it["cls"])
+			var desc: String = str(it["desc"])
+			var itype: String = str(it["icon_type"])
+			var ikey: String = str(it["icon"])
+			var preset: String = str(it.get("preset", ""))
+			var is_act: bool = (not preset.is_empty() and active_tool == preset) or (preset.is_empty() and active_tool == "place_fgd_entity" and active_fgd_entity == cls)
+			var drag_d: Dictionary = {"kind": "gameplay", "id": preset, "name": nm} if not preset.is_empty() else {"kind": "fgd_entity", "cls": cls, "name": nm}
+			var tex: Texture2D = icon_cache.get_icon(ikey) if (itype == "mdl" and icon_cache != null) else null
+			var vec_ic: String = ikey if itype != "mdl" else ""
+			var card := HudWidgets.DockCardSlot.new(nm, cls, tex, vec_ic, is_act, lip_col, fonts["body"], drag_d)
+			card.tooltip_text = "%s  (%s)\n%s\nDrag into 3D or Click to place!" % [nm, cls, desc]
+			if itype == "mdl":
+				if not dock_slot_map.has(ikey): dock_slot_map[ikey] = []
+				(dock_slot_map[ikey] as Array).append(card)
+			card.pressed.connect(func():
+				audio.play("click")
+				if not preset.is_empty():
+					_select_tool(preset)
+				else:
+					active_fgd_entity = cls
+					active_tool = "place_fgd_entity"
+					_rebuild_bottom_dock()
+					_refresh_context_bar()
+					_toast("Click in 3D or Drag & Drop to place %s (%s)" % [nm, cls])
+			)
+			row.add_child(card)
+
+		var next_b := Button.new(); next_b.text = ">"; next_b.custom_minimum_size = Vector2(28, 82)
+		next_b.disabled = (_dock_ent_page >= total_pages - 1)
+		HudWidgets.style_tf2_button(next_b, fonts["heading"], 14)
+		next_b.pressed.connect(func(): audio.play("click"); _dock_ent_page = mini(total_pages - 1, _dock_ent_page + 1); _rebuild_bottom_dock())
+		row.add_child(next_b)
+		return
+
+	# ==========================================================================
+	# 3. STYLE / PROPS MODE: Multi-Box Prop Category Dock (Winter, Trees, Crates...)
+	# ==========================================================================
+	bottom_dock.offset_top = -148
+	var pbox: Dictionary = Tf2CatalogScript.get_prop_box(_dock_prop_cat)
+	var plip: Color = pbox.get("color", HudWidgets.COL_LIP_AMB) if not pbox.is_empty() else HudWidgets.COL_LIP_AMB
+	var pframe := HudWidgets.HudFrame.new(plip, 11.0, true)
+	bottom_dock.add_child(pframe)
+	var pvb := VBoxContainer.new(); pvb.add_theme_constant_override("separation", 6)
+	pframe.add_child(pvb)
+
+	# Top Row: Style Tools + All 9 Prop Category Box Tabs + Saved + Search All!
+	var ptabs := HBoxContainer.new(); ptabs.alignment = BoxContainer.ALIGNMENT_CENTER; ptabs.add_theme_constant_override("separation", 4)
+	pvb.add_child(ptabs)
+
+	var tools_tb := Button.new(); tools_tb.text = "Paint / Sky"
+	_style_dock_tab(tools_tb, HudWidgets.COL_ACC, _dock_prop_cat == "_tools")
+	tools_tb.pressed.connect(func(): audio.play("click"); _dock_prop_cat = "_tools"; _dock_prop_page = 0; _rebuild_bottom_dock())
+	ptabs.add_child(tools_tb)
+
+	for box in Tf2CatalogScript.PROP_FOLDER_BOXES:
+		var cid: String = str(box["id"])
+		var short_nm: String = str(box["name"]).get_slice(" &", 0)
+		var tb := Button.new()
+		tb.text = short_nm
+		tb.tooltip_text = "%s — %s" % [str(box["name"]), str(box["subtitle"])]
+		_style_dock_tab(tb, box["color"], _dock_prop_cat == cid)
+		tb.pressed.connect(func():
 			audio.play("click")
-			if sid == "fgd_all":
-				_open_fgd_entity_drawer()
-			elif drag_d.get("kind", "") == "prop":
-				active_prop_mdl = str(drag_d["mdl"])
-				active_tool = "place_prop"
-				_toast("Click in 3D or Drag & Drop to place " + sl["lbl"])
-			else:
-				_select_tool(sid)
+			_dock_prop_cat = cid
+			_dock_prop_page = 0
+			_rebuild_bottom_dock()
 		)
-		hb.add_child(slot_btn)
+		ptabs.add_child(tb)
+
+	var sav_tb := Button.new(); sav_tb.text = "Saved (%d)" % _prop_favorites.size()
+	_style_dock_tab(sav_tb, HudWidgets.COL_ACC, _dock_prop_cat == "_saved")
+	sav_tb.pressed.connect(func(): audio.play("click"); _dock_prop_cat = "_saved"; _dock_prop_page = 0; _rebuild_bottom_dock())
+	ptabs.add_child(sav_tb)
+
+	var all_pb := Button.new(); all_pb.text = "Browse All..."
+	HudWidgets.style_tf2_button(all_pb, fonts["body"], 10)
+	all_pb.pressed.connect(func(): audio.play("click"); _open_props_drawer())
+	ptabs.add_child(all_pb)
+
+	# Bottom Row: Style Tools OR Paginated 3D Prop Cards for active Category Box!
+	var prow := HBoxContainer.new(); prow.alignment = BoxContainer.ALIGNMENT_CENTER; prow.add_theme_constant_override("separation", 6)
+	pvb.add_child(prow)
+
+	if _dock_prop_cat == "_tools":
+		var tslots := [
+			{"id": "select",    "piece": "Pull",     "lbl": "Select Face", "tool": true, "tkind": "Pull"},
+			{"id": "materials", "piece": "Wall",     "lbl": "Face Edit"},
+			{"id": "props",     "piece": "Box",      "lbl": "Prop Drawer", "icon": "crate"},
+			{"id": "biomes",    "piece": "Building", "lbl": "Biomes"},
+			{"id": "sky_sun",   "piece": "Terrain",  "lbl": "Sky & Sun",   "tool": true, "tkind": "Terrain"},
+			{"id": "light",     "piece": "Floor",    "lbl": "Add Light",   "icon": "light", "drag": {"kind": "gameplay", "id": "light"}},
+		]
+		for sl in tslots:
+			var sid: String = sl["id"]
+			var ikey: String = str(sl.get("icon", ""))
+			var tex: Texture2D = icon_cache.get_icon(ikey) if not ikey.is_empty() else null
+			var slot_btn := HudWidgets.RailSlot.new(
+				sl["piece"], sl["lbl"], tex, active_tool == sid,
+				0, bool(sl.get("tool", false)), str(sl.get("tkind", "")), fonts["body"], sl.get("drag", {})
+			)
+			if not ikey.is_empty():
+				if not dock_slot_map.has(ikey): dock_slot_map[ikey] = []
+				(dock_slot_map[ikey] as Array).append(slot_btn)
+			slot_btn.pressed.connect(func(): audio.play("click"); _select_tool(sid))
+			prow.add_child(slot_btn)
+		return
+
+	var pitems: Array[Dictionary] = []
+	if _dock_prop_cat == "_saved":
+		for mp in _prop_favorites:
+			pitems.append({"name": mp.get_file().get_basename().replace("_", " ").capitalize(), "mdl": mp})
+	else:
+		pitems = Tf2CatalogScript.get_props_for_box(core, _dock_prop_cat, "", 45)
+
+	var p_per := 8
+	var p_pages := maxi(1, int(ceil(float(pitems.size()) / float(p_per))))
+	_dock_prop_page = clampi(_dock_prop_page, 0, p_pages - 1)
+	var p_start := _dock_prop_page * p_per
+	var p_end := mini(pitems.size(), p_start + p_per)
+
+	var pprev := Button.new(); pprev.text = "<"; pprev.custom_minimum_size = Vector2(28, 82)
+	pprev.disabled = (_dock_prop_page <= 0)
+	HudWidgets.style_tf2_button(pprev, fonts["heading"], 14)
+	pprev.pressed.connect(func(): audio.play("click"); _dock_prop_page = maxi(0, _dock_prop_page - 1); _rebuild_bottom_dock())
+	prow.add_child(pprev)
+
+	if pitems.is_empty():
+		var empty_l := Label.new()
+		empty_l.text = "No saved props yet — click '+' on any prop in Browse All to save favorites!"
+		empty_l.add_theme_font_override("font", fonts["body"]); empty_l.add_theme_font_size_override("font_size", 12)
+		empty_l.add_theme_color_override("font_color", HudWidgets.COL_TX_MUTED)
+		prow.add_child(empty_l)
+	else:
+		var cat_sub: String = str(pbox.get("name", "Saved"))
+		for idx in range(p_start, p_end):
+			var it: Dictionary = pitems[idx]
+			var nm: String = str(it["name"])
+			var mp: String = str(it["mdl"])
+			var is_sel: bool = (active_tool == "place_prop" and active_prop_mdl == mp)
+			var tex: Texture2D = icon_cache.get_icon(mp) if icon_cache != null else null
+			var card := HudWidgets.DockCardSlot.new(nm, cat_sub, tex, "", is_sel, plip, fonts["body"], {"kind": "prop", "mdl": mp, "name": nm})
+			card.tooltip_text = "%s\n(%s)\nDrag into 3D or Click to stamp  •  Press R to rotate" % [nm, mp]
+			if not dock_slot_map.has(mp): dock_slot_map[mp] = []
+			(dock_slot_map[mp] as Array).append(card)
+			card.pressed.connect(func():
+				audio.play("click")
+				active_prop_mdl = mp
+				active_tool = "place_prop"
+				_rebuild_bottom_dock()
+				_refresh_context_bar()
+				_toast("Click in 3D or Drag & Drop to place " + nm)
+			)
+			prow.add_child(card)
+
+	var pnext := Button.new(); pnext.text = ">"; pnext.custom_minimum_size = Vector2(28, 82)
+	pnext.disabled = (_dock_prop_page >= p_pages - 1)
+	HudWidgets.style_tf2_button(pnext, fonts["heading"], 14)
+	pnext.pressed.connect(func(): audio.play("click"); _dock_prop_page = mini(p_pages - 1, _dock_prop_page + 1); _rebuild_bottom_dock())
+	prow.add_child(pnext)
 
 func _on_icon_ready(key: String, tex: Texture2D) -> void:
 	if dock_slot_map.has(key):
@@ -999,7 +1187,7 @@ func _build_right_drawer() -> void:
 	right_drawer.offset_right = -12
 	right_drawer.offset_left = -444
 	right_drawer.offset_top = 66
-	right_drawer.offset_bottom = -132
+	right_drawer.offset_bottom = -160
 	right_drawer.visible = false
 	hud_layer.add_child(right_drawer)
 
@@ -1342,6 +1530,14 @@ func on_viewport_drop(screen_pos: Vector2, data: Dictionary) -> void:
 		ent_vis.sync_all()
 		audio.play("place")
 		_toast("Dropped %s cleanly onto map at (%du, %du, %du)!" % [pid, int(pos.x * UPM), int(-pos.z * UPM), int(pos.y * UPM)])
+	elif kind == "fgd_entity":
+		var cls: String = str(data.get("cls", active_fgd_entity))
+		var eid: int = doc.add_point_entity(cls, pos, {"angles": "0 0 0"})
+		doc.record_undo("Drop " + cls)
+		ent_vis.sync_all()
+		if eid >= 0: _select_entity(eid)
+		audio.play("place")
+		_toast("Dropped TF2 entity %s at (%du, %du, %du)!" % [cls, int(pos.x * UPM), int(-pos.z * UPM), int(pos.y * UPM)])
 	elif kind == "prop":
 		var mdl: String = str(data.get("mdl", active_prop_mdl))
 		var yaw_val: float = randf_range(0.0, 360.0) if prop_random_yaw else prop_yaw_deg
@@ -2651,6 +2847,18 @@ func _setup_auto_shot(idx: int) -> void:
 			map_sync.sync_all(); _select_tool("terrain")
 			cam_pos = Vector3(13.5, 7.5, 3.0); editor_cam.look_at_from_position(cam_pos, Vector3(-1.5, 3.8, -13.0), Vector3.UP)
 			cam_yaw = editor_cam.rotation.y; cam_pitch = editor_cam.rotation.x
+		"v4_dock_props_winter":
+			_show_welcome_hub(false); _load_gamemode("koth", "alpine", false); set_stage(Stage.STYLE)
+			right_drawer.visible = false; _dock_prop_cat = "winter"; _dock_prop_page = 0; _rebuild_bottom_dock()
+			cam_pos = Vector3(20, 14, 24); cam_yaw = 0.65; cam_pitch = -0.42; _apply_editor_cam()
+		"v4_dock_ents_obj":
+			_show_welcome_hub(false); _load_gamemode("pl", "badlands", false); set_stage(Stage.GAMEPLAY)
+			right_drawer.visible = false; _dock_ent_cat = "objectives"; _dock_ent_page = 0; _rebuild_bottom_dock()
+			cam_pos = Vector3(20, 14, 24); cam_yaw = 0.65; cam_pitch = -0.42; _apply_editor_cam()
+		"v4_dock_ents_doors":
+			_show_welcome_hub(false); _load_gamemode("koth", "badlands", false); set_stage(Stage.GAMEPLAY)
+			_dock_ent_cat = "doors"; _dock_ent_page = 0; _rebuild_bottom_dock(); _open_fgd_entity_drawer()
+			cam_pos = Vector3(20, 14, 24); cam_yaw = 0.65; cam_pitch = -0.42; _apply_editor_cam()
 	if not viewing_bsp and not settings_modal.visible:
 		_update_hover(get_viewport().get_visible_rect().size * Vector2(0.42, 0.52))
 

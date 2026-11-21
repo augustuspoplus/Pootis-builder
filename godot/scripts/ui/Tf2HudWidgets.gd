@@ -1,7 +1,7 @@
-class_name Tf2HudWidgets
+﻿class_name Tf2HudWidgets
 extends RefCounted
 
-## Milestone 11 — Valve-Grade TF2 In-Game HUD Widgets for Godot 4.
+## Milestone 11 â€” Valve-Grade TF2 In-Game HUD Widgets for Godot 4.
 ## Authentic TF2 palette (warm charcoal #1D1916 + 4px amber lip #CF7336 + cream text #F0E6D2),
 ## official Valve TF2 fonts (tf2build.ttf / tf2secondary.ttf), isometric 3D piece icons,
 ## RED/BLU team crests, and the Q Voice-Menu Radial Pie Wheel!
@@ -87,19 +87,19 @@ static func style_tf2_button(btn: Button, font: Font, font_size: int = 13, accen
 
 static func jump_threshold_callout(height_u: int) -> Dictionary:
 	if height_u <= 18:
-		return {"text": "%du — Walkable Step (<=18u)" % height_u, "color": COL_GREEN}
+		return {"text": "%du â€” Walkable Step (<=18u)" % height_u, "color": COL_GREEN}
 	elif height_u <= 48:
-		return {"text": "%du — Standard Jump (<=48u)" % height_u, "color": COL_GREEN}
+		return {"text": "%du â€” Standard Jump (<=48u)" % height_u, "color": COL_GREEN}
 	elif height_u <= 64:
-		return {"text": "%du — Crouch-Jump (<=64u)" % height_u, "color": COL_ACC}
+		return {"text": "%du â€” Crouch-Jump (<=64u)" % height_u, "color": COL_ACC}
 	elif height_u <= 83:
-		return {"text": "%du — Heavy Height (83u)" % height_u, "color": COL_ACC}
+		return {"text": "%du â€” Heavy Height (83u)" % height_u, "color": COL_ACC}
 	elif height_u <= 128:
-		return {"text": "%du — Scout Double-Jump (<=128u)" % height_u, "color": COL_CYAN}
+		return {"text": "%du â€” Scout Double-Jump (<=128u)" % height_u, "color": COL_CYAN}
 	elif height_u <= 192:
-		return {"text": "%du — Soldier Rocket-Jump! (192u)" % height_u, "color": COL_RED}
+		return {"text": "%du â€” Soldier Rocket-Jump! (192u)" % height_u, "color": COL_RED}
 	else:
-		return {"text": "%du — High Sniper Perch / Wall (%du)" % [height_u, height_u], "color": Color(0.84, 0.56, 1.0)}
+		return {"text": "%du â€” High Sniper Perch / Wall (%du)" % [height_u, height_u], "color": Color(0.84, 0.56, 1.0)}
 
 class HudFrame extends PanelContainer:
 	var lip_color: Color = COL_LIP_AMB
@@ -365,6 +365,202 @@ class RailSlot extends Button:
 		dl.add_theme_font_size_override("font_size", 11)
 		dl.add_theme_color_override("font_color", COL_CYAN)
 		vb.add_child(dl)
+		set_drag_preview(pv)
+		return drag_payload
+
+## Color-coded custom vector icons for ALL non-model Hammer / TF2 entities (Doors, Triggers, Lights, Sound, FX, Logic, AI)!
+class EntityBadgeIcon extends Control:
+	var kind: String = "relay"
+
+	func _init(p_kind: String = "relay") -> void:
+		kind = p_kind
+		mouse_filter = Control.MOUSE_FILTER_IGNORE
+
+	func _draw() -> void:
+		var c := size * 0.5
+		var half := minf(size.x, size.y) * 0.42
+		var rect := Rect2(c - Vector2(half, half), Vector2(half * 2.0, half * 2.0))
+		var s := half * 0.65
+		var bg := Color(0.22, 0.14, 0.29, 0.96)
+		var bd := Color(0.72, 0.45, 0.90, 1.0)
+		match kind:
+			"door":       bg = Color(0.16, 0.24, 0.30); bd = COL_CYAN
+			"trigger":    bg = Color(0.28, 0.21, 0.08); bd = Color(0.96, 0.80, 0.30)
+			"hurt":       bg = Color(0.32, 0.10, 0.10); bd = COL_RED
+			"jump_pad":   bg = Color(0.10, 0.26, 0.16); bd = COL_GREEN
+			"teleporter": bg = Color(0.12, 0.18, 0.30); bd = COL_CYAN
+			"light":      bg = Color(0.30, 0.24, 0.08); bd = Color(0.98, 0.84, 0.32)
+			"sun":        bg = Color(0.32, 0.21, 0.08); bd = COL_ACC
+			"sound":      bg = Color(0.10, 0.24, 0.28); bd = COL_CYAN
+			"particle":   bg = Color(0.28, 0.14, 0.09); bd = COL_ACC
+			"clip":       bg = Color(0.26, 0.13, 0.24); bd = Color(0.90, 0.44, 0.78)
+			"win":        bg = Color(0.12, 0.26, 0.14); bd = COL_GREEN
+			"camera":     bg = Color(0.14, 0.20, 0.28); bd = COL_BLU
+			"ai":         bg = Color(0.26, 0.14, 0.24); bd = Color(0.90, 0.48, 0.82)
+
+		var sb := StyleBoxFlat.new()
+		sb.bg_color = bg; sb.border_color = bd
+		sb.set_border_width_all(2); sb.set_corner_radius_all(7)
+		sb.draw(get_canvas_item(), rect)
+
+		match kind:
+			"door":
+				draw_line(c + Vector2(0, -half * 0.82), c + Vector2(0, half * 0.82), bd, 2.0)
+				draw_colored_polygon(PackedVector2Array([c + Vector2(-s, 0), c + Vector2(-s * 0.35, -s * 0.45), c + Vector2(-s * 0.35, s * 0.45)]), COL_TX)
+				draw_colored_polygon(PackedVector2Array([c + Vector2(s, 0), c + Vector2(s * 0.35, -s * 0.45), c + Vector2(s * 0.35, s * 0.45)]), COL_TX)
+			"trigger":
+				draw_line(c + Vector2(-s, -s), c + Vector2(s, s), bd, 2.0)
+				draw_line(c + Vector2(-s, s), c + Vector2(s, -s), bd, 2.0)
+				draw_circle(c, s * 0.42, bd)
+			"hurt":
+				draw_circle(c + Vector2(0, -s * 0.18), s * 0.72, COL_TX)
+				draw_rect(Rect2(c + Vector2(-s * 0.38, s * 0.30), Vector2(s * 0.76, s * 0.48)), COL_TX, true)
+				draw_circle(c + Vector2(-s * 0.28, -s * 0.22), s * 0.18, bg)
+				draw_circle(c + Vector2(s * 0.28, -s * 0.22), s * 0.18, bg)
+			"jump_pad":
+				draw_colored_polygon(PackedVector2Array([
+					c + Vector2(0, -s), c + Vector2(-s * 0.85, -s * 0.05), c + Vector2(-s * 0.34, -s * 0.05),
+					c + Vector2(-s * 0.34, s * 0.95), c + Vector2(s * 0.34, s * 0.95), c + Vector2(s * 0.34, -s * 0.05),
+					c + Vector2(s * 0.85, -s * 0.05),
+				]), bd)
+			"teleporter":
+				draw_arc(c, s * 0.92, 0.0, TAU * 0.78, 18, bd, 2.4)
+				draw_arc(c, s * 0.52, 1.4, TAU * 0.92, 14, COL_ACC, 2.0)
+				draw_circle(c, s * 0.20, COL_TX)
+			"timer":
+				draw_arc(c + Vector2(0, s * 0.12), s * 0.82, 0.0, TAU, 18, COL_TX, 2.0)
+				draw_line(c + Vector2(0, s * 0.12), c + Vector2(0, -s * 0.42), COL_ACC, 2.2)
+				draw_line(c + Vector2(0, s * 0.12), c + Vector2(s * 0.48, s * 0.28), COL_ACC, 2.0)
+				draw_line(c + Vector2(-s * 0.35, -s * 0.92), c + Vector2(s * 0.35, -s * 0.92), COL_TX, 2.2)
+			"counter":
+				draw_rect(Rect2(c + Vector2(-s * 0.9, -s * 0.55), Vector2(s * 1.8, s * 1.1)), COL_CYAN, false, 1.8)
+				draw_line(c + Vector2(-s * 0.3, -s * 0.55), c + Vector2(-s * 0.3, s * 0.55), COL_CYAN, 1.6)
+				draw_line(c + Vector2(s * 0.3, -s * 0.55), c + Vector2(s * 0.3, s * 0.55), COL_CYAN, 1.6)
+			"light":
+				draw_circle(c + Vector2(0, -s * 0.22), s * 0.65, bd)
+				draw_rect(Rect2(c + Vector2(-s * 0.34, s * 0.38), Vector2(s * 0.68, s * 0.44)), COL_TX_MUTED, true)
+			"sun":
+				draw_circle(c, s * 0.52, Color(0.98, 0.85, 0.32))
+				for k in range(8):
+					var a := float(k) * PI * 0.25
+					draw_line(c + Vector2(cos(a), sin(a)) * s * 0.72, c + Vector2(cos(a), sin(a)) * s * 1.05, bd, 2.0)
+			"sound":
+				draw_colored_polygon(PackedVector2Array([
+					c + Vector2(-s * 0.9, -s * 0.32), c + Vector2(-s * 0.42, -s * 0.32),
+					c + Vector2(s * 0.08, -s * 0.82), c + Vector2(s * 0.08, s * 0.82),
+					c + Vector2(-s * 0.42, s * 0.32), c + Vector2(-s * 0.9, s * 0.32),
+				]), COL_TX)
+				draw_arc(c + Vector2(s * 0.15, 0), s * 0.45, -0.9, 0.9, 10, bd, 2.0)
+				draw_arc(c + Vector2(s * 0.22, 0), s * 0.78, -0.9, 0.9, 12, bd, 2.0)
+			"particle":
+				draw_circle(c + Vector2(-s * 0.45, s * 0.35), s * 0.36, COL_ACC)
+				draw_circle(c + Vector2(s * 0.38, s * 0.22), s * 0.42, Color(0.98, 0.82, 0.32))
+				draw_circle(c + Vector2(0, -s * 0.38), s * 0.46, bd)
+			"clip":
+				draw_rect(Rect2(c + Vector2(-s * 0.8, -s * 0.8), Vector2(s * 1.6, s * 1.6)), bd, false, 2.0)
+				draw_line(c + Vector2(-s * 0.8, -s * 0.8), c + Vector2(s * 0.8, s * 0.8), bd, 2.0)
+			"win":
+				draw_colored_polygon(PackedVector2Array([c + Vector2(-s * 0.55, -s * 0.85), c + Vector2(s * 0.82, -s * 0.38), c + Vector2(-s * 0.55, s * 0.12)]), Color(0.98, 0.84, 0.32))
+				draw_line(c + Vector2(-s * 0.55, -s * 0.90), c + Vector2(-s * 0.55, s * 0.92), COL_TX, 2.6)
+			"camera":
+				draw_rect(Rect2(c + Vector2(-s * 0.85, -s * 0.5), Vector2(s * 1.15, s * 1.0)), COL_TX, false, 2.0)
+				draw_colored_polygon(PackedVector2Array([c + Vector2(s * 0.35, 0), c + Vector2(s * 0.95, -s * 0.48), c + Vector2(s * 0.95, s * 0.48)]), bd)
+			"ai":
+				draw_circle(c, s * 0.72, bd)
+				draw_circle(c, s * 0.42, bg)
+				draw_circle(c, s * 0.18, COL_TX)
+				draw_line(c + Vector2(-s, 0), c + Vector2(s, 0), bd, 1.6)
+				draw_line(c + Vector2(0, -s), c + Vector2(0, s), bd, 1.6)
+			_: # relay lightning bolt
+				draw_colored_polygon(PackedVector2Array([
+					c + Vector2(s * 0.15, -s), c + Vector2(-s * 0.65, s * 0.10), c + Vector2(0, s * 0.10),
+					c + Vector2(-s * 0.22, s), c + Vector2(s * 0.72, -s * 0.12), c + Vector2(s * 0.08, -s * 0.12),
+				]), Color(0.98, 0.84, 0.32))
+
+## Bottom-Middle Multi-Box Dock Card (supports BOTH 3D baked TF2 icons AND custom EntityBadgeIcons + Drag-and-Drop!)
+class DockCardSlot extends Button:
+	var drag_payload: Dictionary = {}
+	var _tex_rect: TextureRect = null
+
+	func _init(p_title: String, p_sub: String, p_tex: Texture2D, p_vec_icon: String, p_active: bool, p_accent: Color, p_font: Font, p_drag: Dictionary = {}) -> void:
+		drag_payload = p_drag
+		custom_minimum_size = Vector2(104, 80)
+		focus_mode = Control.FOCUS_NONE
+		var sb := StyleBoxFlat.new()
+		sb.bg_color = Color(0.22, 0.18, 0.14, 0.98) if p_active else COL_BG_CARD
+		sb.border_color = p_accent if p_active else COL_SLOT_BD
+		sb.set_border_width_all(2 if p_active else 1)
+		sb.set_corner_radius_all(8)
+		var sbh := sb.duplicate(); sbh.bg_color = COL_SLOT_HOV; sbh.border_color = p_accent
+		add_theme_stylebox_override("normal", sb)
+		add_theme_stylebox_override("hover", sbh)
+		add_theme_stylebox_override("pressed", sbh)
+
+		var vb := VBoxContainer.new()
+		vb.set_anchors_preset(Control.PRESET_FULL_RECT)
+		vb.offset_left = 5; vb.offset_right = -5; vb.offset_top = 4; vb.offset_bottom = -4
+		vb.add_theme_constant_override("separation", 1)
+		vb.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		add_child(vb)
+
+		if not p_vec_icon.is_empty():
+			var eic := EntityBadgeIcon.new(p_vec_icon)
+			eic.custom_minimum_size = Vector2(46, 46)
+			eic.size_flags_vertical = Control.SIZE_EXPAND_FILL
+			vb.add_child(eic)
+		else:
+			_tex_rect = TextureRect.new()
+			_tex_rect.custom_minimum_size = Vector2(46, 46)
+			_tex_rect.size_flags_vertical = Control.SIZE_EXPAND_FILL
+			_tex_rect.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+			_tex_rect.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+			_tex_rect.mouse_filter = Control.MOUSE_FILTER_IGNORE
+			_tex_rect.texture = p_tex
+			vb.add_child(_tex_rect)
+
+		var l1 := Label.new()
+		l1.text = p_title
+		l1.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		l1.clip_text = true
+		if p_font != null: l1.add_theme_font_override("font", p_font)
+		l1.add_theme_font_size_override("font_size", 10)
+		l1.add_theme_color_override("font_color", p_accent if p_active else COL_TX)
+		l1.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		vb.add_child(l1)
+
+		if not p_sub.is_empty():
+			var l2 := Label.new()
+			l2.text = p_sub
+			l2.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+			l2.clip_text = true
+			if p_font != null: l2.add_theme_font_override("font", p_font)
+			l2.add_theme_font_size_override("font_size", 8)
+			l2.add_theme_color_override("font_color", COL_TX_MUTED)
+			l2.mouse_filter = Control.MOUSE_FILTER_IGNORE
+			vb.add_child(l2)
+
+	func set_icon_texture(tex: Texture2D) -> void:
+		if _tex_rect != null:
+			_tex_rect.texture = tex
+
+	func _get_drag_data(_at_position: Vector2) -> Variant:
+		if drag_payload.is_empty():
+			return null
+		var pv := PanelContainer.new()
+		var sb := StyleBoxFlat.new()
+		sb.bg_color = Color(0.14, 0.12, 0.10, 0.92); sb.border_color = COL_ACC
+		sb.set_border_width_all(2); sb.set_corner_radius_all(8); sb.set_content_margin_all(6)
+		pv.add_theme_stylebox_override("panel", sb)
+		if _tex_rect != null and _tex_rect.texture != null:
+			var tr := TextureRect.new()
+			tr.texture = _tex_rect.texture
+			tr.custom_minimum_size = Vector2(64, 64)
+			tr.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+			tr.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+			pv.add_child(tr)
+		else:
+			var lb := Label.new(); lb.text = str(drag_payload.get("name", drag_payload.get("cls", "Item")))
+			pv.add_child(lb)
 		set_drag_preview(pv)
 		return drag_payload
 

@@ -594,42 +594,106 @@ static func build_props_drawer(app: Node3D, vbox: VBoxContainer) -> void:
 	sr_row.add_child(rot_b)
 
 # ==============================================================================
-# 3. ALL-450+ TF2 FGD ENTITY BROWSER (Shift+E — base.fgd + tf.fgd + tf-abs.fgd!)
+# 3. ALL-452 TF2 FGD ENTITY BROWSER (Grouped Boxes + Icons for Every Entity!)
 # ==============================================================================
 static func build_fgd_entity_drawer(app: Node3D, vbox: VBoxContainer) -> void:
 	var fonts: Dictionary = app.fonts
-	vbox.add_child(_lbl("Browse & place ANY of the %d Valve TF2 + ABS FGD entity classes! Active: %s" % [
+	vbox.add_child(_lbl("All %d Valve TF2 + ABS FGD entities organized with clear icons. Active: %s" % [
 		app.core.get_fgd_class_count(), app.active_fgd_entity
 	], fonts["body"], 11, HudWidgets.COL_TX_MUTED))
 
 	var search := LineEdit.new()
-	search.placeholder_text = "Search all TF2 entities (tf_, info_, item_, light, env_, logic_…)"
+	search.placeholder_text = "Search all 452 TF2 entities (door, light, relay, spawn, trigger...)"
 	search.text = app._ent_search_text
 	vbox.add_child(search)
 
-	var list_root := VBoxContainer.new(); list_root.add_theme_constant_override("separation", 4); vbox.add_child(list_root)
+	# 8 Grouped Entity Category Chips
+	var cgrid := GridContainer.new(); cgrid.columns = 4
+	cgrid.add_theme_constant_override("h_separation", 4); cgrid.add_theme_constant_override("v_separation", 4)
+	vbox.add_child(cgrid)
+	for box in Tf2CatalogScript.ENTITY_FOLDER_BOXES:
+		var bid: String = str(box["id"])
+		var b := Button.new()
+		b.text = str(box["short"])
+		b.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		HudWidgets.style_tf2_button(b, fonts["heading"], 9, app._dock_ent_cat == bid)
+		b.pressed.connect(func():
+			app.audio.play("click")
+			app._dock_ent_cat = bid
+			app._dock_ent_page = 0
+			app._rebuild_bottom_dock()
+			app._open_fgd_entity_drawer()
+		)
+		cgrid.add_child(b)
+
+	var list_root := VBoxContainer.new(); list_root.add_theme_constant_override("separation", 5); vbox.add_child(list_root)
+
+	var add_ent_row := func(nm: String, cs: String, desc: String, itype: String, ikey: String, preset: String) -> void:
+		var is_act: bool = (app.active_fgd_entity == cs and app.active_tool == "place_fgd_entity")
+		var b := Button.new()
+		b.custom_minimum_size = Vector2(0, 48)
+		b.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		HudWidgets.style_tf2_button(b, fonts["body"], 10, is_act)
+		var hb := HBoxContainer.new()
+		hb.set_anchors_preset(Control.PRESET_FULL_RECT)
+		hb.offset_left = 6; hb.offset_right = -6; hb.offset_top = 4; hb.offset_bottom = -4
+		hb.add_theme_constant_override("separation", 8)
+		hb.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		b.add_child(hb)
+		if itype == "mdl" and app.icon_cache != null:
+			var tr := TextureRect.new()
+			tr.custom_minimum_size = Vector2(36, 36)
+			tr.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+			tr.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+			tr.mouse_filter = Control.MOUSE_FILTER_IGNORE
+			tr.texture = app.icon_cache.get_icon(ikey)
+			hb.add_child(tr)
+		else:
+			var eic := HudWidgets.EntityBadgeIcon.new(ikey)
+			eic.custom_minimum_size = Vector2(36, 36)
+			hb.add_child(eic)
+		var tvb := VBoxContainer.new()
+		tvb.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		tvb.alignment = BoxContainer.ALIGNMENT_CENTER
+		tvb.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		hb.add_child(tvb)
+		var l1 := _lbl("%s  (%s)" % [nm, cs], fonts["heading"], 10, Color(0.10, 0.07, 0.04) if is_act else HudWidgets.COL_TX)
+		l1.mouse_filter = Control.MOUSE_FILTER_IGNORE; tvb.add_child(l1)
+		var l2 := _lbl(desc, fonts["body"], 9, Color(0.20, 0.14, 0.08) if is_act else HudWidgets.COL_TX_MUTED)
+		l2.mouse_filter = Control.MOUSE_FILTER_IGNORE; tvb.add_child(l2)
+		b.pressed.connect(func():
+			app.audio.play("click")
+			if not preset.is_empty():
+				app.set_stage(app.Stage.GAMEPLAY)
+				app._select_tool(preset)
+			else:
+				app.active_fgd_entity = cs
+				app.active_tool = "place_fgd_entity"
+				app._toast("Click in 3D to place %s (%s)" % [nm, cs])
+			app._open_fgd_entity_drawer()
+		)
+		list_root.add_child(b)
+
 	var populate := func(flt: String) -> void:
 		app._ent_search_text = flt
 		for ch in list_root.get_children():
 			ch.queue_free()
-		var classes: PackedStringArray = app.core.list_fgd_point_classes(flt.strip_edges())
-		var shown := 0
-		for cls in classes:
-			if shown >= 55: break
-			var cs := str(cls)
-			var b := Button.new()
-			b.text = cs
-			b.alignment = HORIZONTAL_ALIGNMENT_LEFT
-			HudWidgets.style_tf2_button(b, fonts["mono"], 11, app.active_fgd_entity == cs)
-			b.pressed.connect(func():
-				app.active_fgd_entity = cs
-				app.active_tool = "place_fgd_entity"
-				app.audio.play("click")
-				app._toast("Click in 3D to place FGD entity: " + cs)
-				app._open_fgd_entity_drawer()
-			)
-			list_root.add_child(b)
-			shown += 1
+		var fl := flt.strip_edges()
+		if not fl.is_empty():
+			var classes: PackedStringArray = app.core.list_fgd_point_classes(fl)
+			var shown := 0
+			for cls in classes:
+				if shown >= 45: break
+				var cs := str(cls)
+				var ic: Dictionary = Tf2CatalogScript.get_entity_icon_spec(cs)
+				var pretty := cs.replace("info_", "").replace("env_", "").replace("logic_", "").replace("tf_", "").replace("_", " ").capitalize()
+				add_ent_row.call(pretty, cs, "Valve TF2 FGD entity", str(ic["type"]), str(ic["key"]), "")
+				shown += 1
+			return
+		var items: Array[Dictionary] = Tf2CatalogScript.get_entities_for_box(app.core, app._dock_ent_cat, 36)
+		for it in items:
+			add_ent_row.call(str(it["name"]), str(it["cls"]), str(it["desc"]), str(it["icon_type"]), str(it["icon"]), str(it.get("preset", "")))
+
 	populate.call(app._ent_search_text)
 	search.text_changed.connect(populate)
 

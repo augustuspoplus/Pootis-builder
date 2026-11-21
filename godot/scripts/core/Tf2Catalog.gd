@@ -285,6 +285,232 @@ static func get_props_for_box(core: Object, cat_id: String, search_filter: Strin
 				results.append({"name": pretty, "mdl": mp})
 	return results
 
+# ==============================================================================
+# ALL 452 TF2 ENTITIES — GROUPED INTO 8 CLEAR, UNDERSTANDABLE CATEGORY BOXES!
+# ==============================================================================
+const ENTITY_FOLDER_BOXES := [
+	{
+		"id": "spawns",
+		"name": "1. Spawns & Teams",
+		"short": "Spawns",
+		"color": Color(0.84, 0.30, 0.28, 1.0),
+		"prefixes": ["info_player", "info_observer", "func_respawn", "filter_activator_tfteam", "tf_gamerules", "tf_player"],
+		"curated": [
+			{"name": "RED Spawn",       "cls": "info_player_teamspawn", "desc": "Spawns RED team players here",             "icon_type": "mdl", "icon": "spawn_red", "preset": "spawn_red"},
+			{"name": "BLU Spawn",       "cls": "info_player_teamspawn", "desc": "Spawns BLU team players here",             "icon_type": "mdl", "icon": "spawn_blu", "preset": "spawn_blu"},
+			{"name": "MvM Bot Spawn",   "cls": "info_player_teamspawn", "desc": "Spawns robot waves in Mann vs. Machine",   "icon_type": "mdl", "icon": "bot_spawn", "preset": "bot_spawn"},
+			{"name": "Resupply Locker", "cls": "func_regenerate",       "desc": "Restores health & ammo in spawn room",     "icon_type": "mdl", "icon": "resupply",  "preset": "resupply"},
+			{"name": "Spectator Cam",   "cls": "info_observer_point",   "desc": "Camera angle shown while spectating",      "icon_type": "vec", "icon": "camera",    "preset": ""},
+			{"name": "Sentry Gun",      "cls": "obj_sentrygun",         "desc": "Pre-placed Engineer Sentry Gun",           "icon_type": "mdl", "icon": "sentry",    "preset": ""},
+			{"name": "Dispenser",       "cls": "obj_dispenser",         "desc": "Pre-placed healing & ammo Dispenser",      "icon_type": "mdl", "icon": "dispenser", "preset": ""},
+			{"name": "Team Filter",     "cls": "filter_activator_tfteam","desc": "Restricts doors/triggers to RED or BLU",  "icon_type": "vec", "icon": "relay",     "preset": ""},
+			{"name": "TF2 Game Rules",  "cls": "tf_gamerules",          "desc": "Sets global TF2 match rules & HUD mode",   "icon_type": "vec", "icon": "win",       "preset": ""},
+		],
+	},
+	{
+		"id": "objectives",
+		"name": "2. Objectives & Modes",
+		"short": "Objectives",
+		"color": Color(0.88, 0.56, 0.25, 1.0),
+		"prefixes": ["team_control_point", "item_teamflag", "mapobj_cart", "path_track", "tf_logic_", "func_capturezone", "func_upgradestation", "game_round_win", "info_passtime"],
+		"curated": [
+			{"name": "Control Point",   "cls": "team_control_point",    "desc": "Capturable TF2 control point + hologram",  "icon_type": "mdl", "icon": "cap_point",       "preset": "cap_point"},
+			{"name": "Payload Cart",    "cls": "mapobj_cart_dispenser", "desc": "BLU Payload bomb cart with dispenser",     "icon_type": "mdl", "icon": "bomb_cart",       "preset": "bomb_cart"},
+			{"name": "Track Node",      "cls": "path_track",            "desc": "Waypoint node along a Payload rail path",  "icon_type": "mdl", "icon": "path_node",       "preset": "path_node"},
+			{"name": "Intel Briefcase", "cls": "item_teamflag",         "desc": "Capturable CTF Intelligence briefcase",    "icon_type": "mdl", "icon": "intel",           "preset": "intel"},
+			{"name": "MvM Bomb Hatch",  "cls": "func_capturezone",      "desc": "MvM robot bomb delivery pit",              "icon_type": "mdl", "icon": "mvm_hatch",       "preset": "mvm_hatch"},
+			{"name": "Upgrade Station", "cls": "func_upgradestation",   "desc": "MvM weapon & class upgrade booth",         "icon_type": "mdl", "icon": "upgrade_station", "preset": "upgrade_station"},
+			{"name": "Capture Zone",    "cls": "trigger_capture_area",  "desc": "Area players stand in to capture point",   "icon_type": "vec", "icon": "trigger",         "preset": ""},
+			{"name": "KOTH Logic",      "cls": "tf_logic_koth",         "desc": "Enables King of the Hill 3-minute timers", "icon_type": "vec", "icon": "timer",           "preset": ""},
+			{"name": "Round Winner",    "cls": "game_round_win",        "desc": "Ends the round and awards team victory",   "icon_type": "vec", "icon": "win",             "preset": ""},
+		],
+	},
+	{
+		"id": "pickups",
+		"name": "3. Health & Ammo",
+		"short": "Pickups",
+		"color": Color(0.32, 0.78, 0.42, 1.0),
+		"prefixes": ["item_healthkit", "item_ammopack", "item_powerup", "tf_spell_pickup", "item_currencypack", "item_teamflag"],
+		"curated": [
+			{"name": "Small Health",    "cls": "item_healthkit_small",  "desc": "Restores 20% max HP",                      "icon_type": "mdl", "icon": "health_small", "preset": "health_small"},
+			{"name": "Medium Health",   "cls": "item_healthkit_medium", "desc": "Restores 50% max HP",                      "icon_type": "mdl", "icon": "health_med",   "preset": "health_med"},
+			{"name": "Full Health",     "cls": "item_healthkit_full",   "desc": "Restores 100% max HP",                     "icon_type": "mdl", "icon": "health_full",  "preset": "health_full"},
+			{"name": "Small Ammo",      "cls": "item_ammopack_small",   "desc": "Restores 20% ammo + 41 metal",             "icon_type": "mdl", "icon": "ammo_small",   "preset": "ammo_small"},
+			{"name": "Medium Ammo",     "cls": "item_ammopack_medium",  "desc": "Restores 50% ammo + 100 metal",            "icon_type": "mdl", "icon": "ammo_med",     "preset": "ammo_med"},
+			{"name": "Full Ammo",       "cls": "item_ammopack_full",    "desc": "Restores 100% ammo + 200 metal",           "icon_type": "mdl", "icon": "ammo_full",    "preset": "ammo_full"},
+			{"name": "Powerup Rune",    "cls": "item_powerup_rune",     "desc": "Mannpower superpower rune pickup",         "icon_type": "vec", "icon": "particle",     "preset": ""},
+			{"name": "Spellbook",       "cls": "tf_spell_pickup",       "desc": "Halloween magic spell pickup",             "icon_type": "vec", "icon": "particle",     "preset": ""},
+			{"name": "MvM Credits",     "cls": "item_currencypack_medium","desc": "Bonus cash drop for MvM upgrades",       "icon_type": "vec", "icon": "counter",      "preset": ""},
+		],
+	},
+	{
+		"id": "doors",
+		"name": "4. Doors & Traps",
+		"short": "Doors/Traps",
+		"color": Color(0.28, 0.80, 0.92, 1.0),
+		"prefixes": ["func_door", "trigger_", "func_button", "func_breakable", "func_tracktrain", "info_teleport"],
+		"curated": [
+			{"name": "Sliding Door",    "cls": "func_door",             "desc": "Auto-sliding spawn or gate door",          "icon_type": "vec", "icon": "door",       "preset": ""},
+			{"name": "Trigger Zone",    "cls": "trigger_multiple",      "desc": "Fires I/O outputs when players enter",     "icon_type": "vec", "icon": "trigger",    "preset": ""},
+			{"name": "Kill / Hurt Pit", "cls": "trigger_hurt",          "desc": "Damages or kills players inside",          "icon_type": "vec", "icon": "hurt",       "preset": ""},
+			{"name": "Jump / Push Pad", "cls": "trigger_push",          "desc": "Launches players upward or forward",       "icon_type": "vec", "icon": "jump_pad",   "preset": ""},
+			{"name": "Teleporter",      "cls": "trigger_teleport",      "desc": "Warps players to a target destination",    "icon_type": "vec", "icon": "teleporter", "preset": ""},
+			{"name": "Teleport Target", "cls": "info_teleport_destination","desc": "Exit landing point for a Teleporter",   "icon_type": "vec", "icon": "teleporter", "preset": ""},
+			{"name": "Trigger Once",    "cls": "trigger_once",          "desc": "Fires one time when touched",              "icon_type": "vec", "icon": "trigger",    "preset": ""},
+			{"name": "Push Button",     "cls": "func_button",           "desc": "Shootable or usable interactive switch",   "icon_type": "vec", "icon": "relay",      "preset": ""},
+			{"name": "Stun Hazard",     "cls": "trigger_stun",          "desc": "Briefly stuns players on contact",         "icon_type": "vec", "icon": "hurt",       "preset": ""},
+		],
+	},
+	{
+		"id": "lights",
+		"name": "5. Lights & Sky",
+		"short": "Lights/Sky",
+		"color": Color(0.96, 0.80, 0.32, 1.0),
+		"prefixes": ["light", "sky_camera", "env_fog", "env_cubemap", "env_sun", "env_tonemap", "color_correction", "shadow_control"],
+		"curated": [
+			{"name": "Point Light",     "cls": "light",                 "desc": "Warm omnidirectional indoor light bulb",   "icon_type": "vec", "icon": "light",  "preset": "light"},
+			{"name": "Spotlight",       "cls": "light_spot",            "desc": "Focused cone spotlight for lamps/stages",  "icon_type": "vec", "icon": "light",  "preset": ""},
+			{"name": "Map Sun",         "cls": "light_environment",     "desc": "Global outdoor sunlight & sky ambient",    "icon_type": "vec", "icon": "sun",    "preset": ""},
+			{"name": "3D Sky Camera",   "cls": "sky_camera",            "desc": "Projects 16x scale 3D skybox vista",       "icon_type": "vec", "icon": "camera", "preset": ""},
+			{"name": "Fog Volume",      "cls": "env_fog_controller",    "desc": "Controls atmospheric distance fog",        "icon_type": "vec", "icon": "sound",  "preset": ""},
+			{"name": "Env Cubemap",     "cls": "env_cubemap",           "desc": "Captures glossy water & metal reflections","icon_type": "vec", "icon": "clip",   "preset": ""},
+			{"name": "Sun Flare",       "cls": "env_sun",               "desc": "Visible glowing sun sprite in the sky",    "icon_type": "vec", "icon": "sun",    "preset": ""},
+			{"name": "Tonemap",         "cls": "env_tonemap_controller","desc": "Tunes HDR bloom & exposure brightness",    "icon_type": "vec", "icon": "sun",    "preset": ""},
+			{"name": "Shadow Angle",    "cls": "shadow_control",        "desc": "Sets dynamic player shadow direction",     "icon_type": "vec", "icon": "light",  "preset": ""},
+		],
+	},
+	{
+		"id": "sound_fx",
+		"name": "6. Sound & FX",
+		"short": "Sound/FX",
+		"color": Color(0.32, 0.78, 0.88, 1.0),
+		"prefixes": ["ambient_generic", "env_soundscape", "info_particle", "env_explosion", "env_beam", "env_shake", "env_fire", "env_spark", "env_steam", "env_sprite"],
+		"curated": [
+			{"name": "Ambient Sound",   "cls": "ambient_generic",       "desc": "Plays looping SFX, alarms, or music",      "icon_type": "vec", "icon": "sound",    "preset": ""},
+			{"name": "Soundscape",      "cls": "env_soundscape",        "desc": "TF2 room/outdoor ambient audio zone",      "icon_type": "vec", "icon": "sound",    "preset": ""},
+			{"name": "Particle FX",     "cls": "info_particle_system",  "desc": "Spawns TF2 particles (smoke, fire, snow)", "icon_type": "vec", "icon": "particle", "preset": ""},
+			{"name": "Explosion FX",    "cls": "env_explosion",         "desc": "Triggers dramatic fiery blast + damage",   "icon_type": "vec", "icon": "hurt",     "preset": ""},
+			{"name": "Beam / Laser",    "cls": "env_beam",              "desc": "Glowing Spytech laser beam between points","icon_type": "vec", "icon": "light",    "preset": ""},
+			{"name": "Screen Shake",    "cls": "env_shake",             "desc": "Rumbles player cameras on explosions",     "icon_type": "vec", "icon": "jump_pad", "preset": ""},
+			{"name": "Glow Sprite",     "cls": "env_sprite",            "desc": "Additive light halo around lamps",         "icon_type": "vec", "icon": "light",    "preset": ""},
+			{"name": "Spark Emitter",   "cls": "env_spark",             "desc": "Periodic electrical sparks on machinery",  "icon_type": "vec", "icon": "particle", "preset": ""},
+			{"name": "Steam Jet",       "cls": "env_steam",             "desc": "Hissing industrial pipe steam plume",      "icon_type": "vec", "icon": "particle", "preset": ""},
+		],
+	},
+	{
+		"id": "logic",
+		"name": "7. Logic & Wiring",
+		"short": "Logic",
+		"color": Color(0.72, 0.45, 0.90, 1.0),
+		"prefixes": ["logic_", "math_", "game_text", "env_hudhint", "point_template", "team_round_timer", "tf_glow"],
+		"curated": [
+			{"name": "Logic Relay",     "cls": "logic_relay",           "desc": "Chains multiple I/O outputs cleanly",      "icon_type": "vec", "icon": "relay",   "preset": ""},
+			{"name": "Logic Timer",     "cls": "logic_timer",           "desc": "Fires an output every X seconds",          "icon_type": "vec", "icon": "timer",   "preset": ""},
+			{"name": "Round Timer",     "cls": "team_round_timer",      "desc": "Main TF2 match countdown clock on HUD",    "icon_type": "vec", "icon": "timer",   "preset": ""},
+			{"name": "Math Counter",    "cls": "math_counter",          "desc": "Counts caps, kills, or puzzle switches",   "icon_type": "vec", "icon": "counter", "preset": ""},
+			{"name": "Logic Auto",      "cls": "logic_auto",            "desc": "Automatically fires when the map starts",  "icon_type": "vec", "icon": "relay",   "preset": ""},
+			{"name": "Case Switch",     "cls": "logic_case",            "desc": "Picks a random or matched output branch",  "icon_type": "vec", "icon": "counter", "preset": ""},
+			{"name": "Logic Branch",    "cls": "logic_branch",          "desc": "True/False condition gate for I/O",        "icon_type": "vec", "icon": "relay",   "preset": ""},
+			{"name": "HUD Message",     "cls": "game_text",             "desc": "Displays custom on-screen text to players","icon_type": "vec", "icon": "win",     "preset": ""},
+			{"name": "Point Template",  "cls": "point_template",        "desc": "Spawns saved entity groups dynamically",   "icon_type": "vec", "icon": "relay",   "preset": ""},
+		],
+	},
+	{
+		"id": "ai_clips",
+		"name": "8. AI & Clips",
+		"short": "AI/Clips",
+		"color": Color(0.88, 0.44, 0.76, 1.0),
+		"prefixes": ["bot_", "func_nav", "func_nobuild", "info_target", "tf_bot", "ai_", "func_clip"],
+		"curated": [
+			{"name": "No-Build Zone",   "cls": "func_nobuild",          "desc": "Prevents Engineers from building here",    "icon_type": "vec", "icon": "clip",   "preset": ""},
+			{"name": "Sentry Hint",     "cls": "bot_hint_sentrygun",    "desc": "Tells TF2 AI Engineers where to build",    "icon_type": "mdl", "icon": "sentry", "preset": ""},
+			{"name": "Sniper Hint",     "cls": "bot_hint_sniper_spot",  "desc": "Tells TF2 AI Snipers good sightlines",     "icon_type": "vec", "icon": "ai",     "preset": ""},
+			{"name": "Tele Exit Hint",  "cls": "bot_hint_teleporter_exit","desc": "Tells AI Engineers where to place exit", "icon_type": "vec", "icon": "teleporter","preset": ""},
+			{"name": "Nav Blocker",     "cls": "func_nav_blocker",      "desc": "Blocks bot pathfinding through closed gate","icon_type": "vec", "icon": "clip",  "preset": ""},
+			{"name": "Target Marker",   "cls": "info_target",           "desc": "Invisible 3D anchor point for beams/cams", "icon_type": "vec", "icon": "ai",     "preset": ""},
+			{"name": "Bot Action Pt",   "cls": "bot_action_point",      "desc": "Commands bots to move or attack here",     "icon_type": "vec", "icon": "ai",     "preset": ""},
+			{"name": "MvM Bomb Path",   "cls": "func_nav_prefer",       "desc": "Guides MvM robots down preferred flank",   "icon_type": "vec", "icon": "ai",     "preset": ""},
+			{"name": "VPhysics Clip",   "cls": "func_clip_vphysics",    "desc": "Blocks physics props & stickies only",     "icon_type": "vec", "icon": "clip",   "preset": ""},
+		],
+	},
+]
+
+static func get_entity_box(cat_id: String) -> Dictionary:
+	for box in ENTITY_FOLDER_BOXES:
+		if str(box["id"]) == cat_id:
+			return box
+	return ENTITY_FOLDER_BOXES[0]
+
+static func get_entity_icon_spec(cls: String) -> Dictionary:
+	var c := cls.to_lower()
+	if c == "info_player_teamspawn": return {"type": "mdl", "key": "spawn_red"}
+	if c == "item_healthkit_small":  return {"type": "mdl", "key": "health_small"}
+	if c == "item_healthkit_medium": return {"type": "mdl", "key": "health_med"}
+	if c == "item_healthkit_full":   return {"type": "mdl", "key": "health_full"}
+	if c == "item_ammopack_small":   return {"type": "mdl", "key": "ammo_small"}
+	if c == "item_ammopack_medium":  return {"type": "mdl", "key": "ammo_med"}
+	if c == "item_ammopack_full":    return {"type": "mdl", "key": "ammo_full"}
+	if c.find("control_point") != -1:return {"type": "mdl", "key": "cap_point"}
+	if c.find("teamflag") != -1:     return {"type": "mdl", "key": "intel"}
+	if c.find("cart") != -1:         return {"type": "mdl", "key": "bomb_cart"}
+	if c.find("path_track") != -1:   return {"type": "mdl", "key": "path_node"}
+	if c.find("regenerate") != -1:   return {"type": "mdl", "key": "resupply"}
+	if c.find("upgrade") != -1:      return {"type": "mdl", "key": "upgrade_station"}
+	if c.find("sentry") != -1:       return {"type": "mdl", "key": "sentry"}
+	if c.find("dispenser") != -1:    return {"type": "mdl", "key": "dispenser"}
+	if c.find("door") != -1:         return {"type": "vec", "key": "door"}
+	if c.find("teleport") != -1:     return {"type": "vec", "key": "teleporter"}
+	if c.find("hurt") != -1 or c.find("explosion") != -1 or c.find("stun") != -1: return {"type": "vec", "key": "hurt"}
+	if c.find("push") != -1 or c.find("shake") != -1: return {"type": "vec", "key": "jump_pad"}
+	if c.begins_with("trigger_"):    return {"type": "vec", "key": "trigger"}
+	if c.find("light_environment") != -1 or c.find("env_sun") != -1 or c.find("tonemap") != -1: return {"type": "vec", "key": "sun"}
+	if c.begins_with("light") or c.find("beam") != -1 or c.find("sprite") != -1: return {"type": "vec", "key": "light"}
+	if c.find("sound") != -1 or c.find("ambient") != -1 or c.find("fog") != -1: return {"type": "vec", "key": "sound"}
+	if c.find("particle") != -1 or c.find("fire") != -1 or c.find("spark") != -1 or c.find("steam") != -1 or c.find("spell") != -1 or c.find("powerup") != -1: return {"type": "vec", "key": "particle"}
+	if c.find("timer") != -1 or c.find("koth") != -1: return {"type": "vec", "key": "timer"}
+	if c.find("math_") != -1 or c.find("counter") != -1 or c.find("case") != -1 or c.find("currency") != -1: return {"type": "vec", "key": "counter"}
+	if c.find("win") != -1 or c.find("gamerules") != -1 or c.find("game_text") != -1: return {"type": "vec", "key": "win"}
+	if c.find("camera") != -1 or c.find("observer") != -1: return {"type": "vec", "key": "camera"}
+	if c.find("clip") != -1 or c.find("nobuild") != -1 or c.find("cubemap") != -1 or c.find("nav_blocker") != -1: return {"type": "vec", "key": "clip"}
+	if c.find("bot_") != -1 or c.find("ai_") != -1 or c.find("nav_") != -1 or c.find("target") != -1: return {"type": "vec", "key": "ai"}
+	return {"type": "vec", "key": "relay"}
+
+static func get_entities_for_box(core: Object, cat_id: String, limit: int = 36) -> Array[Dictionary]:
+	var results: Array[Dictionary] = []
+	var seen: Dictionary = {}
+	var box := get_entity_box(cat_id)
+	for item in box.get("curated", []):
+		results.append(item)
+		seen[str(item["cls"]) + ":" + str(item.get("preset", ""))] = true
+		seen[str(item["cls"])] = true
+	if core != null and core.has_method("list_fgd_point_classes"):
+		var prefixes: Array = box.get("prefixes", [])
+		var all_cls: PackedStringArray = core.list_fgd_point_classes("")
+		for raw_c in all_cls:
+			if results.size() >= limit:
+				break
+			var cs := str(raw_c)
+			if seen.has(cs):
+				continue
+			var matched := false
+			for pf in prefixes:
+				if cs.begins_with(str(pf)):
+					matched = true; break
+			if not matched:
+				continue
+			seen[cs] = true
+			var ic := get_entity_icon_spec(cs)
+			var pretty := cs.replace("info_", "").replace("env_", "").replace("logic_", "").replace("tf_", "").replace("_", " ").capitalize()
+			results.append({
+				"name": pretty,
+				"cls": cs,
+				"desc": "Valve TF2 FGD entity (" + cs + ")",
+				"icon_type": ic["type"],
+				"icon": ic["key"],
+				"preset": "",
+			})
+	return results
+
 ## Computes human-friendly TF2 Map Coach health & gameplay balance diagnostics!
 static func analyze_map(doc: Object) -> Dictionary:
 	var report := {
