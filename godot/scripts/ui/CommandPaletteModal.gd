@@ -139,6 +139,10 @@ func _collect_candidates(query: String) -> Array[Dictionary]:
 	# 1. High-value Editor Commands & Studios
 	var cmds := [
 		{"tag": "ACTION", "col": HudWidgets.COL_ACC,  "title": "Compile & Launch in Real TF2 (F9)",        "sub": "Open Valve vbsp/vvis/vrad Compile Studio", "kind": "cmd", "id": "compile"},
+		{"tag": "ACTION", "col": HudWidgets.COL_ACC,  "title": "Cycle Lighting: Daylight / Lit Interior / Fullbright (F3)", "sub": "Preview real TF2 light & light_spot illumination or fullbright blockout", "kind": "cmd", "id": "lighting"},
+		{"tag": "ACTION", "col": HudWidgets.COL_CYAN, "title": "Visual 3D Entity I/O Wiring (Shift+W)",    "sub": "Click source -> click target entity in 3D for 1-click TF2 outputs", "kind": "cmd", "id": "wire3d"},
+		{"tag": "ACTION", "col": HudWidgets.COL_ACC,  "title": "Save Selected Solids as Custom Prefab",    "sub": "Save room/structure to godot/maps/prefabs/ for 1-click reuse", "kind": "cmd", "id": "save_prefab"},
+		{"tag": "ACTION", "col": HudWidgets.COL_GREEN,"title": "Export Shareable Map Bundle (.bsp + .vmf + .pop)", "sub": "Package compiled map & install guide into godot/exports/", "kind": "cmd", "id": "export_bundle"},
 		{"tag": "ACTION", "col": HudWidgets.COL_ACC,  "title": "Toggle Zen Viewport Mode (Tab)",           "sub": "Hide/show all HUD chrome for clean 3D inspection", "kind": "cmd", "id": "zen"},
 		{"tag": "ACTION", "col": HudWidgets.COL_ACC,  "title": "Open Mann Co. Workshop Hub",               "sub": "Create map, open saved .vmf, or walk official maps", "kind": "cmd", "id": "hub"},
 		{"tag": "STUDIO", "col": Color(0.74, 0.42, 0.96), "title": "Mann vs. Machine (MvM) Studio",        "sub": "Robot Spawns, Tank Track & Valve .pop Wave Exporter", "kind": "cmd", "id": "mvm_studio"},
@@ -287,6 +291,10 @@ func _run_item(it: Dictionary) -> void:
 	if kind == "cmd":
 		match id:
 			"compile": app._open_compile_drawer()
+			"lighting": app._cycle_lighting_mode()
+			"wire3d": app._start_visual_3d_wire(app.selected_entity)
+			"save_prefab": app._save_selection_as_prefab()
+			"export_bundle": app._export_map_bundle()
 			"zen": app._toggle_zen_mode()
 			"hub": app._show_welcome_hub(true)
 			"mvm_studio": app.set_stage(app.Stage.GAMEPLAY); app._open_mvm_studio()

@@ -27,6 +27,8 @@ const CLASSES := [
 signal fired_rocket(origin: Vector3)
 signal exploded(pos: Vector3)
 signal pickup_collected(kind: String)
+signal cart_moved(pos: Vector3, yaw_rad: float, progress_01: float)
+signal objective_event(msg: String)
 
 var active: bool = false
 var noclip: bool = false
@@ -57,6 +59,20 @@ var _sentry_node: Node3D
 var _rockets: Array = [] # [{node, vel, gravity, life}]
 var _flashes: Array = [] # [{node, life}]
 var _triggers: Array = [] # [{kind, min, max, push_vel, target_pos}]
+var _last_entities: Array = []
+# Live Milestone 30 Gamemode Playtest Simulation (Payload Cart + Cap Points + Rollout Timer!)
+var _track_pts: Array[Vector3] = []
+var _track_total_len: float = 0.0
+var _cart_dist: float = 0.0
+var _cart_pos: Vector3 = Vector3.ZERO
+var _cart_yaw: float = 0.0
+var _cart_pushing: bool = false
+var _cart_heal_accum: float = 0.0
+var _cart_finished: bool = false
+var _cap_points: Array = [] # [{pos, name, progress, captured}]
+var _active_cap_idx: int = -1
+var _rollout_split_s: float = -1.0
+var _objective_positions: Array[Vector3] = []
 
 func _ready() -> void:
 	collision_layer = 4
@@ -97,16 +113,22 @@ func spawn_at(pos: Vector3, yaw_deg: float = 0.0, entities: Array = []) -> void:
 		var hit := space.intersect_ray(q)
 		if not hit.is_empty():
 			safe_pos = (hit["position"] as Vector3) + Vector3(0, 0.12, 0)
-	global_position = safe_pos
+	if is_inside_tree():
+		global_position = safe_pos
+	else:
+		position = safe_pos
 	velocity = Vector3.ZERO
 	_yaw = deg_to_rad(yaw_deg)
 	_pitch = 0.0
 	_elapsed_run = 0.0
-	_ground_y = global_position.y
-	_peak_y = global_position.y
+	_ground_y = safe_pos.y
+	_peak_y = safe_pos.y
 	scoped = false
 	_double_jumped = false
-	_build_sandbox_triggers(entities)
+	_rollout_split_s = -1.0
+	if not entities.is_empty():
+		_last_entities = entities
+	_build_sandbox_triggers(_last_entities)
 	_apply_look()
 
 func set_active(on: bool) -> void:
@@ -134,6 +156,12 @@ func get_class_info() -> Dictionary:
 
 func get_telemetry() -> Dictionary:
 	var hspeed := Vector2(velocity.x, velocity.z).length() * UPM
+	var cart_pct := clampf(_cart_dist / _track_total_len, 0.0, 1.0) if _track_total_len > 0.1 else -1.0
+	var cap_pct := -1.0
+	var cap_lbl := ""
+	if _active_cap_idx >= 0 and _active_cap_idx < _cap_points.size():
+		cap_pct = float(_cap_points[_active_cap_idx]["progress"])
+		cap_lbl = str(_cap_points[_active_cap_idx]["name"])
 	return {
 		"class_id": CLASSES[class_idx]["id"],
 		"class_name": CLASSES[class_idx]["name"],
@@ -149,7 +177,12 @@ func get_telemetry() -> Dictionary:
 		"sightline_u": int(round(_sightline_u)),
 		"sightline_warn": _sightline_u > 2048.0,
 		"run_time_s": _elapsed_run,
-		"pos_u": global_position * UPM,
+		"rollout_split_s": _rollout_split_s,
+		"cart_progress": cart_pct,
+		"cart_pushing": _cart_pushing,
+		"cap_progress": cap_pct,
+		"cap_label": cap_lbl,
+		"pos_u": (global_position if is_inside_tree() else position) * UPM,
 	}
 
 func handle_mouse_motion(rel: Vector2, sens: float = 0.0024) -> void:
@@ -280,7 +313,7 @@ func _physics_process(delta: float) -> void:
 	# Safety floor recovery if player ever drops into the void below -250m
 	if global_position.y < -250.0:
 		spawn_at(_spawn_pos_saved, _spawn_yaw_saved)
-	_process_triggers()
+	_process_triggers(delta)
 	_step_projectiles(delta)
 	_update_sightline_rangefinder()
 
@@ -418,11 +451,49 @@ func _update_sightline_rangefinder() -> void:
 
 func _build_sandbox_triggers(entities: Array) -> void:
 	_triggers.clear()
+	_track_pts.clear()
+	_track_total_len = 0.0
+	_cart_dist = 0.0
+	_cart_pushing = false
+	_cart_finished = false
+	_cap_points.clear()
+	_active_cap_idx = -1
+	_objective_positions.clear()
+
 	var targets := {}
+	var track_nodes := {} # targetname -> {pos, next}
+	var incoming := {}
 	for e in entities:
 		var tname: String = str(e["kv"].get("targetname", ""))
 		if not tname.is_empty():
 			targets[tname] = e["pos"]
+		if str(e["classname"]) == "path_track" and not tname.is_empty():
+			var nxt: String = str(e["kv"].get("target", ""))
+			track_nodes[tname] = {"pos": e["pos"], "next": nxt}
+			if not nxt.is_empty():
+				incoming[nxt] = true
+
+	# Follow linked path_track chain from its head node to build the live Payload Cart spline!
+	if not track_nodes.is_empty():
+		var head := ""
+		for tn in track_nodes.keys():
+			if not incoming.has(tn):
+				head = str(tn)
+				break
+		if head.is_empty():
+			head = str(track_nodes.keys()[0])
+		var visited := {}
+		var cur := head
+		while not cur.is_empty() and track_nodes.has(cur) and not visited.has(cur):
+			visited[cur] = true
+			_track_pts.append(track_nodes[cur]["pos"])
+			cur = str(track_nodes[cur]["next"])
+		for i in range(_track_pts.size() - 1):
+			_track_total_len += _track_pts[i].distance_to(_track_pts[i + 1])
+		if not _track_pts.is_empty():
+			_cart_pos = _track_pts[0]
+			_objective_positions.append(_cart_pos)
+
 	for e in entities:
 		var cls: String = str(e["classname"])
 		if cls == "trigger_push" and e.get("is_brush", false):
@@ -434,9 +505,33 @@ func _build_sandbox_triggers(entities: Array) -> void:
 				_triggers.append({"kind": "teleport", "min": e["bounds_min"], "max": e["bounds_max"], "target_pos": targets[tgt]})
 		elif cls.begins_with("item_healthkit"):
 			_triggers.append({"kind": "health", "pos": e["pos"]})
+		elif cls == "team_control_point":
+			var cp_nm := str(e["kv"].get("point_printname", "Control Point"))
+			_cap_points.append({"pos": e["pos"], "name": cp_nm, "progress": 0.0, "captured": false})
+			_objective_positions.append(e["pos"])
+		elif cls == "item_teamflag":
+			_objective_positions.append(e["pos"])
 
-func _process_triggers() -> void:
-	var p := global_position + Vector3(0, 1.0, 0)
+func _sample_track(dist_m: float) -> Dictionary:
+	if _track_pts.size() < 2:
+		return {"pos": _cart_pos, "yaw": 0.0}
+	var rem := clampf(dist_m, 0.0, _track_total_len)
+	for i in range(_track_pts.size() - 1):
+		var a := _track_pts[i]
+		var b := _track_pts[i + 1]
+		var seg := a.distance_to(b)
+		if seg < 0.001:
+			continue
+		if rem <= seg or i == _track_pts.size() - 2:
+			var t := clampf(rem / seg, 0.0, 1.0)
+			var d := (b - a).normalized()
+			return {"pos": a.lerp(b, t), "yaw": atan2(d.x, d.z)}
+		rem -= seg
+	return {"pos": _track_pts[_track_pts.size() - 1], "yaw": _cart_yaw}
+
+func _process_triggers(delta: float = 0.016) -> void:
+	var gp := global_position if is_inside_tree() else position
+	var p := gp + Vector3(0, 1.0, 0)
 	for tr in _triggers:
 		var kind: String = tr["kind"]
 		if kind == "push":
@@ -448,9 +543,52 @@ func _process_triggers() -> void:
 			var mn: Vector3 = tr["min"]
 			var mx: Vector3 = tr["max"]
 			if p.x >= mn.x and p.x <= mx.x and p.y >= mn.y and p.y <= mx.y and p.z >= mn.z and p.z <= mx.z:
-				global_position = (tr["target_pos"] as Vector3) + Vector3(0, 0.25, 0)
+				if is_inside_tree(): global_position = (tr["target_pos"] as Vector3) + Vector3(0, 0.25, 0)
+				else: position = (tr["target_pos"] as Vector3) + Vector3(0, 0.25, 0)
 				velocity = Vector3.ZERO
 		elif kind == "health" and health < max_health:
 			if p.distance_to(tr["pos"]) < 1.5:
 				health = max_health
 				pickup_collected.emit("health")
+
+	# 1. Spawn-to-Objective Rollout Stopwatch (records split time when first reaching Mid / Cap / Intel / Cart!)
+	if _rollout_split_s < 0.0 and not _objective_positions.is_empty():
+		for op in _objective_positions:
+			if gp.distance_to(op) <= (180.0 / UPM):
+				_rollout_split_s = _elapsed_run
+				objective_event.emit("Rollout Split: %.2fs (%s)" % [_rollout_split_s, CLASSES[class_idx]["name"]])
+				break
+
+	# 2. Live Payload Cart Spline Pushing & +10 HP/s Cart Healing!
+	_cart_pushing = false
+	if _track_pts.size() >= 2 and _track_total_len > 0.1 and not _cart_finished:
+		if gp.distance_to(_cart_pos) <= (140.0 / UPM):
+			_cart_pushing = true
+			_cart_dist = minf(_track_total_len, _cart_dist + (90.0 / UPM) * delta)
+			var samp := _sample_track(_cart_dist)
+			_cart_pos = samp["pos"]
+			_cart_yaw = float(samp["yaw"])
+			var pct := _cart_dist / _track_total_len
+			cart_moved.emit(_cart_pos, _cart_yaw, pct)
+			if health < max_health:
+				_cart_heal_accum += 10.0 * delta
+				if _cart_heal_accum >= 1.0:
+					var h_add := int(_cart_heal_accum)
+					_cart_heal_accum -= float(h_add)
+					health = mini(max_health, health + h_add)
+			if pct >= 0.999 and not _cart_finished:
+				_cart_finished = true
+				objective_event.emit("PAYLOAD DELIVERED — BOOM! (100%)")
+
+	# 3. Live Control Point Capture Simulation!
+	_active_cap_idx = -1
+	for ci in range(_cap_points.size()):
+		var cp: Dictionary = _cap_points[ci]
+		if gp.distance_to(cp["pos"]) <= (160.0 / UPM):
+			_active_cap_idx = ci
+			if not bool(cp["captured"]):
+				cp["progress"] = minf(1.0, float(cp["progress"]) + delta / 3.0)
+				if float(cp["progress"]) >= 1.0:
+					cp["captured"] = true
+					objective_event.emit("CAPTURED: %s!" % str(cp["name"]))
+			break

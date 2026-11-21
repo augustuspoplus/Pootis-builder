@@ -29,6 +29,11 @@ var _ent_bounds: Dictionary = {} # ent_idx -> [bmin: Vector3, bmax: Vector3]
 var _ent_nodes: Dictionary = {}  # ent_idx -> Node3D (for O(1) incremental sync without rebuilding entire scene!)
 var _badge_tex_cache: Dictionary = {} # kind -> ImageTexture
 var _editor_only_nodes: Array[Node3D] = []
+var _light_nodes: Array[Light3D] = []
+var lighting_preview_mode: int = 0 # 0=Daylight, 1=Lit Interior, 2=Fullbright
+var cart_visual_node: Node3D = null
+var _cart_orig_pos: Vector3 = Vector3.ZERO
+var _cart_orig_rot: Vector3 = Vector3.ZERO
 
 const ENTITY_MODELS := {
 	"item_healthkit_small":  "models/items/medkit_small.mdl",
@@ -79,9 +84,41 @@ func clear_all() -> void:
 	_ent_bounds.clear()
 	_ent_nodes.clear()
 	_editor_only_nodes.clear()
+	_light_nodes.clear()
+	cart_visual_node = null
+	_light_nodes.clear()
+	cart_visual_node = null
 	selected_entity = -1
 	hovered_entity = -1
 	_rebuild_highlight_boxes()
+
+func set_lighting_preview_mode(mode: int) -> void:
+	lighting_preview_mode = clampi(mode, 0, 2)
+	for ln in _light_nodes:
+		if not is_instance_valid(ln):
+			continue
+		var base_e: float = float(ln.get_meta("base_energy", 1.35))
+		if lighting_preview_mode == 1: # Lit Interior Preview (boost interior lights + enable shadow on key spots!)
+			ln.visible = show_lights
+			ln.light_energy = base_e * 1.65
+			if ln is SpotLight3D:
+				ln.shadow_enabled = true
+		elif lighting_preview_mode == 2: # Fullbright Blockout
+			ln.visible = false
+		else: # Daylight
+			ln.visible = show_lights
+			ln.light_energy = base_e
+			ln.shadow_enabled = false
+
+func move_cart_visual(world_pos: Vector3, yaw_rad: float) -> void:
+	if cart_visual_node != null and is_instance_valid(cart_visual_node):
+		cart_visual_node.position = world_pos
+		cart_visual_node.rotation = Vector3(0.0, yaw_rad, 0.0)
+
+func reset_cart_visual() -> void:
+	if cart_visual_node != null and is_instance_valid(cart_visual_node):
+		cart_visual_node.position = _cart_orig_pos
+		cart_visual_node.rotation = _cart_orig_rot
 
 func set_playtest_mode(on: bool) -> void:
 	playtest_mode = on
@@ -107,6 +144,8 @@ func sync_all() -> void:
 	_ent_bounds.clear()
 	_ent_nodes.clear()
 	_editor_only_nodes.clear()
+	_light_nodes.clear()
+	cart_visual_node = null
 
 	var ents: Array = doc.get_entities()
 	var target_pos := {} # targetname -> Vector3
@@ -243,6 +282,10 @@ func _spawn_entity_node(idx: int, e: Dictionary, pos: Vector3) -> Node3D:
 			mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
 			holder.add_child(mi)
 			ents_root.add_child(holder)
+			if mdl_path.to_lower().find("bomb_cart") != -1 or cls == "mapobj_cart_dispenser":
+				cart_visual_node = holder
+				_cart_orig_pos = pos
+				_cart_orig_rot = holder.rotation
 			var aabb := mesh.get_aabb()
 			var bmin := pos + aabb.position
 			var bmax := pos + aabb.position + aabb.size
@@ -421,17 +464,66 @@ func _spawn_entity_node(idx: int, e: Dictionary, pos: Vector3) -> Node3D:
 		_ent_bounds[idx] = [pos + Vector3(-0.75, 0.0, -0.75), pos + Vector3(0.75, 2.6, 0.75)]
 		return holder
 
-	# 4. Real Godot OmniLight3D + glowing bulb for TF2 point lights!
+	# 4. Real Godot OmniLight3D / SpotLight3D matching Valve's _light (R G B Brightness) + angles/pitch/_cone!
 	if cls == "light" or cls == "light_spot":
 		if not show_lights:
 			return null
-		var lcol := _parse_light_color(str(kv.get("_light", "255 240 210 300")))
-		var omni := OmniLight3D.new()
-		omni.light_color = lcol
-		omni.light_energy = 1.35
-		omni.omni_range = 16.0
-		omni.shadow_enabled = false
-		holder.add_child(omni)
+		var linfo := _parse_light_info(str(kv.get("_light", "255 240 210 300")))
+		var lcol: Color = linfo["color"]
+		var bright: float = float(linfo["brightness"])
+		var base_energy := clampf(bright / 180.0, 0.35, 6.0)
+		var rng := clampf(sqrt(maxf(bright, 40.0)) * 0.90, 6.0, 38.0)
+
+		var light_node: Light3D
+		if cls == "light_spot":
+			var spot := SpotLight3D.new()
+			spot.light_color = lcol
+			spot.light_energy = base_energy * (1.65 if lighting_preview_mode == 1 else 1.0)
+			spot.spot_range = rng * 1.25
+			var cone_deg := clampf(float(str(kv.get("_cone", "45"))), 12.0, 82.0)
+			spot.spot_angle = cone_deg
+			spot.spot_attenuation = 1.25
+			spot.shadow_enabled = (lighting_preview_mode == 1)
+			var pitch_deg := float(str(kv.get("pitch", "-90")))
+			spot.rotation_degrees = Vector3(pitch_deg, yaw_deg, 0.0)
+			light_node = spot
+
+			# Subtle wireframe spotlight cone preview in edit mode so mappers see exact aim!
+			var cone_vis := MeshInstance3D.new()
+			var cim := ImmediateMesh.new()
+			var cmat := StandardMaterial3D.new()
+			cmat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+			cmat.albedo_color = Color(lcol.r, lcol.g, lcol.b, 0.55)
+			cmat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+			cim.surface_begin(Mesh.PRIMITIVE_LINES, cmat)
+			var clen := 3.2
+			var crad := clen * tan(deg_to_rad(cone_deg))
+			for ci in range(8):
+				var a0 := float(ci) * TAU / 8.0
+				var a1 := float(ci + 1) * TAU / 8.0
+				var p0 := Vector3(cos(a0) * crad, sin(a0) * crad, -clen)
+				var p1 := Vector3(cos(a1) * crad, sin(a1) * crad, -clen)
+				cim.surface_add_vertex(Vector3.ZERO); cim.surface_add_vertex(p0)
+				cim.surface_add_vertex(p0); cim.surface_add_vertex(p1)
+			cim.surface_end()
+			cone_vis.mesh = cim
+			cone_vis.rotation_degrees = Vector3(pitch_deg, yaw_deg, 0.0)
+			holder.add_child(cone_vis)
+			_editor_only_nodes.append(cone_vis)
+			cone_vis.visible = not playtest_mode
+		else:
+			var omni := OmniLight3D.new()
+			omni.light_color = lcol
+			omni.light_energy = base_energy * (1.65 if lighting_preview_mode == 1 else 1.0)
+			omni.omni_range = rng
+			omni.omni_attenuation = 1.35
+			omni.shadow_enabled = false
+			light_node = omni
+
+		light_node.set_meta("base_energy", base_energy)
+		light_node.visible = (lighting_preview_mode != 2) and show_lights
+		holder.add_child(light_node)
+		_light_nodes.append(light_node)
 
 		var bulb := MeshInstance3D.new()
 		var sm := SphereMesh.new()
@@ -646,12 +738,19 @@ func _parse_yaw(angles_str: String) -> float:
 		return float(parts[1])
 	return 0.0
 
-func _parse_light_color(light_str: String) -> Color:
+func _parse_light_info(light_str: String) -> Dictionary:
 	var parts := light_str.split(" ", false)
+	var col := Color(1.0, 0.94, 0.82)
+	var bright := 300.0
 	if parts.size() >= 3:
-		return Color(
-			clamp(float(parts[0]) / 255.0, 0.0, 1.0),
-			clamp(float(parts[1]) / 255.0, 0.0, 1.0),
-			clamp(float(parts[2]) / 255.0, 0.0, 1.0)
+		col = Color(
+			clampf(float(parts[0]) / 255.0, 0.0, 1.0),
+			clampf(float(parts[1]) / 255.0, 0.0, 1.0),
+			clampf(float(parts[2]) / 255.0, 0.0, 1.0)
 		)
-	return Color(1.0, 0.94, 0.82)
+	if parts.size() >= 4:
+		bright = clampf(float(parts[3]), 25.0, 2500.0)
+	return {"color": col, "brightness": bright}
+
+func _parse_light_color(light_str: String) -> Color:
+	return _parse_light_info(light_str)["color"]

@@ -896,12 +896,18 @@ static func build_inspector_drawer(app: Node3D, vbox: VBoxContainer) -> void:
 				vbox.add_child(_lbl("No FGD spawnflags defined for this entity class.", fonts["body"], 11, HudWidgets.COL_TX_MUTED))
 
 		elif app._insp_tab == 2:
+			var w3d_b := Button.new(); w3d_b.text = "Visual 3D Wire: Click Target Entity (Shift+W)"
+			w3d_b.custom_minimum_size = Vector2(0, 34)
+			HudWidgets.style_tf2_button(w3d_b, fonts["heading"], 10, true)
+			w3d_b.pressed.connect(func(): app.audio.play("click"); app._start_visual_3d_wire(app.selected_entity))
+			vbox.add_child(w3d_b)
+
 			# Outputs I/O List with Delete buttons + Full Add Output Builder (Param, Delay, Once Only!)
 			var conns: Array = e.get("connections", [])
 			for ci in range(conns.size()):
 				var c: Dictionary = conns[ci]
 				var crow := HBoxContainer.new(); crow.add_theme_constant_override("separation", 4); vbox.add_child(crow)
-				var cl := _lbl("â€¢ %s -> %s" % [str(c["output"]), str(c["args"])], fonts["mono"], 10, HudWidgets.COL_CYAN)
+				var cl := _lbl("* %s -> %s" % [str(c["output"]), str(c["args"])], fonts["mono"], 10, HudWidgets.COL_CYAN)
 				cl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 				crow.add_child(cl)
 				var del_c := Button.new(); del_c.text = "X"
@@ -1219,12 +1225,57 @@ static func build_check_problems_drawer(app: Node3D, vbox: VBoxContainer) -> voi
 	var fonts: Dictionary = app.fonts
 	var probs: Array = app.doc.check_problems()
 	var rep: Dictionary = Tf2CatalogScript.analyze_map(app.doc)
-	vbox.add_child(_lbl("Map Coach Grade: %s  |  Problems Found: %d\nSolids: %d  |  Entities: %d  |  Heavy Walk: %.1fs" % [
-		rep["grade"], probs.size(), rep["solids"], rep["entities"], rep["walk_time_heavy_s"]
-	], fonts["body"], 11, HudWidgets.COL_GREEN if probs.is_empty() else HudWidgets.COL_ACC))
+
+	# 1. TF2 Map Balance & Pacing Report Card (Milestone 30!)
+	var ents: Array = app.doc.get_entities()
+	var red_sp := 0; var blu_sp := 0; var hp_l := 0; var hp_r := 0; var am_l := 0; var am_r := 0
+	var sp_positions: Array[Vector3] = []
+	var obj_positions: Array[Vector3] = []
+	for e in ents:
+		var cls := str(e["classname"])
+		var ep: Vector3 = e["pos"]
+		if cls == "info_player_teamspawn":
+			var tn := str(e["kv"].get("TeamNum", "2"))
+			if tn == "2": red_sp += 1
+			else: blu_sp += 1
+			sp_positions.append(ep)
+		elif cls.begins_with("item_healthkit"):
+			if ep.x < 0.0: hp_l += 1
+			else: hp_r += 1
+		elif cls.begins_with("item_ammopack"):
+			if ep.x < 0.0: am_l += 1
+			else: am_r += 1
+		elif cls == "team_control_point" or cls == "item_teamflag" or cls == "mapobj_cart_dispenser":
+			obj_positions.append(ep)
+
+	var rollout_dist_u := 1800.0
+	if not sp_positions.is_empty() and not obj_positions.is_empty():
+		var best_d := 1e9
+		for sp in sp_positions:
+			for op in obj_positions:
+				best_d = minf(best_d, sp.distance_to(op) * 32.0)
+		rollout_dist_u = maxf(256.0, best_d)
+	var scout_s := rollout_dist_u / 400.0
+	var soldier_s := rollout_dist_u / 240.0
+	var heavy_s := rollout_dist_u / 230.0
+	var pace_lbl := "IDEAL TF2 PACING (6-13s)" if (soldier_s >= 5.5 and soldier_s <= 14.0) else ("VERY FAST ARENA (<5.5s)" if soldier_s < 5.5 else "LONG ROLLOUT (>14s)")
+	var pace_col := HudWidgets.COL_GREEN if (soldier_s >= 5.5 and soldier_s <= 14.0) else HudWidgets.COL_ACC
+
+	var bcard := HudWidgets.make_section_card("TF2 MAP BALANCE & ROLLOUT ANALYZER", fonts, HudWidgets.COL_CYAN)
+	vbox.add_child(bcard["panel"])
+	var bvb: VBoxContainer = bcard["vbox"]
+	bvb.add_child(_lbl("Map Coach Grade: %s  |  Solids: %d  |  Entities: %d" % [rep["grade"], rep["solids"], rep["entities"]], fonts["heading"], 11, HudWidgets.COL_TX))
+	bvb.add_child(_lbl("Rollout Estimate (~%du): Scout %.1fs | Soldier %.1fs | Heavy %.1fs" % [int(rollout_dist_u), scout_s, soldier_s, heavy_s], fonts["mono"], 10, pace_col))
+	bvb.add_child(_lbl("Pacing Verdict: %s" % pace_lbl, fonts["body"], 10, pace_col))
+	var sp_ok: bool = (red_sp == blu_sp and red_sp > 0) or str(app.active_gamemode) == "mvm"
+	var pk_ok: bool = absi(hp_l - hp_r) <= 1 and absi(am_l - am_r) <= 1
+	bvb.add_child(_lbl("Spawns: RED %d / BLU %d (%s)" % [red_sp, blu_sp, "Balanced" if sp_ok else "Check Symmetry"], fonts["body"], 10, HudWidgets.COL_GREEN if sp_ok else HudWidgets.COL_ACC))
+	bvb.add_child(_lbl("Pickups (L/R Halves): Health %d/%d  |  Ammo %d/%d (%s)" % [hp_l, hp_r, am_l, am_r, "Even" if pk_ok else "Skewed"], fonts["body"], 10, HudWidgets.COL_GREEN if pk_ok else HudWidgets.COL_ACC))
 
 	if probs.is_empty():
-		vbox.add_child(_lbl("âœ“ Zero map errors detected â€” ready to compile cleanly in Valve vbsp!", fonts["heading"], 12, HudWidgets.COL_GREEN))
+		var okc := HudWidgets.make_section_card("COMPILE READINESS", fonts, HudWidgets.COL_GREEN)
+		vbox.add_child(okc["panel"])
+		(okc["vbox"] as VBoxContainer).add_child(_lbl("OK: Zero map errors detected — ready to compile cleanly in Valve vbsp!", fonts["heading"], 11, HudWidgets.COL_GREEN))
 		return
 
 	var fix_all_b := Button.new(); fix_all_b.text = "Fix All Auto-Fixable Problems"
@@ -1476,3 +1527,76 @@ static func build_payload_studio(app: Node3D, vbox: VBoxContainer) -> void:
 				app._toast("Click in 3D to place " + str(item["t"]))
 		)
 		pg.add_child(b)
+
+# ==============================================================================
+# 10. VISUAL 3D ENTITY I/O SMART WIRE PRESET DRAWER (Shift+W -> Click Target!)
+# ==============================================================================
+static func build_wire_preset_drawer(app: Node3D, vbox: VBoxContainer, src_idx: int, tgt_idx: int) -> void:
+	var fonts: Dictionary = app.fonts
+	var ents: Array = app.doc.get_entities()
+	if src_idx < 0 or tgt_idx < 0 or src_idx >= ents.size() or tgt_idx >= ents.size():
+		return
+	var se: Dictionary = ents[src_idx]
+	var te: Dictionary = ents[tgt_idx]
+	var scls := str(se["classname"])
+	var tcls := str(te["classname"])
+	var tname := str(te["kv"].get("targetname", ""))
+	if tname.is_empty():
+		tname = "%s_%02d" % [tcls.get_slice("_", 1) if tcls.find("_") != -1 else tcls, tgt_idx]
+		app.doc.set_entity_kv(tgt_idx, "targetname", tname)
+
+	var c1 := HudWidgets.make_section_card("WIRE CONNECTION PAIR", fonts, HudWidgets.COL_CYAN)
+	vbox.add_child(c1["panel"])
+	var v1: VBoxContainer = c1["vbox"]
+	v1.add_child(_lbl("SOURCE: #%d %s" % [src_idx, scls], fonts["heading"], 11, HudWidgets.COL_ACC))
+	v1.add_child(_lbl("TARGET: #%d %s (name: %s)" % [tgt_idx, tcls, tname], fonts["heading"], 11, HudWidgets.COL_CYAN))
+
+	var presets: Array = []
+	if tcls == "func_door":
+		if scls.begins_with("trigger_"):
+			presets.append({"lbl": "Auto-Open & Close Door (Touch)", "pairs": [["OnStartTouch", "Open"], ["OnEndTouchAll", "Close"]]})
+			presets.append({"lbl": "Open Door Once (OnStartTouch)", "pairs": [["OnStartTouch", "Open"]]})
+		elif scls == "func_button":
+			presets.append({"lbl": "Toggle Door on Button Press (OnPressed -> Toggle)", "pairs": [["OnPressed", "Toggle"]]})
+			presets.append({"lbl": "Open Door on Press (OnPressed -> Open)", "pairs": [["OnPressed", "Open"]]})
+		else:
+			presets.append({"lbl": "Open Door (OnTrigger -> Open)", "pairs": [["OnTrigger", "Open"]]})
+	elif tcls == "light" or tcls == "light_spot":
+		presets.append({"lbl": "Toggle Light (OnTrigger -> Toggle)", "pairs": [["OnTrigger", "Toggle"]]})
+		presets.append({"lbl": "Turn Light On (OnTrigger -> TurnOn)", "pairs": [["OnTrigger", "TurnOn"]]})
+	elif tcls == "ambient_generic":
+		presets.append({"lbl": "Play Sound FX (OnStartTouch -> PlaySound)", "pairs": [["OnStartTouch", "PlaySound"]]})
+	elif tcls == "info_particle_system":
+		presets.append({"lbl": "Start Particles (OnTrigger -> Start)", "pairs": [["OnTrigger", "Start"]]})
+	elif scls == "team_control_point":
+		presets.append({"lbl": "On RED Capture -> Trigger", "pairs": [["OnCapTeam1", "Trigger"]]})
+		presets.append({"lbl": "On BLU Capture -> Trigger", "pairs": [["OnCapTeam2", "Trigger"]]})
+	elif scls == "func_button":
+		presets.append({"lbl": "On Button Press -> Trigger", "pairs": [["OnPressed", "Trigger"]]})
+	elif scls.begins_with("trigger_"):
+		presets.append({"lbl": "On Player Enter -> Trigger", "pairs": [["OnStartTouch", "Trigger"]]})
+		presets.append({"lbl": "On Player Enter -> Enable", "pairs": [["OnStartTouch", "Enable"]]})
+	if presets.is_empty():
+		presets.append({"lbl": "Standard Relay Trigger (OnTrigger -> Trigger)", "pairs": [["OnTrigger", "Trigger"]]})
+		presets.append({"lbl": "Enable Target (OnTrigger -> Enable)", "pairs": [["OnTrigger", "Enable"]]})
+		presets.append({"lbl": "Disable Target (OnTrigger -> Disable)", "pairs": [["OnTrigger", "Disable"]]})
+
+	var c2 := HudWidgets.make_section_card("1-CLICK TF2 SMART WIRE PRESETS", fonts, HudWidgets.COL_ACC)
+	vbox.add_child(c2["panel"])
+	var v2: VBoxContainer = c2["vbox"]
+	for pr in presets:
+		var b := Button.new(); b.text = str(pr["lbl"]); b.clip_text = true
+		HudWidgets.style_tf2_button(b, fonts["heading"], 10, pr == presets[0])
+		var pairs: Array = pr["pairs"]
+		b.pressed.connect(func():
+			for pair in pairs:
+				app.doc.add_connection(src_idx, str(pair[0]), tname, str(pair[1]), "", 0.0, false)
+			app._record_history("Visual 3D Wire -> " + tname)
+			app.ent_vis.sync_all()
+			app.audio.play("success")
+			app._toast("Wired %s -> %s! Glowing 3D logic wire created." % [scls, tname])
+			app._select_entity(src_idx)
+			app._insp_tab = 2
+			app._open_inspector_drawer()
+		)
+		v2.add_child(b)

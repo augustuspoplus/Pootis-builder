@@ -117,6 +117,14 @@ var _clip_keep_mode: int = 0
 var _clip_3d_active: bool = false
 var _clip_3d_pt_a: Vector3 = Vector3.ZERO
 var _clip_plane_mesh: MeshInstance3D = null
+var lighting_mode: int = 0 # 0=Daylight, 1=Lit Interior Preview, 2=Fullbright Blockout
+var _wire_io_src: int = -1
+var _marquee_active: bool = false
+var _marquee_start: Vector2 = Vector2.ZERO
+var _marquee_cur: Vector2 = Vector2.ZERO
+var _active_custom_prefab: String = ""
+var playtest_obj_lbl: Label
+var playtest_obj_bar: ProgressBar
 var _payload_track_idx: int = 0
 var _payload_prev_ent: int = -1
 var mvm_start_cash: int = 800
@@ -336,6 +344,8 @@ func _init_3d_world() -> void:
 	player.fired_rocket.connect(func(_o): if not settings.sfx_muted: audio.play("rocket", -10.0))
 	player.exploded.connect(func(_p): if not settings.sfx_muted: audio.play("explode", -11.0))
 	player.pickup_collected.connect(func(_k): if not settings.sfx_muted: audio.play("medkit", -8.0))
+	player.cart_moved.connect(func(p: Vector3, y: float, _pct: float): ent_vis.move_cart_visual(p, y))
+	player.objective_event.connect(func(msg: String): if not settings.sfx_muted: audio.play("success", -8.0); _toast(msg))
 
 	editor_cam = Camera3D.new()
 	editor_cam.fov = settings.camera_fov
@@ -390,6 +400,20 @@ func _create_editor_helpers() -> void:
 	bmat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED; bmat.albedo_color = Color(0.24, 0.92, 0.98, 0.92)
 	brush_ring.material_override = bmat; brush_ring.visible = false
 	add_child(brush_ring)
+
+	# Live translucent cyan 3D Clip Cut Plane preview (shown between Point A and cursor in clip_3d!)
+	_clip_plane_mesh = MeshInstance3D.new()
+	var cpm := BoxMesh.new(); cpm.size = Vector3(1.0, 8.0, 0.06)
+	_clip_plane_mesh.mesh = cpm
+	var cpmat := StandardMaterial3D.new()
+	cpmat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	cpmat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	cpmat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	cpmat.no_depth_test = true
+	cpmat.albedo_color = Color(0.14, 0.92, 1.0, 0.36)
+	_clip_plane_mesh.material_override = cpmat
+	_clip_plane_mesh.visible = false
+	add_child(_clip_plane_mesh)
 
 	# 3D RGB Transform Axis Gizmo (shown on selected solid or entity!)
 	_gizmo_root = Node3D.new()
@@ -786,6 +810,7 @@ func _refresh_selection_bar() -> void:
 		_add_sel_btn("Verts", func(): _select_tool("vertex"))
 		_add_sel_btn("Hollow", _do_hollow_selected)
 		_add_sel_btn("Clone", _duplicate_selection)
+		_add_sel_btn("Save Prefab", _save_selection_as_prefab, 3)
 		_add_sel_btn("Tie", _open_tie_entity_drawer)
 		_add_sel_btn("Props", _open_inspector_drawer)
 		_add_sel_btn("Del", _delete_selection, 2)
@@ -796,6 +821,7 @@ func _refresh_selection_bar() -> void:
 			cls = str(ents[selected_entity]["classname"])
 		tag.text = "ENT #%d: %s" % [selected_entity, cls]
 		selection_hbox.add_child(tag)
+		_add_sel_btn("Wire 3D (Shift+W)", func(): _start_visual_3d_wire(selected_entity), 3)
 		_add_sel_btn("Rot 90° (R)", _rotate_selection)
 		_add_sel_btn("Clone (Ctrl+D)", _duplicate_selection)
 		_add_sel_btn("SmartEdit (Alt+Enter)", _open_inspector_drawer)
@@ -1194,6 +1220,8 @@ func _rebuild_bottom_dock() -> void:
 				{"id": "prefab_cover",   "piece": "Box",      "lbl": "Crate Cover", "icon": "crate"},
 				{"id": "prefab_bridge",  "piece": "Ramp",     "lbl": "Catwalk"},
 			]
+			for cp in _list_custom_prefabs():
+				slots.append({"id": "custom_prefab:" + cp["path"], "piece": "Building", "lbl": cp["name"]})
 		else:
 			slots = [
 				{"id": "terrain",        "piece": "Terrain",  "lbl": "Sculpt Studio", "tool": true, "tkind": "Terrain"},
@@ -1230,6 +1258,11 @@ func _rebuild_bottom_dock() -> void:
 					_toast("Auto-Sewed %d displacement vertices!" % n)
 				elif sid.begins_with("stamp_"):
 					_stamp_terrain_quick(sid.trim_prefix("stamp_"))
+				elif sid.begins_with("custom_prefab:"):
+					_active_custom_prefab = sid.trim_prefix("custom_prefab:")
+					active_tool = "stamp_custom_prefab"
+					_rebuild_bottom_dock(); _refresh_context_bar()
+					_toast("Click in 3D to stamp your custom prefab: " + _active_custom_prefab.get_file().get_basename())
 				else:
 					_select_tool(sid)
 			)
@@ -1601,6 +1634,21 @@ func _build_playtest_hud() -> void:
 	var vb := VBoxContainer.new(); vb.add_theme_constant_override("separation", 4)
 	frame.add_child(vb)
 
+	playtest_obj_lbl = Label.new()
+	playtest_obj_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	playtest_obj_lbl.add_theme_font_override("font", fonts["heading"])
+	playtest_obj_lbl.add_theme_font_size_override("font_size", 11)
+	playtest_obj_lbl.add_theme_color_override("font_color", HudWidgets.COL_ACC)
+	playtest_obj_lbl.visible = false
+	vb.add_child(playtest_obj_lbl)
+
+	playtest_obj_bar = ProgressBar.new()
+	playtest_obj_bar.min_value = 0.0; playtest_obj_bar.max_value = 100.0; playtest_obj_bar.value = 0.0
+	playtest_obj_bar.custom_minimum_size = Vector2(360, 14)
+	playtest_obj_bar.show_percentage = false
+	playtest_obj_bar.visible = false
+	vb.add_child(playtest_obj_bar)
+
 	playtest_lbl = Label.new()
 	playtest_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	playtest_lbl.add_theme_font_override("font", fonts["heading"])
@@ -1842,7 +1890,7 @@ func _select_solid(sidx: int, fidx: int = -1, add_to_group: bool = false) -> voi
 			selected_solids.append(sidx)
 	selected_face = fidx; selected_entity = -1
 	ent_vis.set_selection(-1)
-	map_sync.set_selection(selected_solid, fidx)
+	map_sync.set_multi_selection(selected_solids, selected_solid, fidx)
 	_refresh_selection_bar()
 	_refresh_2d_views()
 	_update_3d_gizmo()
@@ -2312,6 +2360,148 @@ func _open_compile_drawer() -> void:
 	HudWidgets.style_tf2_button(seal_b, fonts["body"], 12); seal_b.pressed.connect(_do_auto_seal)
 	right_drawer_vbox.add_child(seal_b)
 
+	var exp_b := Button.new(); exp_b.text = "Export Shareable Map Bundle (.bsp + .vmf + .pop)"
+	HudWidgets.style_tf2_button(exp_b, fonts["heading"], 10, false, 3)
+	exp_b.pressed.connect(func(): _export_map_bundle())
+	right_drawer_vbox.add_child(exp_b)
+
+func _cycle_lighting_mode() -> void:
+	_set_lighting_mode((lighting_mode + 1) % 3)
+
+func _set_lighting_mode(mode: int) -> void:
+	lighting_mode = clampi(mode, 0, 2)
+	if we != null and we.environment != null:
+		if lighting_mode == 0: # Daylight
+			we.environment.ambient_light_energy = 0.85
+			we.environment.ambient_light_sky_contribution = 0.55
+			if sun != null: sun.light_energy = 1.65; sun.shadow_enabled = (settings.shadow_quality > 0)
+		elif lighting_mode == 1: # Lit Interior Preview (shows real TF2 light / light_spot!)
+			we.environment.ambient_light_energy = 0.22
+			we.environment.ambient_light_sky_contribution = 0.20
+			if sun != null: sun.light_energy = 0.85; sun.shadow_enabled = true
+		else: # Fullbright Blockout (flat bright interior building!)
+			we.environment.ambient_light_energy = 1.45
+			we.environment.ambient_light_sky_contribution = 0.0
+			if sun != null: sun.light_energy = 0.35; sun.shadow_enabled = false
+	if ent_vis != null:
+		ent_vis.set_lighting_preview_mode(lighting_mode)
+	var names := ["Daylight (Default)", "Lit Interior Preview (Real TF2 Lights)", "Fullbright Blockout"]
+	_toast("Viewport Lighting (F3): " + names[lighting_mode])
+
+func _start_visual_3d_wire(src_idx: int) -> void:
+	if src_idx < 0:
+		_toast("Select a source entity first (e.g. trigger, button, cap point), then press Shift+W!")
+		return
+	_wire_io_src = src_idx
+	active_tool = "wire_io"
+	_refresh_context_bar()
+	overlay_2d.queue_redraw()
+	_toast("Visual 3D Wire ON: Click any target entity in 3D (e.g. func_door, relay, light) — Esc to cancel")
+
+func _save_selection_as_prefab() -> String:
+	var targets: Array[int] = selected_solids.duplicate() if not selected_solids.is_empty() else ([selected_solid] if selected_solid >= 0 else [])
+	if targets.is_empty():
+		_toast("Select 1+ solids first (Ctrl+Click or drag marquee box) to Save Prefab!")
+		return ""
+	var pdir := repo_root.path_join("godot/maps/prefabs")
+	DirAccess.make_dir_recursive_absolute(pdir)
+	var raw_boxes: Array = []
+	var origin := Vector3(1e9, 1e9, 1e9)
+	for sid in targets:
+		var si: Dictionary = doc.get_solid_info(sid)
+		if not si.get("valid", false) or si.get("is_skybox", false):
+			continue
+		var b0: Vector3 = si["bounds_min"]
+		var b1: Vector3 = si["bounds_max"]
+		origin = origin.min(b0)
+		raw_boxes.append({"min": b0, "max": b1, "mat": str(si.get("material", "DEV/DEV_MEASUREGENERIC01"))})
+	if raw_boxes.is_empty():
+		return ""
+	var items: Array = []
+	for rb in raw_boxes:
+		var r0: Vector3 = rb["min"] - origin
+		var r1: Vector3 = rb["max"] - origin
+		items.append({"min": [r0.x, r0.y, r0.z], "max": [r1.x, r1.y, r1.z], "mat": rb["mat"]})
+	var existing := _list_custom_prefabs().size() + 1
+	var pname := "Custom_%02d" % existing
+	var fpath := pdir.path_join("%s.json" % pname.to_lower())
+	var payload := {"name": pname, "solids": items}
+	var f := FileAccess.open(fpath, FileAccess.WRITE)
+	if f != null:
+		f.store_string(JSON.stringify(payload, "\t"))
+		f.close()
+	audio.play("save")
+	if _dock_build_cat == "prefabs":
+		_rebuild_bottom_dock()
+	_toast("Saved %d-brush Prefab '%s' to Build -> 3. TF2 Prefabs!" % [items.size(), pname])
+	return fpath
+
+func _list_custom_prefabs() -> Array:
+	var out: Array = []
+	var pdir := repo_root.path_join("godot/maps/prefabs")
+	var d := DirAccess.open(pdir)
+	if d == null:
+		return out
+	d.list_dir_begin()
+	var fn := d.get_next()
+	while not fn.is_empty():
+		if not d.current_is_dir() and fn.to_lower().ends_with(".json"):
+			var fp := pdir.path_join(fn)
+			var nm := fn.get_basename().capitalize()
+			var txt := FileAccess.get_file_as_string(fp)
+			var parsed = JSON.parse_string(txt)
+			if parsed is Dictionary and parsed.has("name"):
+				nm = str(parsed["name"])
+			out.append({"name": nm, "path": fp})
+		fn = d.get_next()
+	d.list_dir_end()
+	out.sort_custom(func(a, b): return str(a["name"]) < str(b["name"]))
+	return out
+
+func _stamp_custom_prefab(fpath: String, pos: Vector3) -> Array[int]:
+	var created: Array[int] = []
+	if not FileAccess.file_exists(fpath):
+		return created
+	var parsed = JSON.parse_string(FileAccess.get_file_as_string(fpath))
+	if not (parsed is Dictionary) or not parsed.has("solids"):
+		return created
+	for s in parsed["solids"]:
+		var a: Array = s["min"]; var b: Array = s["max"]
+		var v0 := pos + Vector3(float(a[0]), float(a[1]), float(a[2]))
+		var v1 := pos + Vector3(float(b[0]), float(b[1]), float(b[2]))
+		var sid: int = doc.add_box(v0, v1, str(s.get("mat", "DEV/DEV_MEASUREGENERIC01")))
+		if sid >= 0:
+			created.append(sid)
+	return created
+
+func _export_map_bundle() -> String:
+	var mname: String = doc.get_map_name()
+	var vmf_path := _save_current_vmf()
+	var exp_dir := repo_root.path_join("godot/exports").path_join(mname)
+	DirAccess.make_dir_recursive_absolute(exp_dir)
+	var copied := []
+	if not vmf_path.is_empty() and FileAccess.file_exists(vmf_path):
+		DirAccess.copy_absolute(vmf_path, exp_dir.path_join(mname + ".vmf"))
+		copied.append(mname + ".vmf")
+	var paths: Dictionary = compile_ctrl.detect_paths()
+	var tf2_maps := str(paths.get("tf2_dir", "")).path_join("tf/maps")
+	var bsp_src := tf2_maps.path_join(mname + ".bsp")
+	if FileAccess.file_exists(bsp_src):
+		DirAccess.copy_absolute(bsp_src, exp_dir.path_join(mname + ".bsp"))
+		copied.append(mname + ".bsp")
+	var pop_src := repo_root.path_join("godot/maps/%s_normal.pop" % mname)
+	if FileAccess.file_exists(pop_src):
+		DirAccess.copy_absolute(pop_src, exp_dir.path_join(mname + "_normal.pop"))
+		copied.append(mname + "_normal.pop")
+	var readme := FileAccess.open(exp_dir.path_join("README_INSTALL.txt"), FileAccess.WRITE)
+	if readme != null:
+		readme.store_string("Pootis Builder 2.0 — Shareable TF2 Map Bundle\nMap: %s\n\nInstall:\n1. Copy %s.bsp into Team Fortress 2/tf/maps/\n2. (MvM only) Copy %s_normal.pop into Team Fortress 2/tf/scripts/population/\n3. Launch TF2 with -insecure +sv_lan 1 and run: map %s\n" % [mname, mname, mname, mname])
+		readme.close()
+		copied.append("README_INSTALL.txt")
+	audio.play("save")
+	_toast("Exported Bundle to godot/exports/%s/ (%s)" % [mname, ", ".join(copied)])
+	return exp_dir
+
 # ==============================================================================
 # SOLID / ENTITY EDIT HELPERS
 # ==============================================================================
@@ -2732,6 +2922,7 @@ func _enter_playtest() -> void:
 func _exit_playtest() -> void:
 	player.set_active(false); editor_cam.current = true; playtest_hud.visible = false
 	ent_vis.set_playtest_mode(false)
+	ent_vis.reset_cart_visual()
 	door_ctrl.reset_all_closed()
 	sym_plane.visible = (symmetry != SymmetryMode.OFF) and not viewing_bsp
 	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
@@ -2772,6 +2963,8 @@ func _input(event: InputEvent) -> void:
 					_record_history("Move Selection"); _refresh_selection_bar(); _update_3d_gizmo(); _refresh_2d_views(true)
 				if _drawing_box:
 					_finish_drag_box()
+				if _marquee_active:
+					_finish_marquee_select()
 				if _terrain_sculpting:
 					_terrain_sculpting = false
 					if _terrain_changed:
@@ -2804,12 +2997,16 @@ func _unhandled_input(event: InputEvent) -> void:
 				_toggle_zen_mode(); return
 			if event.keycode == KEY_COMMA and event.ctrl_pressed:
 				settings_modal.open_modal(); return
+			if event.keycode == KEY_F3 and not viewing_bsp and stage != Stage.PLAYTEST:
+				_cycle_lighting_mode(); return
 			if event.keycode == KEY_F5:
 				set_stage(_prev_stage if stage == Stage.PLAYTEST else Stage.PLAYTEST); return
 			if event.keycode == KEY_F9 and not viewing_bsp and stage != Stage.PLAYTEST:
 				_open_compile_drawer(); return
 			if event.keycode == KEY_ESCAPE:
 				if stage == Stage.PLAYTEST: set_stage(_prev_stage)
+				elif active_tool == "wire_io": _wire_io_src = -1; active_tool = "select"; overlay_2d.queue_redraw(); _toast("Cancelled Visual 3D Wiring")
+				elif _clip_3d_active: _clip_3d_active = false; if _clip_plane_mesh != null: _clip_plane_mesh.visible = false
 				elif _wall_chain_active: _wall_chain_active = false; ghost_mesh.visible = false; _toast("Finished wall chain")
 				elif _drawing_box: _drawing_box = false; ghost_mesh.visible = false
 				elif selected_solid >= 0 or selected_entity >= 0: _clear_selection()
@@ -2838,6 +3035,7 @@ func _unhandled_input(event: InputEvent) -> void:
 				settings.save_to_disk(); _on_settings_applied(); audio.play("click")
 				_toast("UI Scale reset to 115%")
 			elif event.keycode == KEY_D and event.ctrl_pressed: _duplicate_selection()
+			elif event.keycode == KEY_W and event.shift_pressed and not event.ctrl_pressed: _start_visual_3d_wire(selected_entity)
 			elif event.keycode == KEY_W and event.ctrl_pressed and event.shift_pressed: _untie_selected_entity()
 			elif event.keycode == KEY_T and event.ctrl_pressed: _open_tie_entity_drawer()
 			elif event.keycode == KEY_X and event.shift_pressed: _open_clip_drawer()
@@ -2883,6 +3081,7 @@ func _unhandled_input(event: InputEvent) -> void:
 
 	if event is InputEventMouseMotion:
 		if pie_wheel.visible: pie_wheel.update_pointer(event.position); return
+		if _marquee_active: _marquee_cur = event.position; overlay_2d.queue_redraw(); return
 		if _dragging_gizmo: _update_gizmo_drag(event.position); return
 		if _dragging_vertex: _update_vertex_drag(event.position, event.shift_pressed); return
 		if _dragging_face: _update_face_drag(event.position); return
@@ -3060,6 +3259,37 @@ func _handle_left_click(screen_pos: Vector2, shift_held: bool = false, alt_held:
 		_toast("Viewing official %s â€” click 'Walk Inside (F5)' below!" % current_bsp_name); return
 	var ro := editor_cam.project_ray_origin(screen_pos); var rd := editor_cam.project_ray_normal(screen_pos)
 
+	if active_tool == "wire_io":
+		var wpick := _pick_scene_object(ro, rd)
+		if wpick["kind"] == "entity":
+			var tidx: int = int(wpick["idx"])
+			if tidx != _wire_io_src:
+				var src_i := _wire_io_src
+				_wire_io_src = -1
+				active_tool = "select"
+				_clear_drawer("VISUAL 3D ENTITY WIRING")
+				EditorDrawersScript.build_wire_preset_drawer(self, right_drawer_vbox, src_i, tidx)
+				overlay_2d.queue_redraw()
+				audio.play("click")
+			else:
+				_toast("Click a DIFFERENT target entity to connect!")
+		else:
+			_toast("Click a target entity (door, relay, light, sound) or press Esc to cancel.")
+		return
+
+	if active_tool == "stamp_custom_prefab" and hover_valid:
+		var ids := _stamp_custom_prefab(_active_custom_prefab, hover_pos)
+		if not ids.is_empty():
+			_record_history("Stamp Custom Prefab")
+			map_sync.sync_solids(ids, true)
+			selected_solids = ids
+			selected_solid = ids[0]
+			map_sync.set_multi_selection(selected_solids, selected_solid, -1)
+			_refresh_selection_bar(); _update_3d_gizmo(); _refresh_2d_views(true)
+			_spawn_place_fx(hover_pos, HudWidgets.COL_ACC); audio.play("place")
+			_toast("Stamped %d-brush custom prefab!" % ids.size())
+		return
+
 	if active_tool == "vertex":
 		if selected_solid >= 0:
 			var vh: Dictionary = map_sync.hit_test_vertex_handle(ro, rd)
@@ -3109,7 +3339,11 @@ func _handle_left_click(screen_pos: Vector2, shift_held: bool = false, alt_held:
 					_toast("Shift+Drag Cloned Solid #%d!" % nid); return
 			_select_solid(sidx, fidx, Input.is_key_pressed(KEY_CTRL)); audio.play("click")
 			if stage == Stage.STYLE and right_drawer.visible: _open_materials_drawer()
-		else: _clear_selection()
+		else:
+			_clear_selection()
+			_marquee_active = true
+			_marquee_start = screen_pos
+			_marquee_cur = screen_pos
 		return
 
 	if active_tool == "paint" or active_tool == "materials":
@@ -3147,7 +3381,34 @@ func _handle_left_click(screen_pos: Vector2, shift_held: bool = false, alt_held:
 					_spawn_place_fx(hover_pos, HudWidgets.COL_CYAN); audio.play("carve")
 					_toast("Sliced solid along your custom 3D cut plane!")
 			_clip_3d_active = false
+			if _clip_plane_mesh != null: _clip_plane_mesh.visible = false
 		return
+
+func _finish_marquee_select() -> void:
+	_marquee_active = false
+	var rect := Rect2(_marquee_start, _marquee_cur - _marquee_start).abs()
+	overlay_2d.queue_redraw()
+	if rect.size.x < 10.0 and rect.size.y < 10.0:
+		return
+	var picked: Array[int] = []
+	for i in range(doc.get_solid_count()):
+		var si: Dictionary = doc.get_solid_info(i)
+		if not si.get("valid", false) or si.get("is_skybox", false) or si.get("hidden", false):
+			continue
+		var mid: Vector3 = (si["bounds_min"] + si["bounds_max"]) * 0.5
+		if editor_cam.is_position_behind(mid):
+			continue
+		var sp := editor_cam.unproject_position(mid)
+		if rect.has_point(sp):
+			picked.append(i)
+	if not picked.is_empty():
+		selected_solids = picked
+		selected_solid = picked[0]
+		selected_face = -1; selected_entity = -1
+		ent_vis.set_selection(-1)
+		map_sync.set_multi_selection(selected_solids, selected_solid, -1)
+		_refresh_selection_bar(); _update_3d_gizmo(); audio.play("click")
+		_toast("Marquee selected %d solids! (Drag Gizmo, Clone, Mirror BLU/RED, or Save Prefab)" % picked.size())
 
 	if active_tool == "floor" and hover_valid:
 		_drawing_box = true; _box_start = hover_pos; return
@@ -3356,6 +3617,14 @@ func _update_hover(screen_pos: Vector2) -> void:
 			var sz := Vector3(maxf(grid_m, absf(hover_pos.x - _box_start.x)), h, maxf(grid_m, absf(hover_pos.z - _box_start.z)))
 			(ghost_mesh.mesh as BoxMesh).size = sz
 			ghost_mesh.position = Vector3((_box_start.x + hover_pos.x) * 0.5, _box_start.y + h * 0.5, (_box_start.z + hover_pos.z) * 0.5)
+		elif _clip_3d_active and active_tool == "clip_3d" and _clip_plane_mesh != null:
+			ghost_mesh.visible = false; brush_ring.visible = false
+			var cd := hover_pos - _clip_3d_pt_a
+			var clen := maxf(0.8, Vector2(cd.x, cd.z).length())
+			(_clip_plane_mesh.mesh as BoxMesh).size = Vector3(clen + 2.0, 9.0, 0.06)
+			_clip_plane_mesh.position = (_clip_3d_pt_a + hover_pos) * 0.5 + Vector3(0, 3.0, 0)
+			_clip_plane_mesh.rotation = Vector3(0, -atan2(cd.z, cd.x), 0)
+			_clip_plane_mesh.visible = true
 		elif _wall_chain_active and active_tool == "wall":
 			brush_ring.visible = false; ghost_mesh.visible = true
 			var d := hover_pos - _wall_chain_start
@@ -3377,6 +3646,9 @@ func _update_hover(screen_pos: Vector2) -> void:
 			ghost_mesh.visible = false; brush_ring.visible = false
 	else:
 		ghost_mesh.visible = false; brush_ring.visible = false
+		if _clip_plane_mesh != null: _clip_plane_mesh.visible = false
+	if (not _clip_3d_active or active_tool != "clip_3d") and _clip_plane_mesh != null:
+		_clip_plane_mesh.visible = false
 	overlay_2d.queue_redraw()
 
 func _on_pie_action(aid: String) -> void:
@@ -3467,9 +3739,24 @@ func _process(delta: float) -> void:
 		var t: Dictionary = player.get_telemetry()
 		var nc_txt := " [NOCLIP]" if t.get("noclip", false) else ""
 		var sl_txt := " | Sightline: %du%s" % [t["sightline_u"], " [LONG!]" if t["sightline_warn"] else ""]
-		playtest_lbl.text = "%s%s (%d/%d HP) | %d u/s | Jump: %du%s | V: Noclip | R: Respawn | ESC: Exit" % [
-			t["class_name"], nc_txt, t["hp"], t["max_hp"], t["speed_u"], t["jump_height_u"], sl_txt
+		var rt_val: float = float(t.get("rollout_split_s", -1.0))
+		var rt_txt := (" | Rollout: %.2fs" % rt_val) if rt_val >= 0.0 else (" | Timer: %.1fs" % float(t.get("run_time_s", 0.0)))
+		playtest_lbl.text = "%s%s (%d/%d HP) | %d u/s | Jump: %du%s%s | V: Noclip | R: Reset | ESC: Exit" % [
+			t["class_name"], nc_txt, t["hp"], t["max_hp"], t["speed_u"], t["jump_height_u"], sl_txt, rt_txt
 		]
+		var cart_p: float = float(t.get("cart_progress", -1.0))
+		var cap_p: float = float(t.get("cap_progress", -1.0))
+		if playtest_obj_bar != null and playtest_obj_lbl != null:
+			if cap_p >= 0.0:
+				playtest_obj_lbl.visible = true; playtest_obj_bar.visible = true
+				playtest_obj_lbl.text = "%s: %d%%" % [str(t.get("cap_label", "CONTROL POINT")).to_upper(), int(round(cap_p * 100.0))]
+				playtest_obj_bar.value = cap_p * 100.0
+			elif cart_p >= 0.0:
+				playtest_obj_lbl.visible = true; playtest_obj_bar.visible = true
+				playtest_obj_lbl.text = ("PUSHING PAYLOAD CART: %d%% (+10 HP/s)" if bool(t.get("cart_pushing", false)) else "PAYLOAD PROGRESS: %d%% (Walk close to push!)") % int(round(cart_p * 100.0))
+				playtest_obj_bar.value = cart_p * 100.0
+			else:
+				playtest_obj_lbl.visible = false; playtest_obj_bar.visible = false
 		overlay_2d.queue_redraw()
 
 	_step_cli_shots()
@@ -3495,6 +3782,25 @@ func draw_viewport_2d_overlay(canvas: Control) -> void:
 			canvas.draw_line(c - Vector2(8, 0), c + Vector2(8, 0), Color(1, 0.96, 0.86, 0.9), 2.0)
 			canvas.draw_line(c - Vector2(0, 8), c + Vector2(0, 8), Color(1, 0.96, 0.86, 0.9), 2.0)
 		return
+
+	if _marquee_active:
+		var mr := Rect2(_marquee_start, _marquee_cur - _marquee_start).abs()
+		canvas.draw_rect(mr, Color(0.96, 0.65, 0.16, 0.16), true)
+		canvas.draw_rect(mr, HudWidgets.COL_ACC, false, 2.0)
+
+	if active_tool == "wire_io" and _wire_io_src >= 0:
+		var wents: Array = doc.get_entities()
+		if _wire_io_src < wents.size():
+			var se: Dictionary = wents[_wire_io_src]
+			var sp3: Vector3 = (se["bounds_min"] + se["bounds_max"]) * 0.5 if se.get("is_brush", false) else se["pos"]
+			if not editor_cam.is_position_behind(sp3):
+				var p0 := editor_cam.unproject_position(sp3)
+				var p1 := get_viewport().get_mouse_position()
+				canvas.draw_line(p0, p1, HudWidgets.COL_CYAN, 2.5, true)
+				canvas.draw_circle(p0, 6.0, HudWidgets.COL_ACC)
+				canvas.draw_circle(p1, 5.0, HudWidgets.COL_CYAN)
+				var f_w: Font = fonts["heading"]
+				canvas.draw_string(f_w, p1 + Vector2(12, -8), "CLICK TARGET ENTITY TO WIRE", HORIZONTAL_ALIGNMENT_LEFT, -1, 11, HudWidgets.COL_CYAN)
 
 	if ghost_mesh.visible and settings.show_jump_callouts and not welcome_panel.visible and not viewing_bsp:
 		var sz := (ghost_mesh.mesh as BoxMesh).size
@@ -3701,6 +4007,47 @@ func _setup_auto_shot(idx: int) -> void:
 			_track_recent_material("BRICK/BRICKWALL001"); _track_recent_material("WOOD/WOOD_WALL001"); _track_recent_material("CONCRETE/CONCRETEFLOOR001"); _track_recent_material("METAL/IBEAM001B")
 			_select_solid(2, 0); _open_materials_drawer()
 			cam_pos = Vector3(20, 14, 24); cam_yaw = 0.65; cam_pitch = -0.42; _apply_editor_cam()
+		"v10_lit_interior":
+			if command_palette != null: command_palette.close_palette()
+			zen_mode = false; _show_welcome_hub(false); _clear_official_bsp(); _clear_selection()
+			doc.load_vmf(repo_root.path_join("godot/maps/ctf_turbine_rebuilt.vmf"))
+			doc.add_point_entity("light_spot", Vector3(-4.0, 5.2, 2.0), {"_light": "255 180 95 750", "pitch": "-70", "angles": "0 35 0", "_cone": "52"})
+			doc.add_point_entity("light_spot", Vector3(4.0, 5.2, -2.0), {"_light": "110 190 255 750", "pitch": "-70", "angles": "0 -145 0", "_cone": "52"})
+			map_sync.clear_all(); map_sync.sync_all(); ent_vis.sync_all()
+			set_stage(Stage.STYLE); right_drawer.visible = false
+			_set_lighting_mode(1)
+			cam_pos = Vector3(-13.5, 5.2, 11.5); editor_cam.look_at_from_position(cam_pos, Vector3(4.0, 1.5, -2.0), Vector3.UP)
+			cam_yaw = editor_cam.rotation.y; cam_pitch = editor_cam.rotation.x
+		"v10_wire_preset":
+			_set_lighting_mode(0); _show_welcome_hub(false); _load_gamemode("koth", "badlands", false); set_stage(Stage.GAMEPLAY)
+			var trig_i: int = _place_smart_entity("trigger_multiple", Vector3(-3.0, 0.2, 2.0))
+			var door_i: int = _place_smart_entity("func_door", Vector3(3.0, 0.2, 2.0))
+			doc.set_entity_kv(door_i, "targetname", "spawn_door_01")
+			doc.add_connection(trig_i, "OnStartTouch", "spawn_door_01", "Open", "", 0.0, false)
+			ent_vis.sync_all()
+			_clear_drawer("VISUAL 3D ENTITY WIRING")
+			EditorDrawersScript.build_wire_preset_drawer(self, right_drawer_vbox, trig_i, door_i)
+			cam_pos = Vector3(11.0, 9.5, 14.0); editor_cam.look_at_from_position(cam_pos, Vector3(0.0, 1.8, 2.0), Vector3.UP)
+			cam_yaw = editor_cam.rotation.y; cam_pitch = editor_cam.rotation.x
+		"v10_balance_check":
+			_set_lighting_mode(0); _show_welcome_hub(false); _clear_official_bsp(); _clear_selection()
+			doc.load_vmf(repo_root.path_join("godot/maps/ctf_turbine_rebuilt.vmf"))
+			map_sync.clear_all(); map_sync.sync_all(); ent_vis.sync_all()
+			set_stage(Stage.BUILD); _open_check_problems_drawer()
+			cam_pos = Vector3(-13.5, 5.2, 11.5); editor_cam.look_at_from_position(cam_pos, Vector3(4.0, 1.5, -2.0), Vector3.UP)
+			cam_yaw = editor_cam.rotation.y; cam_pitch = editor_cam.rotation.x
+		"v10_clip_multi":
+			_set_lighting_mode(0); _show_welcome_hub(false); _load_gamemode("koth", "badlands", false); set_stage(Stage.BUILD)
+			right_drawer.visible = false
+			selected_solids = [1, 2, 3]; selected_solid = 2
+			map_sync.set_multi_selection(selected_solids, selected_solid, -1)
+			_refresh_selection_bar(); _update_3d_gizmo()
+			active_tool = "clip_3d"; _clip_3d_active = true; _clip_3d_pt_a = Vector3(-4.0, 0.0, -4.0)
+			hover_valid = true; hover_pos = Vector3(5.0, 0.0, 5.0)
+			if _clip_plane_mesh != null:
+				(_clip_plane_mesh.mesh as BoxMesh).size = Vector3(14.0, 9.0, 0.06)
+				_clip_plane_mesh.position = Vector3(0.5, 3.0, 0.5); _clip_plane_mesh.rotation = Vector3(0, -PI * 0.25, 0); _clip_plane_mesh.visible = true
+			cam_pos = Vector3(18, 13, 21); cam_yaw = 0.68; cam_pitch = -0.44; _apply_editor_cam()
 	if not viewing_bsp and not settings_modal.visible:
 		_update_hover(get_viewport().get_visible_rect().size * Vector2(0.42, 0.52))
 

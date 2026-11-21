@@ -28,11 +28,13 @@ var show_tool_volumes: bool = true
 var show_clips: bool = true
 var show_vertex_handles: bool = false
 var selected_solid: int = -1
+var selected_solids_group: Array[int] = []
 var selected_face: int = -1
 var hovered_solid: int = -1
 
 var solids_root: Node3D
 var selection_box: MeshInstance3D
+var multi_sel_box: MeshInstance3D
 var hover_box: MeshInstance3D
 var face_handles_root: Node3D
 var vertex_handles_root: Node3D
@@ -45,8 +47,10 @@ var _handle_data: Array = [] # [{pos, normal, solid_idx}]
 var _vertex_data: Array = [] # [{pos, vert_idx, solid_idx}]
 var _hover_im: ImmediateMesh = null
 var _sel_im: ImmediateMesh = null
+var _multi_sel_im: ImmediateMesh = null
 var _wire_mat_hov: StandardMaterial3D = null
 var _wire_mat_sel: StandardMaterial3D = null
+var _wire_mat_multi: StandardMaterial3D = null
 var _face_cone_mesh: CylinderMesh = null
 var _face_handle_mats: Dictionary = {}
 var _vert_box_mesh: BoxMesh = null
@@ -67,6 +71,11 @@ func setup(p_doc: Object, p_assets: RefCounted) -> void:
 		selection_box.name = "SelectionHighlight"
 		selection_box.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 		add_child(selection_box)
+	if multi_sel_box == null:
+		multi_sel_box = MeshInstance3D.new()
+		multi_sel_box.name = "MultiSelectionHighlight"
+		multi_sel_box.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		add_child(multi_sel_box)
 	if hover_box == null:
 		hover_box = MeshInstance3D.new()
 		hover_box.name = "HoverHighlight"
@@ -218,6 +227,15 @@ func sync_solid(idx: int, rebuild_collision: bool = true) -> void:
 func set_selection(solid_idx: int, face_idx: int = -1) -> void:
 	selected_solid = solid_idx
 	selected_face = face_idx
+	selected_solids_group.clear()
+	if solid_idx >= 0:
+		selected_solids_group.append(solid_idx)
+	_rebuild_selection_visuals()
+
+func set_multi_selection(indices: Array[int], primary_idx: int = -1, face_idx: int = -1) -> void:
+	selected_solids_group = indices.duplicate()
+	selected_solid = primary_idx if primary_idx >= 0 else (indices[indices.size() - 1] if not indices.is_empty() else -1)
+	selected_face = face_idx
 	_rebuild_selection_visuals()
 
 func set_vertex_mode(enabled: bool) -> void:
@@ -310,6 +328,12 @@ func _ensure_pooled_helpers() -> void:
 		_wire_mat_sel.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 		_wire_mat_sel.albedo_color = Color(0.98, 0.68, 0.16, 1.0)
 		_wire_mat_sel.no_depth_test = true
+	if _multi_sel_im == null:
+		_multi_sel_im = ImmediateMesh.new()
+		_wire_mat_multi = StandardMaterial3D.new()
+		_wire_mat_multi.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		_wire_mat_multi.albedo_color = Color(0.16, 0.88, 1.0, 0.96)
+		_wire_mat_multi.no_depth_test = true
 	if _face_cone_mesh == null:
 		_face_cone_mesh = CylinderMesh.new()
 		_face_cone_mesh.top_radius = 0.0
@@ -336,6 +360,8 @@ func _get_face_mat(col: Color) -> StandardMaterial3D:
 func _rebuild_selection_visuals() -> void:
 	_ensure_pooled_helpers()
 	selection_box.visible = false
+	if multi_sel_box != null:
+		multi_sel_box.visible = false
 	_handle_data.clear()
 	_vertex_data.clear()
 	for ch in face_handles_root.get_children():
@@ -345,6 +371,34 @@ func _rebuild_selection_visuals() -> void:
 
 	if doc == null or selected_solid < 0 or selected_solid >= doc.get_solid_count():
 		return
+
+	# Draw cyan wireframes around all additional multi-selected solids!
+	if multi_sel_box != null and selected_solids_group.size() > 1:
+		_multi_sel_im.clear_surfaces()
+		var drew_any := false
+		var edges := [[0,1],[1,2],[2,3],[3,0],[4,5],[5,6],[6,7],[7,4],[0,4],[1,5],[2,6],[3,7]]
+		for sid in selected_solids_group:
+			if sid == selected_solid or sid < 0 or sid >= doc.get_solid_count():
+				continue
+			var si: Dictionary = doc.get_solid_info(sid)
+			if not si.get("valid", false):
+				continue
+			if not drew_any:
+				_multi_sel_im.surface_begin(Mesh.PRIMITIVE_LINES, _wire_mat_multi)
+				drew_any = true
+			var a: Vector3 = si["bounds_min"] - Vector3(0.03, 0.03, 0.03)
+			var b: Vector3 = si["bounds_max"] + Vector3(0.03, 0.03, 0.03)
+			var c := [
+				Vector3(a.x, a.y, a.z), Vector3(b.x, a.y, a.z), Vector3(b.x, a.y, b.z), Vector3(a.x, a.y, b.z),
+				Vector3(a.x, b.y, a.z), Vector3(b.x, b.y, a.z), Vector3(b.x, b.y, b.z), Vector3(a.x, b.y, b.z),
+			]
+			for e in edges:
+				_multi_sel_im.surface_add_vertex(c[e[0]])
+				_multi_sel_im.surface_add_vertex(c[e[1]])
+		if drew_any:
+			_multi_sel_im.surface_end()
+			multi_sel_box.mesh = _multi_sel_im
+			multi_sel_box.visible = true
 
 	var d: Dictionary = doc.get_solid_info(selected_solid)
 	if not d.get("valid", false):
