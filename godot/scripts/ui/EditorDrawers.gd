@@ -1600,3 +1600,257 @@ static func build_wire_preset_drawer(app: Node3D, vbox: VBoxContainer, src_idx: 
 			app._open_inspector_drawer()
 		)
 		v2.add_child(b)
+
+# ==============================================================================
+# 11. ORGANIZED SCENE OUTLINER & MAP LAYERS STUDIO (O)
+# ==============================================================================
+static func build_outliner_drawer(app: Node3D, vbox: VBoxContainer) -> void:
+	var fonts: Dictionary = app.fonts
+	var ents: Array = app.doc.get_entities()
+	var scount: int = app.doc.get_solid_count()
+
+	var hdr_card := HudWidgets.make_section_card("MAP HIERARCHY  •  %d SOLIDS  •  %d ENTITIES" % [scount, ents.size()], fonts, HudWidgets.COL_ACC)
+	vbox.add_child(hdr_card["panel"])
+	var hvb: VBoxContainer = hdr_card["vbox"]
+
+	var flt_le := LineEdit.new()
+	flt_le.placeholder_text = "Filter scene (door, spawn, light, crate, solid)..."
+	flt_le.text = app._outliner_search
+	hvb.add_child(flt_le)
+
+	var list_host := VBoxContainer.new()
+	list_host.add_theme_constant_override("separation", 6)
+	vbox.add_child(list_host)
+
+	var populate := func(q_raw: String) -> void:
+		app._outliner_search = q_raw
+		for ch in list_host.get_children():
+			ch.queue_free()
+		var q := q_raw.to_lower().strip_edges()
+
+		var groups := [
+			{"id": "spawns", "title": "SPAWNS & TEAMS",     "col": HudWidgets.COL_RED,           "items": []},
+			{"id": "obj",    "title": "OBJECTIVES & MODE",  "col": Color(0.98, 0.80, 0.20),      "items": []},
+			{"id": "doors",  "title": "DOORS & LOGIC I/O",  "col": HudWidgets.COL_CYAN,          "items": []},
+			{"id": "lights", "title": "LIGHTING & SKY",     "col": Color(1.0, 0.88, 0.45),       "items": []},
+			{"id": "props",  "title": "3D PROPS & PICKUPS", "col": HudWidgets.COL_GREEN,         "items": []},
+		]
+		for i in range(ents.size()):
+			var e: Dictionary = ents[i]
+			var cls := str(e["classname"])
+			var kv: Dictionary = e["kv"]
+			var tn := str(kv.get("targetname", ""))
+			var mdl := str(kv.get("model", "")).get_file().get_basename()
+			var label := cls
+			if not tn.is_empty(): label = "%s (%s)" % [tn, cls]
+			elif not mdl.is_empty(): label = "%s (%s)" % [mdl, cls]
+			if not q.is_empty() and label.to_lower().find(q) == -1:
+				continue
+			var ep: Vector3 = (e["bounds_min"] + e["bounds_max"]) * 0.5 if e.get("is_brush", false) else e["pos"]
+			var item := {"idx": i, "label": label, "pos": ep, "cls": cls}
+			if cls in ["info_player_teamspawn", "func_respawnroom", "func_regenerate"]:
+				(groups[0]["items"] as Array).append(item)
+			elif cls in ["team_control_point", "item_teamflag", "path_track", "mapobj_cart_dispenser", "func_capturezone", "trigger_capture_area", "func_upgradestation"] or cls.begins_with("tf_logic_"):
+				(groups[1]["items"] as Array).append(item)
+			elif cls in ["func_door", "func_button"] or cls.begins_with("trigger_") or cls.begins_with("logic_") or cls == "ambient_generic":
+				(groups[2]["items"] as Array).append(item)
+			elif cls.begins_with("light") or cls == "env_sun" or cls == "env_fog_controller":
+				(groups[3]["items"] as Array).append(item)
+			else:
+				(groups[4]["items"] as Array).append(item)
+
+		for g in groups:
+			var gitems: Array = g["items"]
+			if gitems.is_empty():
+				continue
+			var gid: String = str(g["id"])
+			var collapsed: bool = bool(app._outliner_collapsed.get(gid, false)) and q.is_empty()
+			var card := HudWidgets.make_section_card("", fonts, g["col"])
+			list_host.add_child(card["panel"])
+			var cvb: VBoxContainer = card["vbox"]
+
+			var gh := Button.new()
+			gh.text = "%s %s (%d)" % ["+" if collapsed else "-", str(g["title"]), gitems.size()]
+			gh.alignment = HORIZONTAL_ALIGNMENT_LEFT
+			HudWidgets.style_tf2_button(gh, fonts["heading"], 10, false)
+			gh.pressed.connect(func():
+				app.audio.play("click")
+				app._outliner_collapsed[gid] = not bool(app._outliner_collapsed.get(gid, false))
+				app._open_outliner_drawer()
+			)
+			cvb.add_child(gh)
+
+			if not collapsed:
+				var lim := mini(gitems.size(), 18)
+				for k in range(lim):
+					var it: Dictionary = gitems[k]
+					var eidx: int = int(it["idx"])
+					var epos: Vector3 = it["pos"]
+					var row := HBoxContainer.new(); row.add_theme_constant_override("separation", 4); cvb.add_child(row)
+					var rb := Button.new()
+					rb.text = "#%d %s" % [eidx, str(it["label"])]
+					rb.alignment = HORIZONTAL_ALIGNMENT_LEFT
+					rb.clip_text = true
+					rb.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
+					rb.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+					HudWidgets.style_tf2_button(rb, fonts["body"], 10, app.selected_entity == eidx)
+					rb.pressed.connect(func():
+						app.audio.play("click")
+						app._select_entity(eidx)
+						app._focus_camera_on_pos(epos, 10.0)
+					)
+					row.add_child(rb)
+					var wb := Button.new(); wb.text = "Wire"
+					wb.tooltip_text = "Visual 3D Wire from this entity (Shift+W)"
+					HudWidgets.style_tf2_button(wb, fonts["body"], 9, false, 3)
+					wb.pressed.connect(func(): app.audio.play("click"); app._select_entity(eidx); app._start_visual_3d_wire(eidx))
+					row.add_child(wb)
+				if gitems.size() > lim:
+					cvb.add_child(_lbl("... +%d more (type above to filter)" % (gitems.size() - lim), fonts["mono"], 9, HudWidgets.COL_TX_MUTED))
+
+		# World Geometry Summary Card
+		var wcard := HudWidgets.make_section_card("WORLD GEOMETRY & CLIFFS (%d SOLIDS)" % scount, fonts, HudWidgets.COL_TX_MUTED)
+		list_host.add_child(wcard["panel"])
+		var wvb: VBoxContainer = wcard["vbox"]
+		var shown_s := 0
+		for s in range(scount):
+			var si: Dictionary = app.doc.get_solid_info(s)
+			if not si.get("valid", false) or si.get("is_skybox", false):
+				continue
+			var mat_nm := str(si.get("material", "brush")).get_file()
+			var slbl := "Solid #%d (%s)" % [s, mat_nm]
+			if not q.is_empty() and slbl.to_lower().find(q) == -1:
+				continue
+			var smid: Vector3 = (si["bounds_min"] + si["bounds_max"]) * 0.5
+			var sb := Button.new(); sb.text = slbl; sb.alignment = HORIZONTAL_ALIGNMENT_LEFT; sb.clip_text = true
+			sb.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
+			HudWidgets.style_tf2_button(sb, fonts["body"], 10, app.selected_solid == s)
+			var sid_c := s
+			sb.pressed.connect(func():
+				app.audio.play("click"); app._select_solid(sid_c, -1); app._focus_camera_on_pos(smid, 13.0)
+			)
+			wvb.add_child(sb)
+			shown_s += 1
+			if shown_s >= 12:
+				wvb.add_child(_lbl("Showing first 12 matching solids (of %d)" % scount, fonts["mono"], 9, HudWidgets.COL_TX_MUTED))
+				break
+
+	populate.call(app._outliner_search)
+	flt_le.text_changed.connect(populate)
+
+# ==============================================================================
+# 12. ORGANIZED VIEW & WORKSPACE STUDIO (Replaces Cryptic Top-Bar Abbreviations!)
+# ==============================================================================
+static func build_viewport_menu_drawer(app: Node3D, vbox: VBoxContainer) -> void:
+	var fonts: Dictionary = app.fonts
+
+	# 1. Viewport Lighting (F3)
+	var c1 := HudWidgets.make_section_card("1. VIEWPORT LIGHTING PREVIEW (F3)", fonts, Color(1.0, 0.85, 0.35))
+	vbox.add_child(c1["panel"])
+	var lrow := HBoxContainer.new(); lrow.add_theme_constant_override("separation", 4); (c1["vbox"] as VBoxContainer).add_child(lrow)
+	var lmodes := [{"id": 0, "t": "Daylight"}, {"id": 1, "t": "Lit Interior"}, {"id": 2, "t": "Fullbright"}]
+	for lm in lmodes:
+		var b := Button.new(); b.text = str(lm["t"]); b.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		HudWidgets.style_tf2_button(b, fonts["heading"], 10, app.lighting_mode == int(lm["id"]))
+		var mid: int = int(lm["id"])
+		b.pressed.connect(func(): app.audio.play("click"); app._set_lighting_mode(mid); app._open_viewport_menu_drawer())
+		lrow.add_child(b)
+
+	# 2. Build Symmetry Mode
+	var c2 := HudWidgets.make_section_card("2. MIRROR / SYMMETRY BUILDING", fonts, HudWidgets.COL_CYAN)
+	vbox.add_child(c2["panel"])
+	var srow := HBoxContainer.new(); srow.add_theme_constant_override("separation", 4); (c2["vbox"] as VBoxContainer).add_child(srow)
+	var smodes := [{"id": 0, "t": "Off"}, {"id": 1, "t": "Mirror X"}, {"id": 2, "t": "180° CTF/CP"}]
+	for sm in smodes:
+		var b := Button.new(); b.text = str(sm["t"]); b.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		HudWidgets.style_tf2_button(b, fonts["heading"], 10, app.symmetry == int(sm["id"]))
+		var sid: int = int(sm["id"])
+		b.pressed.connect(func():
+			app.audio.play("click"); app.symmetry = sid
+			app.sym_plane.visible = (app.symmetry != 0) and not app.viewing_bsp
+			app._open_viewport_menu_drawer()
+		)
+		srow.add_child(b)
+
+	# 3. Workspace Panels & Visibility
+	var c3 := HudWidgets.make_section_card("3. WORKSPACE PANELS & VISGROUPS", fonts, HudWidgets.COL_ACC)
+	vbox.add_child(c3["panel"])
+	var v3: VBoxContainer = c3["vbox"]
+	var g3 := GridContainer.new(); g3.columns = 2; g3.add_theme_constant_override("h_separation", 6); g3.add_theme_constant_override("v_separation", 6)
+	v3.add_child(g3)
+	for act in [
+		{"t": "Scene Outliner (O)",   "fn": func(): app._open_outliner_drawer()},
+		{"t": "Split 2D Blueprints",  "fn": func(): app._toggle_split_2d()},
+		{"t": "VisGroups & Layers",   "fn": func(): app._open_visgroups_drawer()},
+		{"t": "Zen Viewport (Tab)",   "fn": func(): app._toggle_zen_mode()},
+		{"t": "Focus Selection (F)",  "fn": func(): app._focus_camera_on_selection()},
+		{"t": "Top-Down 2D (Space)",  "fn": func(): app._toggle_2d_view()},
+	]:
+		var b := Button.new(); b.text = str(act["t"]); b.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		HudWidgets.style_tf2_button(b, fonts["body"], 10)
+		var fn: Callable = act["fn"]
+		b.pressed.connect(func(): app.audio.play("click"); fn.call())
+		g3.add_child(b)
+
+	# 4. Camera Bookmarks (Ctrl+1..4 Save / Alt+1..4 Jump!)
+	var c4 := HudWidgets.make_section_card("4. CAMERA VIEWPOINT BOOKMARKS", fonts, HudWidgets.COL_GREEN)
+	vbox.add_child(c4["panel"])
+	var v4: VBoxContainer = c4["vbox"]
+	v4.add_child(_lbl("Save key angles (Mid, RED Spawn, BLU Spawn, Vents) for 1-click jumping!", fonts["body"], 10, HudWidgets.COL_TX_MUTED))
+	for slot in range(1, 5):
+		var row := HBoxContainer.new(); row.add_theme_constant_override("separation", 5); v4.add_child(row)
+		var has_bm: bool = app._cam_bookmarks.has(slot)
+		var jmp := Button.new()
+		jmp.text = "Jump View %d (Alt+%d)%s" % [slot, slot, "" if has_bm else " — Empty"]
+		jmp.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		jmp.disabled = not has_bm
+		HudWidgets.style_tf2_button(jmp, fonts["heading"], 10, has_bm)
+		var s_id := slot
+		jmp.pressed.connect(func(): app.audio.play("click"); app._jump_camera_bookmark(s_id))
+		row.add_child(jmp)
+		var sav := Button.new(); sav.text = "Save"
+		HudWidgets.style_tf2_button(sav, fonts["body"], 10)
+		sav.pressed.connect(func(): app.audio.play("save"); app._save_camera_bookmark(s_id); app._open_viewport_menu_drawer())
+		row.add_child(sav)
+
+# ==============================================================================
+# 13. SMART TF2 ROOM & LAYOUT GENERATOR STUDIO (1-Click Complete Playable Rooms!)
+# ==============================================================================
+static func build_room_kit_drawer(app: Node3D, vbox: VBoxContainer) -> void:
+	var fonts: Dictionary = app.fonts
+
+	var c1 := HudWidgets.make_section_card("1. TEAM THEME FOR GENERATED ROOMS", fonts, HudWidgets.COL_ACC)
+	vbox.add_child(c1["panel"])
+	var trow := HBoxContainer.new(); trow.add_theme_constant_override("separation", 6); (c1["vbox"] as VBoxContainer).add_child(trow)
+	for tm in [{"id": 2, "t": "RED Team", "col": 2}, {"id": 3, "t": "BLU Team", "col": 3}, {"id": 0, "t": "Neutral", "col": 0}]:
+		var b := Button.new(); b.text = str(tm["t"]); b.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		HudWidgets.style_tf2_button(b, fonts["heading"], 10, app._room_kit_team == int(tm["id"]), int(tm["col"]))
+		var tid: int = int(tm["id"])
+		b.pressed.connect(func(): app.audio.play("click"); app._room_kit_team = tid; app._open_room_kit_drawer())
+		trow.add_child(b)
+
+	var c2 := HudWidgets.make_section_card("2. 1-CLICK COMPLETE TF2 STRUCTURES", fonts, HudWidgets.COL_GREEN)
+	vbox.add_child(c2["panel"])
+	var v2: VBoxContainer = c2["vbox"]
+	v2.add_child(_lbl("Stamps complete, TF2-proportioned rooms with sliding doors, interior spotlights, resupply lockers, and team spawns!", fonts["body"], 10, HudWidgets.COL_TX_MUTED))
+
+	var kits := [
+		{"id": "spawn_full", "t": "Complete TF2 Spawn Room", "desc": "Room + sliding door + resupply + 4 spawns + spotlight"},
+		{"id": "hallway",    "t": "Choke Hallway Connector", "desc": "192u corridor + 2 doorway openings + 2 ceiling lights"},
+		{"id": "balcony",    "t": "Sniper Battlement Deck",  "desc": "Elevated ledge + rail + open steel stairs + medkit"},
+		{"id": "mid_arena",  "t": "Mid Control Point Arena", "desc": "Raised cap point + dual ramps + cover + pickups"},
+	]
+	for kt in kits:
+		var b := Button.new()
+		b.text = "%s\n%s" % [str(kt["t"]), str(kt["desc"])]
+		b.custom_minimum_size = Vector2(0, 48)
+		b.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		b.alignment = HORIZONTAL_ALIGNMENT_LEFT
+		b.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		HudWidgets.style_tf2_button(b, fonts["body"], 10, kt == kits[0])
+		var kid: String = str(kt["id"])
+		b.pressed.connect(func():
+			app.audio.play("carve")
+			app._stamp_smart_room_kit(kid)
+		)
+		v2.add_child(b)

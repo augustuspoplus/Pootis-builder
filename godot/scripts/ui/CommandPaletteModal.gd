@@ -145,6 +145,10 @@ func _collect_candidates(query: String) -> Array[Dictionary]:
 		{"tag": "ACTION", "col": HudWidgets.COL_GREEN,"title": "Export Shareable Map Bundle (.bsp + .vmf + .pop)", "sub": "Package compiled map & install guide into godot/exports/", "kind": "cmd", "id": "export_bundle"},
 		{"tag": "ACTION", "col": HudWidgets.COL_ACC,  "title": "Toggle Zen Viewport Mode (Tab)",           "sub": "Hide/show all HUD chrome for clean 3D inspection", "kind": "cmd", "id": "zen"},
 		{"tag": "ACTION", "col": HudWidgets.COL_ACC,  "title": "Open Mann Co. Workshop Hub",               "sub": "Create map, open saved .vmf, or walk official maps", "kind": "cmd", "id": "hub"},
+		{"tag": "STUDIO", "col": HudWidgets.COL_CYAN, "title": "Scene Outliner & Map Hierarchy (O)",        "sub": "Browse Spawns, Doors, Lights, Props & Solids — click to frame", "kind": "cmd", "id": "outliner"},
+		{"tag": "STUDIO", "col": HudWidgets.COL_ACC,  "title": "View & Workspace Studio",                   "sub": "Lighting (F3), Symmetry, Split 2D, VisGroups & Camera Bookmarks", "kind": "cmd", "id": "view_studio"},
+		{"tag": "STUDIO", "col": HudWidgets.COL_GREEN,"title": "Smart TF2 Room & Layout Generator",         "sub": "1-click complete RED/BLU Spawn Rooms, Hallways, Sniper Decks & Mid Arenas", "kind": "cmd", "id": "room_kit"},
+		{"tag": "ACTION", "col": HudWidgets.COL_CYAN, "title": "Focus Camera on Selection (F)",             "sub": "Frame the 3D camera smoothly onto the active solid or entity", "kind": "cmd", "id": "focus"},
 		{"tag": "STUDIO", "col": Color(0.74, 0.42, 0.96), "title": "Mann vs. Machine (MvM) Studio",        "sub": "Robot Spawns, Tank Track & Valve .pop Wave Exporter", "kind": "cmd", "id": "mvm_studio"},
 		{"tag": "STUDIO", "col": Color(0.98, 0.80, 0.20), "title": "Payload Track Spline Studio",          "sub": "Click-to-chain auto-linked path_track rails & landmarks", "kind": "cmd", "id": "payload_studio"},
 		{"tag": "TOOL",   "col": HudWidgets.COL_CYAN, "title": "Face Edit Sheet & 29k+ TF2 Materials (Shift+A)", "sub": "Paint faces, edit UVs, browse all Valve textures", "kind": "cmd", "id": "materials"},
@@ -295,6 +299,10 @@ func _run_item(it: Dictionary) -> void:
 			"wire3d": app._start_visual_3d_wire(app.selected_entity)
 			"save_prefab": app._save_selection_as_prefab()
 			"export_bundle": app._export_map_bundle()
+			"outliner": app._open_outliner_drawer()
+			"view_studio": app._open_viewport_menu_drawer()
+			"room_kit": app._open_room_kit_drawer()
+			"focus": app._focus_camera_on_selection()
 			"zen": app._toggle_zen_mode()
 			"hub": app._show_welcome_hub(true)
 			"mvm_studio": app.set_stage(app.Stage.GAMEPLAY); app._open_mvm_studio()

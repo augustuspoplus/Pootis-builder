@@ -598,6 +598,7 @@ class DockCardSlot extends Button:
 		l1.text = p_title
 		l1.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 		l1.clip_text = true
+		l1.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
 		if p_font != null: l1.add_theme_font_override("font", p_font)
 		l1.add_theme_font_size_override("font_size", 10)
 		l1.add_theme_color_override("font_color", p_accent if p_active else COL_TX)
@@ -609,6 +610,7 @@ class DockCardSlot extends Button:
 			l2.text = p_sub
 			l2.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 			l2.clip_text = true
+			l2.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
 			if p_font != null: l2.add_theme_font_override("font", p_font)
 			l2.add_theme_font_size_override("font_size", 8)
 			l2.add_theme_color_override("font_color", COL_TX_MUTED)
@@ -975,6 +977,48 @@ class VectorToolIcon extends Control:
 					Vector2(size.x * 0.76, size.y * 0.32), Vector2(size.x - 4, size.y * 0.36),
 					Vector2(size.x - 4, size.y - 4),
 				]), Color(0.46, 0.42, 0.38, 0.88))
+			"outliner": # 3 crisp stacked hierarchy rows
+				for row_i in range(3):
+					var ry := c.y + float(row_i - 1) * s * 0.62
+					var indent := s * 0.28 if row_i > 0 else 0.0
+					draw_circle(Vector2(c.x - s * 0.72 + indent, ry), 2.4, col)
+					draw_line(Vector2(c.x - s * 0.38 + indent, ry), Vector2(c.x + s * 0.85, ry), col, 2.2)
+			"lighting": # Radiant sun / interior bulb
+				draw_circle(c, s * 0.42, col)
+				for k in range(8):
+					var ang := float(k) * PI * 0.25
+					draw_line(c + Vector2(cos(ang), sin(ang)) * s * 0.62, c + Vector2(cos(ang), sin(ang)) * s * 0.96, col, 1.8)
+			"focus": # Camera targeting brackets + center dot
+				var b := s * 0.82
+				var l := s * 0.36
+				draw_line(c + Vector2(-b, -b), c + Vector2(-b + l, -b), col, 2.2)
+				draw_line(c + Vector2(-b, -b), c + Vector2(-b, -b + l), col, 2.2)
+				draw_line(c + Vector2(b, -b), c + Vector2(b - l, -b), col, 2.2)
+				draw_line(c + Vector2(b, -b), c + Vector2(b, -b + l), col, 2.2)
+				draw_line(c + Vector2(-b, b), c + Vector2(-b + l, b), col, 2.2)
+				draw_line(c + Vector2(-b, b), c + Vector2(-b, b - l), col, 2.2)
+				draw_line(c + Vector2(b, b), c + Vector2(b - l, b), col, 2.2)
+				draw_line(c + Vector2(b, b), c + Vector2(b, b - l), col, 2.2)
+				draw_circle(c, 3.0, col)
+			"rooms": # Blueprint room layout icon
+				draw_rect(Rect2(c + Vector2(-s * 0.85, -s * 0.75), Vector2(s * 1.7, s * 1.5)), col, false, 2.0)
+				draw_line(c + Vector2(0, -s * 0.75), c + Vector2(0, s * 0.20), col, 1.8)
+				draw_line(c + Vector2(-s * 0.85, s * 0.15), c + Vector2(-s * 0.25, s * 0.15), col, 1.8)
+				draw_line(c + Vector2(s * 0.25, s * 0.15), c + Vector2(s * 0.85, s * 0.15), col, 1.8)
+
+static func make_vsep() -> ColorRect:
+	var cr := ColorRect.new()
+	cr.color = Color(0.42, 0.36, 0.30, 0.55)
+	cr.custom_minimum_size = Vector2(1, 20)
+	cr.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	return cr
+
+static func make_hsep() -> ColorRect:
+	var cr := ColorRect.new()
+	cr.color = Color(0.42, 0.36, 0.30, 0.55)
+	cr.custom_minimum_size = Vector2(36, 1)
+	cr.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+	return cr
 
 ## Draggable 3D TF2 Prop Card (click to stamp OR drag directly into the 3D viewport!)
 class DraggablePropCard extends Button:

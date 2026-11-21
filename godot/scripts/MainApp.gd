@@ -125,6 +125,10 @@ var _marquee_cur: Vector2 = Vector2.ZERO
 var _active_custom_prefab: String = ""
 var playtest_obj_lbl: Label
 var playtest_obj_bar: ProgressBar
+var _outliner_search: String = ""
+var _outliner_collapsed: Dictionary = {}
+var _cam_bookmarks: Dictionary = {} # slot 1..4 -> {pos, yaw, pitch}
+var _room_kit_team: int = 2 # 2=RED, 3=BLU, 0=Neutral
 var _payload_track_idx: int = 0
 var _payload_prev_ent: int = -1
 var mvm_start_cash: int = 800
@@ -716,28 +720,40 @@ func _rebuild_left_rail() -> void:
 	vb.add_theme_constant_override("separation", 6)
 	left_rail_panel.add_child(vb)
 
-	# Sleek, non-duplicated 5-Tool Core Transform Rail (Move, Push/Pull, Rotate, Clip, Vertex!)
+	# Sleek 2-Group Left Studio Rail:
+	#   Group 1: Core 3D Transform Tools (Select, Push/Pull, Rotate, Clip, Vertex)
+	#   Group 2: Studio Views & Generators (Outliner O, Lighting F3, Focus F, Smart Rooms)
 	var items := [
-		{"id": "select",    "title": "Select & Move",    "key": "1",       "desc": "Pick solids/entities and drag the 3D RGB arrows to move cleanly on grid."},
-		{"id": "push_pull", "title": "Push / Pull Face", "key": "2",       "desc": "Click & drag any face handle out or in like SketchUp/TrenchBroom."},
+		{"id": "select",    "title": "Select & Move",    "key": "1",       "desc": "Pick solids/entities, drag 3D RGB arrows, or marquee-drag empty space to multi-select."},
+		{"id": "push_pull", "title": "Push / Pull Face", "key": "2",       "desc": "Click & drag any face handle out or in cleanly on grid."},
 		{"id": "rotate",    "title": "Rotate 90°",       "key": "R",       "desc": "Rotate the selected brush, prop, or entity by 90° instantly."},
-		{"id": "clip",      "title": "Clip / Slice",     "key": "Shift+X", "desc": "Slice selected brush cleanly along a plane to create angles & ramps."},
+		{"id": "clip",      "title": "Clip / Slice",     "key": "Shift+X", "desc": "Slice selected brush cleanly along a live 3D cut plane."},
 		{"id": "vertex",    "title": "Vertex Edit",      "key": "Shift+V", "desc": "Drag glowing corner handles (hold Shift for vertical up/down)."},
+		{"id": "_sep"},
+		{"id": "outliner",  "title": "Scene Outliner",   "key": "O",       "desc": "Browse organized map folders (Spawns, Doors, Lights, Props, Solids) & click to frame."},
+		{"id": "lighting",  "title": "Lighting Preview", "key": "F3",      "desc": "Cycle Daylight -> Lit Interior (Real TF2 Spotlights) -> Fullbright Blockout."},
+		{"id": "focus",     "title": "Focus Selection",  "key": "F",       "desc": "Smoothly frame the 3D camera directly onto the selected brush or entity."},
+		{"id": "rooms",     "title": "Smart TF2 Rooms",  "key": "Kit",     "desc": "1-click complete RED/BLU Spawn Rooms, Choke Hallways, Sniper Decks & Mid Arenas."},
 	]
-	for idx in range(items.size()):
-		var it: Dictionary = items[idx]
+	var row_i := 0
+	for it in items:
 		var tid: String = it["id"]
-		var is_act := (active_tool == tid) or (tid == "push_pull" and active_tool == "select" and selected_solid >= 0 and false)
+		if tid == "_sep":
+			vb.add_child(HudWidgets.make_hsep())
+			continue
+		var is_act := (active_tool == tid) or (tid == "lighting" and lighting_mode == 1)
 		var b := Button.new()
-		b.custom_minimum_size = Vector2(46, 44)
+		b.custom_minimum_size = Vector2(44, 40)
 		HudWidgets.style_tf2_button(b, fonts["heading"], 10, is_act)
 
-		var vic := HudWidgets.VectorToolIcon.new(tid, is_act, HudWidgets.COL_ACC)
+		var ic_tint := HudWidgets.COL_CYAN if tid in ["outliner", "focus"] else (Color(1.0, 0.85, 0.35) if tid == "lighting" else (HudWidgets.COL_GREEN if tid == "rooms" else HudWidgets.COL_ACC))
+		var vic := HudWidgets.VectorToolIcon.new(tid, is_act, ic_tint)
 		vic.set_anchors_preset(Control.PRESET_FULL_RECT)
 		b.add_child(vic)
 		HudWidgets.attach_spring_anim(b, 1.09)
 
-		var row_y: float = 68.0 + float(idx) * 50.0
+		var row_y: float = left_rail_panel.offset_top + float(row_i) * 45.0
+		row_i += 1
 		var t_title: String = it["title"]
 		var t_key: String = "[" + str(it["key"]) + "]"
 		var t_desc: String = it["desc"]
@@ -746,7 +762,7 @@ func _rebuild_left_rail() -> void:
 				tool_hover_title.text = t_title
 				tool_hover_key.text = t_key
 				tool_hover_desc.text = t_desc
-				tool_hover_card.offset_top = row_y
+				tool_hover_card.offset_top = minf(row_y, _get_logical_size().y - 110.0)
 				tool_hover_card.visible = true
 		)
 		b.mouse_exited.connect(func():
@@ -760,6 +776,10 @@ func _rebuild_left_rail() -> void:
 			if tid == "clip": _open_clip_drawer()
 			elif tid == "rotate": _rotate_selection()
 			elif tid == "push_pull": _select_tool("select"); _toast("Push / Pull Mode: Drag any yellow face arrow on the selected brush!")
+			elif tid == "outliner": _open_outliner_drawer()
+			elif tid == "lighting": _cycle_lighting_mode(); _rebuild_left_rail()
+			elif tid == "focus": _focus_camera_on_selection()
+			elif tid == "rooms": _open_room_kit_drawer()
 			else: _select_tool(tid)
 		)
 		vb.add_child(b)
@@ -887,6 +907,8 @@ func _build_top_bar() -> void:
 	map_title_lbl.add_theme_color_override("font_color", HudWidgets.COL_TX_MUTED)
 	lhb.add_child(map_title_lbl)
 
+	lhb.add_child(HudWidgets.make_vsep())
+
 	var hub_b := Button.new(); hub_b.text = "Hub"
 	HudWidgets.style_tf2_button(hub_b, fonts["body"], 11)
 	hub_b.pressed.connect(func(): audio.play("click"); _show_welcome_hub(true))
@@ -897,6 +919,8 @@ func _build_top_bar() -> void:
 	HudWidgets.style_tf2_button(save_b, fonts["body"], 11)
 	save_b.pressed.connect(func(): _save_current_vmf())
 	lhb.add_child(save_b); edit_only_top_nodes.append(save_b)
+
+	lhb.add_child(HudWidgets.make_vsep())
 
 	undo_btn = Button.new(); undo_btn.text = "Undo"
 	HudWidgets.style_tf2_button(undo_btn, fonts["body"], 11)
@@ -944,38 +968,36 @@ func _build_top_bar() -> void:
 	bar_hb.add_child(sp2)
 	top_sp2 = sp2
 
-	# TOP-RIGHT PILL
+	# TOP-RIGHT PILL (De-cluttered Studio Bar: Search | Grid | View Studio | Check | Settings | COMPILE F9!)
 	var right_frame := HudWidgets.HudFrame.new(HudWidgets.COL_LIP_AMB, 9.0, true)
 	bar_hb.add_child(right_frame)
-	var rhb := HBoxContainer.new(); rhb.alignment = BoxContainer.ALIGNMENT_END; rhb.add_theme_constant_override("separation", 4)
+	var rhb := HBoxContainer.new(); rhb.alignment = BoxContainer.ALIGNMENT_END; rhb.add_theme_constant_override("separation", 5)
 	right_frame.add_child(rhb)
 
+	var search_b := Button.new(); search_b.text = "Search"
+	search_b.tooltip_text = "Quick Command Palette (Ctrl+K) — Find any tool, entity, prop, or map"
+	HudWidgets.style_tf2_button(search_b, fonts["body"], 10)
+	search_b.pressed.connect(func(): audio.play("click"); if command_palette != null: command_palette.open_palette())
+	rhb.add_child(search_b); edit_only_top_nodes.append(search_b)
+
 	grid_btn = Button.new(); grid_btn.text = "Grid: 32u"; grid_btn.tooltip_text = "Cycle Grid Snap ([ smaller, ] larger)"
-	HudWidgets.style_tf2_button(grid_btn, fonts["body"], 11)
+	HudWidgets.style_tf2_button(grid_btn, fonts["body"], 10)
 	grid_btn.pressed.connect(func(): audio.play("click"); _step_grid(1, true))
 	rhb.add_child(grid_btn); edit_only_top_nodes.append(grid_btn)
 
-	sym_btn = Button.new(); sym_btn.text = "Sym: Off"
-	HudWidgets.style_tf2_button(sym_btn, fonts["body"], 11)
-	sym_btn.pressed.connect(func(): audio.play("click"); _cycle_symmetry())
+	sym_btn = Button.new(); sym_btn.text = "View"
+	sym_btn.tooltip_text = "View & Workspace Studio — Lighting (F3), Symmetry, Split 2D, Outliner, VisGroups & Bookmarks"
+	HudWidgets.style_tf2_button(sym_btn, fonts["body"], 10)
+	sym_btn.pressed.connect(func(): audio.play("click"); _open_viewport_menu_drawer())
 	rhb.add_child(sym_btn); edit_only_top_nodes.append(sym_btn)
 
-	var vis_b := Button.new(); vis_b.text = "Vis"
-	HudWidgets.style_tf2_button(vis_b, fonts["body"], 11)
-	vis_b.pressed.connect(func(): audio.play("click"); _open_visgroups_drawer())
-	rhb.add_child(vis_b); edit_only_top_nodes.append(vis_b)
-
-	var split_b := Button.new(); split_b.text = "2D"
-	split_b.tooltip_text = "Toggle Split 2D Blueprint Views (Top X/Y & Side X/Z)"
-	HudWidgets.style_tf2_button(split_b, fonts["body"], 10)
-	split_b.pressed.connect(func(): audio.play("click"); _toggle_split_2d())
-	rhb.add_child(split_b); edit_only_top_nodes.append(split_b)
-
 	coach_btn = Button.new(); coach_btn.text = "Check"
-	coach_btn.tooltip_text = "Check Map for Problems (Alt+P) & TF2 Map Coach"
+	coach_btn.tooltip_text = "Check Map for Problems (Alt+P) & TF2 Map Balance Analyzer"
 	HudWidgets.style_tf2_button(coach_btn, fonts["body"], 10)
 	coach_btn.pressed.connect(func(): audio.play("click"); _open_check_problems_drawer())
 	rhb.add_child(coach_btn); edit_only_top_nodes.append(coach_btn)
+
+	rhb.add_child(HudWidgets.make_vsep())
 
 	var set_b := Button.new(); set_b.text = "Settings"
 	set_b.tooltip_text = "Settings & Hammer Configuration (Ctrl+,)"
@@ -1050,9 +1072,7 @@ func _update_top_bar_compact() -> void:
 	if grid_btn != null:
 		grid_btn.text = ("%du" if compact else "Grid: %du") % GRID_STEPS[grid_idx]
 	if sym_btn != null:
-		var snames := ["Sym: Off", "Sym: Mirror", "Sym: 180°"]
-		var cnames := ["Off", "Mir", "180°"]
-		sym_btn.text = cnames[symmetry] if compact else snames[symmetry]
+		sym_btn.text = "View"
 	if history_btn != null:
 		history_btn.text = ("Hist(%d)" if compact else "History (%d)") % maxi(1, _history_entries.size())
 	if settings_modal != null and settings_modal.visible:
@@ -1580,7 +1600,9 @@ func _build_right_drawer() -> void:
 	close_b.pressed.connect(func(): right_drawer.visible = false)
 	hdr.add_child(close_b)
 
-	var scroll := ScrollContainer.new(); scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	var scroll := ScrollContainer.new()
+	scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
 	outer.add_child(scroll)
 
 	right_drawer_vbox = VBoxContainer.new()
@@ -2752,6 +2774,123 @@ func _open_history_drawer() -> void:
 	_clear_drawer("MAP HISTORY TIMELINE")
 	EditorDrawersScript.build_history_drawer(self, right_drawer_vbox)
 
+func _open_outliner_drawer() -> void:
+	_clear_drawer("SCENE OUTLINER (O)")
+	EditorDrawersScript.build_outliner_drawer(self, right_drawer_vbox)
+
+func _open_viewport_menu_drawer() -> void:
+	_clear_drawer("VIEW & WORKSPACE STUDIO")
+	EditorDrawersScript.build_viewport_menu_drawer(self, right_drawer_vbox)
+
+func _open_room_kit_drawer() -> void:
+	_clear_drawer("SMART TF2 ROOM GENERATOR")
+	EditorDrawersScript.build_room_kit_drawer(self, right_drawer_vbox)
+
+func _focus_camera_on_pos(target: Vector3, dist: float = 12.0) -> void:
+	var dir := (cam_pos - target)
+	if dir.length_squared() < 0.25:
+		dir = Vector3(1.0, 0.75, 1.0)
+	dir = dir.normalized()
+	dir.y = clampf(dir.y, 0.32, 0.80)
+	var dest := target + dir.normalized() * dist
+	cam_pos = dest
+	editor_cam.look_at_from_position(cam_pos, target, Vector3.UP)
+	cam_yaw = editor_cam.rotation.y
+	cam_pitch = editor_cam.rotation.x
+	_refresh_2d_views()
+
+func _focus_camera_on_selection() -> void:
+	if selected_solid >= 0:
+		var si: Dictionary = doc.get_solid_info(selected_solid)
+		if si.get("valid", false):
+			var mid: Vector3 = (si["bounds_min"] + si["bounds_max"]) * 0.5
+			var rad: float = maxf(6.0, (si["bounds_max"] - si["bounds_min"]).length() * 1.35)
+			_focus_camera_on_pos(mid, clampf(rad, 7.0, 26.0))
+			_toast("Focused camera on Solid #%d (F)" % selected_solid)
+			return
+	elif selected_entity >= 0:
+		var ents: Array = doc.get_entities()
+		if selected_entity < ents.size():
+			var e: Dictionary = ents[selected_entity]
+			var ep: Vector3 = (e["bounds_min"] + e["bounds_max"]) * 0.5 if e.get("is_brush", false) else e["pos"]
+			_focus_camera_on_pos(ep, 9.5)
+			_toast("Focused camera on %s #%d (F)" % [str(e["classname"]), selected_entity])
+			return
+	_focus_camera_on_pos(Vector3(0, 1.5, 0), 22.0)
+	_toast("Focused camera on Map Center (F)")
+
+func _save_camera_bookmark(slot: int) -> void:
+	_cam_bookmarks[slot] = {"pos": cam_pos, "yaw": cam_yaw, "pitch": cam_pitch}
+	_toast("Saved Camera View %d (press Alt+%d anytime to jump back!)" % [slot, slot])
+
+func _jump_camera_bookmark(slot: int) -> void:
+	if not _cam_bookmarks.has(slot):
+		_toast("Camera View %d is empty — press Ctrl+%d to save current view!" % [slot, slot])
+		return
+	var bm: Dictionary = _cam_bookmarks[slot]
+	cam_pos = bm["pos"]; cam_yaw = float(bm["yaw"]); cam_pitch = float(bm["pitch"])
+	_apply_editor_cam(); _refresh_2d_views()
+	_toast("Jumped to Camera View %d" % slot)
+
+func _stamp_smart_room_kit(kind: String) -> void:
+	var pos := hover_pos if hover_valid else Vector3.ZERO
+	var b: Dictionary = Tf2GamemodesScript.get_biome(active_biome)
+	var team := _room_kit_team if _room_kit_team in [2, 3] else 2
+	var wall_m: String = "BRICK/BRICKWALL001" if team == 2 else ("METAL/WALL011B" if team == 3 else str(b["wall"]))
+	var trim_m: String = str(b["accent"])
+	var roof_m: String = str(b["roof"])
+	var created: Array[int] = []
+
+	if kind == "spawn_full":
+		for i in doc.add_building(pos + Vector3(-6, 0, -5), pos + Vector3(6, 0, 5), 1, 0, wall_m, trim_m, roof_m, 2):
+			created.append(i)
+		doc.add_brush_entity("func_door", pos + Vector3(-2.0, 0.0, 4.75), pos + Vector3(2.0, 3.8, 5.25),
+			"METAL/METALDOOR001", {"movedir": "-90 0 0", "speed": "380", "targetname": "spawn_door_%s" % ("red" if team == 2 else "blu")})
+		doc.add_brush_entity("func_respawnroom", pos + Vector3(-5.5, 0.1, -4.5), pos + Vector3(5.5, 4.2, 4.5),
+			"TOOLS/TOOLSTRIGGER", {"TeamNum": str(team)})
+		Tf2GamemodesScript.stamp_preset(doc, "resupply", pos + Vector3(0, 0.1, -3.8), team)
+		for sx in [-3.5, -1.2, 1.2, 3.5]:
+			Tf2GamemodesScript.stamp_preset(doc, "spawn", pos + Vector3(sx, 0.2, 0.5), team)
+		var lcol := "255 215 165 550" if team == 2 else "175 215 255 550"
+		doc.add_point_entity("light_spot", pos + Vector3(0, 4.0, 0), {"_light": lcol, "pitch": "-90", "_cone": "60"})
+		_toast("Stamped Complete %s Spawn Room (door + resupply + 4 spawns + spotlight)!" % ("RED" if team == 2 else "BLU"))
+	elif kind == "hallway":
+		created.append(doc.add_box(pos + Vector3(-8, -0.5, -3.5), pos + Vector3(8, 0, 3.5), str(b["floor"])))
+		created.append(doc.add_box(pos + Vector3(-8, 4.5, -3.5), pos + Vector3(8, 5.0, 3.5), roof_m))
+		created.append(doc.add_box(pos + Vector3(-8, 0, -3.5), pos + Vector3(8, 4.5, -3.0), wall_m))
+		created.append(doc.add_box(pos + Vector3(-8, 0, 3.0), pos + Vector3(8, 4.5, 3.5), wall_m))
+		doc.add_point_entity("light_spot", pos + Vector3(-4, 4.2, 0), {"_light": "255 230 185 450", "pitch": "-90", "_cone": "55"})
+		doc.add_point_entity("light_spot", pos + Vector3(4, 4.2, 0), {"_light": "255 230 185 450", "pitch": "-90", "_cone": "55"})
+		_toast("Stamped Lit 192u TF2 Choke Hallway Connector!")
+	elif kind == "balcony":
+		created.append(doc.add_box(pos + Vector3(-5, 3.5, -2.5), pos + Vector3(5, 4.0, 2.5), trim_m))
+		created.append(doc.add_box(pos + Vector3(-5, 4.0, 2.0), pos + Vector3(5, 5.2, 2.5), wall_m))
+		created.append(doc.add_box(pos + Vector3(-3.5, 4.0, -1.0), pos + Vector3(-1.5, 5.8, 0.8), "DEV/DEV_MEASURECRATE01"))
+		for s in range(8):
+			var t0 := float(s) / 8.0; var t1 := float(s + 1) / 8.0
+			created.append(doc.add_box(pos + Vector3(lerpf(5.0, 9.0, t0), lerpf(0.0, 3.5, t0), -1.5),
+				pos + Vector3(lerpf(5.0, 9.0, t1) + 0.08, lerpf(0.0, 3.5, t0) + 0.22, 1.5), "METAL/IBEAM001B"))
+		doc.add_point_entity("item_healthkit_small", pos + Vector3(2.5, 4.1, 0), {})
+		_toast("Stamped TF2 Sniper Battlement Deck + Open-Back Steel Stairs + Medkit!")
+	elif kind == "mid_arena":
+		created.append(doc.add_box(pos + Vector3(-5, 0, -5), pos + Vector3(5, 1.0, 5), trim_m))
+		created.append(doc.add_ramp(pos + Vector3(-7.5, 0, -2.5), pos + Vector3(-5, 1.0, 2.5), 0, str(b["floor"])))
+		created.append(doc.add_ramp(pos + Vector3(5, 0, -2.5), pos + Vector3(7.5, 1.0, 2.5), 1, str(b["floor"])))
+		created.append(doc.add_box(pos + Vector3(-4.5, 1.0, -4.5), pos + Vector3(-2.5, 2.8, -2.8), "DEV/DEV_MEASURECRATE01"))
+		created.append(doc.add_box(pos + Vector3(2.5, 1.0, 2.8), pos + Vector3(4.5, 2.8, 4.5), "DEV/DEV_MEASURECRATE01"))
+		Tf2GamemodesScript.stamp_preset(doc, "cap_point", pos + Vector3(0, 1.05, 0), 0)
+		doc.add_point_entity("item_healthkit_medium", pos + Vector3(0, 0.2, -7.0), {})
+		doc.add_point_entity("item_ammopack_medium", pos + Vector3(0, 0.2, 7.0), {})
+		_toast("Stamped Complete Mid Control Point Arena (cap point + ramps + cover + pickups)!")
+
+	_record_history("Stamp Smart Room: " + kind)
+	map_sync.sync_all(); ent_vis.sync_all(); _refresh_2d_views(true)
+	if not created.is_empty():
+		selected_solids = created; selected_solid = created[0]
+		map_sync.set_multi_selection(selected_solids, selected_solid, -1)
+		_refresh_selection_bar(); _update_3d_gizmo()
+	_spawn_place_fx(pos, HudWidgets.COL_GREEN)
+
 func _jump_to_history(target_idx: int) -> void:
 	target_idx = clampi(target_idx, 0, _history_entries.size() - 1)
 	if target_idx == _history_idx:
@@ -3047,6 +3186,12 @@ func _unhandled_input(event: InputEvent) -> void:
 			elif event.keycode == KEY_DELETE: _delete_selection()
 			elif event.keycode == KEY_BRACKETLEFT: _step_grid(-1)
 			elif event.keycode == KEY_BRACKETRIGHT: _step_grid(1)
+			elif event.keycode == KEY_O and not event.ctrl_pressed and not event.alt_pressed: _open_outliner_drawer()
+			elif event.keycode == KEY_F and not event.ctrl_pressed and not event.alt_pressed: _focus_camera_on_selection()
+			elif event.ctrl_pressed and event.keycode in [KEY_1, KEY_2, KEY_3, KEY_4]:
+				_save_camera_bookmark(event.keycode - KEY_0)
+			elif event.alt_pressed and event.keycode in [KEY_1, KEY_2, KEY_3, KEY_4]:
+				_jump_camera_bookmark(event.keycode - KEY_0)
 			elif event.keycode == KEY_R and not event.ctrl_pressed: _rotate_selection()
 			elif event.keycode == KEY_H and not event.ctrl_pressed: _do_quickhide_selected()
 			elif event.keycode == KEY_U and not event.ctrl_pressed: _do_unhide_all()
@@ -4048,6 +4193,22 @@ func _setup_auto_shot(idx: int) -> void:
 				(_clip_plane_mesh.mesh as BoxMesh).size = Vector3(14.0, 9.0, 0.06)
 				_clip_plane_mesh.position = Vector3(0.5, 3.0, 0.5); _clip_plane_mesh.rotation = Vector3(0, -PI * 0.25, 0); _clip_plane_mesh.visible = true
 			cam_pos = Vector3(18, 13, 21); cam_yaw = 0.68; cam_pitch = -0.44; _apply_editor_cam()
+		"v11_outliner":
+			_set_lighting_mode(0); _show_welcome_hub(false); _clear_official_bsp(); _clear_selection()
+			doc.load_vmf(repo_root.path_join("godot/maps/ctf_turbine_rebuilt.vmf"))
+			map_sync.clear_all(); map_sync.sync_all(); ent_vis.sync_all()
+			set_stage(Stage.BUILD); _open_outliner_drawer()
+			cam_pos = Vector3(-13.5, 5.2, 11.5); editor_cam.look_at_from_position(cam_pos, Vector3(4.0, 1.5, -2.0), Vector3.UP)
+			cam_yaw = editor_cam.rotation.y; cam_pitch = editor_cam.rotation.x
+		"v11_view_studio":
+			_set_lighting_mode(0); _show_welcome_hub(false); _load_gamemode("koth", "winter", false); set_stage(Stage.STYLE)
+			_dock_prop_cat = "winter"; _dock_prop_page = 0; _rebuild_bottom_dock()
+			_save_camera_bookmark(1); _open_viewport_menu_drawer()
+			cam_pos = Vector3(20, 14, 24); cam_yaw = 0.65; cam_pitch = -0.42; _apply_editor_cam()
+		"v11_room_kit":
+			_set_lighting_mode(0); _show_welcome_hub(false); _load_gamemode("koth", "badlands", false); set_stage(Stage.BUILD)
+			_open_room_kit_drawer()
+			cam_pos = Vector3(20, 14, 24); cam_yaw = 0.65; cam_pitch = -0.42; _apply_editor_cam()
 	if not viewing_bsp and not settings_modal.visible:
 		_update_hover(get_viewport().get_visible_rect().size * Vector2(0.42, 0.52))
 
