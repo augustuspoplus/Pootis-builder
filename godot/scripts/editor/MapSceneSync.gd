@@ -43,6 +43,14 @@ var _wvt_mat_cache: Dictionary = {}
 var _wvt_shader: Shader
 var _handle_data: Array = [] # [{pos, normal, solid_idx}]
 var _vertex_data: Array = [] # [{pos, vert_idx, solid_idx}]
+var _hover_im: ImmediateMesh = null
+var _sel_im: ImmediateMesh = null
+var _wire_mat_hov: StandardMaterial3D = null
+var _wire_mat_sel: StandardMaterial3D = null
+var _face_cone_mesh: CylinderMesh = null
+var _face_handle_mats: Dictionary = {}
+var _vert_box_mesh: BoxMesh = null
+var _vert_mat: StandardMaterial3D = null
 
 func setup(p_doc: Object, p_assets: RefCounted) -> void:
 	doc = p_doc
@@ -106,29 +114,56 @@ func sync_all() -> void:
 		selected_face = -1
 	_rebuild_selection_visuals()
 
-func sync_solid(idx: int) -> void:
+## Ultra-fast O(1) visual translate during active gizmo/move drags (zero mesh/physics rebuild!).
+## Caller calls sync_solid(idx, true) once on mouse release to bake exact collision & coordinates.
+func offset_solid_visual(idx: int, delta: Vector3) -> void:
+	if _solid_nodes.has(idx):
+		var n: Node3D = _solid_nodes[idx]
+		if is_instance_valid(n):
+			n.position += delta
+
+func sync_solids(indices: Array, rebuild_collision: bool = true) -> void:
+	for raw_id in indices:
+		sync_solid(int(raw_id), rebuild_collision)
+	_rebuild_selection_visuals()
+
+func sync_solid(idx: int, rebuild_collision: bool = true) -> void:
 	if doc == null or idx < 0 or idx >= doc.get_solid_count():
 		return
-	if _solid_nodes.has(idx):
-		var old_n: Node = _solid_nodes[idx]
-		if is_instance_valid(old_n):
-			old_n.queue_free()
-		_solid_nodes.erase(idx)
-
 	var d: Dictionary = doc.get_solid_mesh_data(idx)
 	var info: Dictionary = doc.get_solid_info(idx)
-	if not d.get("ok", false):
-		return
-	if bool(info.get("hidden", false)):
+	if not d.get("ok", false) or bool(info.get("hidden", false)):
+		if _solid_nodes.has(idx):
+			var old_h: Node = _solid_nodes[idx]
+			if is_instance_valid(old_h):
+				old_h.queue_free()
+			_solid_nodes.erase(idx)
 		return
 
 	var is_sky: bool = info.get("is_skybox", false)
 	var prim_mat: String = str(info.get("material", "")).to_lower()
 	var is_clip: bool = prim_mat.find("toolsclip") != -1 or prim_mat.find("toolsplayerclip") != -1
-	var holder := Node3D.new()
-	holder.name = "Solid_%d" % idx
-	holder.set_meta("solid_idx", idx)
-	holder.set_meta("is_skybox", is_sky)
+
+	# Fast path during active face/vertex drag: update mesh in-place without rebuilding ConcavePolygonShape3D!
+	var holder: Node3D = null
+	if not rebuild_collision and _solid_nodes.has(idx) and is_instance_valid(_solid_nodes[idx]):
+		holder = _solid_nodes[idx]
+		holder.position = Vector3.ZERO
+		var old_mi := holder.get_node_or_null("Mesh")
+		if old_mi != null:
+			old_mi.queue_free()
+	else:
+		if _solid_nodes.has(idx):
+			var old_n: Node = _solid_nodes[idx]
+			if is_instance_valid(old_n):
+				old_n.queue_free()
+			_solid_nodes.erase(idx)
+		holder = Node3D.new()
+		holder.name = "Solid_%d" % idx
+		holder.set_meta("solid_idx", idx)
+		holder.set_meta("is_skybox", is_sky)
+		solids_root.add_child(holder)
+		_solid_nodes[idx] = holder
 
 	if (not is_sky or show_skybox_shell) and (not is_clip or show_clips):
 		var surfaces: Array = d["surfaces"]
@@ -163,24 +198,22 @@ func sync_solid(idx: int) -> void:
 				mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF if is_sky else GeometryInstance3D.SHADOW_CASTING_SETTING_ON
 				holder.add_child(mi)
 
-	var col_tris: PackedVector3Array = d.get("collision_faces", PackedVector3Array())
-	if col_tris.size() >= 3:
-		var sb := StaticBody3D.new()
-		sb.name = "Col"
-		sb.set_meta("solid_idx", idx)
-		sb.set_meta("is_skybox", is_sky)
-		sb.collision_layer = 2 if is_sky else 3
-		sb.collision_mask = 0
-		var cs := CollisionShape3D.new()
-		var shape := ConcavePolygonShape3D.new()
-		shape.backface_collision = true
-		shape.set_faces(col_tris)
-		cs.shape = shape
-		sb.add_child(cs)
-		holder.add_child(sb)
-
-	solids_root.add_child(holder)
-	_solid_nodes[idx] = holder
+	if rebuild_collision:
+		var col_tris: PackedVector3Array = d.get("collision_faces", PackedVector3Array())
+		if col_tris.size() >= 3:
+			var sb := StaticBody3D.new()
+			sb.name = "Col"
+			sb.set_meta("solid_idx", idx)
+			sb.set_meta("is_skybox", is_sky)
+			sb.collision_layer = 2 if is_sky else 3
+			sb.collision_mask = 0
+			var cs := CollisionShape3D.new()
+			var shape := ConcavePolygonShape3D.new()
+			shape.backface_collision = true
+			shape.set_faces(col_tris)
+			cs.shape = shape
+			sb.add_child(cs)
+			holder.add_child(sb)
 
 func set_selection(solid_idx: int, face_idx: int = -1) -> void:
 	selected_solid = solid_idx
@@ -195,13 +228,16 @@ func set_hover(solid_idx: int) -> void:
 	if hovered_solid == solid_idx:
 		return
 	hovered_solid = solid_idx
-	hover_box.mesh = null
+	_ensure_pooled_helpers()
+	hover_box.visible = false
 	if doc == null or hovered_solid < 0 or hovered_solid == selected_solid or hovered_solid >= doc.get_solid_count():
 		return
 	var d: Dictionary = doc.get_solid_info(hovered_solid)
 	if not d.get("valid", false) or d.get("is_skybox", false) or d.get("hidden", false):
 		return
-	hover_box.mesh = _make_wire_box(d["bounds_min"], d["bounds_max"], Color(0.20, 0.90, 1.0, 0.92), 0.03)
+	_update_wire_box(_hover_im, _wire_mat_hov, d["bounds_min"], d["bounds_max"], 0.03)
+	hover_box.mesh = _hover_im
+	hover_box.visible = true
 
 func hit_test_face_handle(ray_origin: Vector3, ray_dir: Vector3) -> Dictionary:
 	var rd := ray_dir.normalized()
@@ -239,15 +275,11 @@ func hit_test_vertex_handle(ray_origin: Vector3, ray_dir: Vector3) -> Dictionary
 			best = v
 	return best
 
-func _make_wire_box(bmin: Vector3, bmax: Vector3, col: Color, pad_val: float = 0.025) -> ImmediateMesh:
+func _update_wire_box(im: ImmediateMesh, mat: StandardMaterial3D, bmin: Vector3, bmax: Vector3, pad_val: float = 0.025) -> void:
+	im.clear_surfaces()
 	var pad := Vector3(pad_val, pad_val, pad_val)
 	var a := bmin - pad
 	var b := bmax + pad
-	var im := ImmediateMesh.new()
-	var mat := StandardMaterial3D.new()
-	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	mat.albedo_color = col
-	mat.no_depth_test = true
 	im.surface_begin(Mesh.PRIMITIVE_LINES, mat)
 	var corners := [
 		Vector3(a.x, a.y, a.z), Vector3(b.x, a.y, a.z),
@@ -264,10 +296,46 @@ func _make_wire_box(bmin: Vector3, bmax: Vector3, col: Color, pad_val: float = 0
 		im.surface_add_vertex(corners[e[0]])
 		im.surface_add_vertex(corners[e[1]])
 	im.surface_end()
-	return im
+
+func _ensure_pooled_helpers() -> void:
+	if _hover_im == null:
+		_hover_im = ImmediateMesh.new()
+		_wire_mat_hov = StandardMaterial3D.new()
+		_wire_mat_hov.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		_wire_mat_hov.albedo_color = Color(0.20, 0.90, 1.0, 0.92)
+		_wire_mat_hov.no_depth_test = true
+	if _sel_im == null:
+		_sel_im = ImmediateMesh.new()
+		_wire_mat_sel = StandardMaterial3D.new()
+		_wire_mat_sel.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		_wire_mat_sel.albedo_color = Color(0.98, 0.68, 0.16, 1.0)
+		_wire_mat_sel.no_depth_test = true
+	if _face_cone_mesh == null:
+		_face_cone_mesh = CylinderMesh.new()
+		_face_cone_mesh.top_radius = 0.0
+		_face_cone_mesh.bottom_radius = 0.22
+		_face_cone_mesh.height = 0.52
+	if _vert_box_mesh == null:
+		_vert_box_mesh = BoxMesh.new()
+		_vert_box_mesh.size = Vector3(0.28, 0.28, 0.28)
+		_vert_mat = StandardMaterial3D.new()
+		_vert_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		_vert_mat.albedo_color = Color(1.0, 0.92, 0.18)
+		_vert_mat.no_depth_test = true
+
+func _get_face_mat(col: Color) -> StandardMaterial3D:
+	var key := col.to_html(false)
+	if not _face_handle_mats.has(key):
+		var hm := StandardMaterial3D.new()
+		hm.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		hm.albedo_color = col
+		hm.no_depth_test = true
+		_face_handle_mats[key] = hm
+	return _face_handle_mats[key]
 
 func _rebuild_selection_visuals() -> void:
-	selection_box.mesh = null
+	_ensure_pooled_helpers()
+	selection_box.visible = false
 	_handle_data.clear()
 	_vertex_data.clear()
 	for ch in face_handles_root.get_children():
@@ -284,21 +352,17 @@ func _rebuild_selection_visuals() -> void:
 
 	var bmin: Vector3 = d["bounds_min"]
 	var bmax: Vector3 = d["bounds_max"]
-	selection_box.mesh = _make_wire_box(bmin, bmax, Color(0.98, 0.68, 0.16, 1.0), 0.03)
+	_update_wire_box(_sel_im, _wire_mat_sel, bmin, bmax, 0.03)
+	selection_box.mesh = _sel_im
+	selection_box.visible = true
 
 	if show_vertex_handles:
 		# Hammer Shift+V Vertex Manipulation Handles (glowing yellow corner cubes!)
 		var verts: PackedVector3Array = doc.get_solid_vertices(selected_solid)
-		var vmat := StandardMaterial3D.new()
-		vmat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-		vmat.albedo_color = Color(1.0, 0.92, 0.18)
-		vmat.no_depth_test = true
-		var bm := BoxMesh.new()
-		bm.size = Vector3(0.28, 0.28, 0.28)
 		for vi in range(verts.size()):
 			var vm := MeshInstance3D.new()
-			vm.mesh = bm
-			vm.material_override = vmat
+			vm.mesh = _vert_box_mesh
+			vm.material_override = _vert_mat
 			vm.position = verts[vi]
 			vertex_handles_root.add_child(vm)
 			_vertex_data.append({"pos": verts[vi], "vert_idx": vi, "solid_idx": selected_solid})
@@ -316,16 +380,8 @@ func _rebuild_selection_visuals() -> void:
 	]
 	for item in dirs:
 		var handle := MeshInstance3D.new()
-		var cone := CylinderMesh.new()
-		cone.top_radius = 0.0
-		cone.bottom_radius = 0.22
-		cone.height = 0.52
-		handle.mesh = cone
-		var hmat := StandardMaterial3D.new()
-		hmat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-		hmat.albedo_color = item["col"]
-		hmat.no_depth_test = true
-		handle.material_override = hmat
+		handle.mesh = _face_cone_mesh
+		handle.material_override = _get_face_mat(item["col"])
 		handle.position = item["pos"]
 		var n: Vector3 = item["n"]
 		if n == Vector3(1, 0, 0):

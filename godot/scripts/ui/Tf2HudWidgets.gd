@@ -135,19 +135,47 @@ static func attach_spring_anim(ctrl: Control, hover_scale: float = 1.07) -> void
 
 static func jump_threshold_callout(height_u: int) -> Dictionary:
 	if height_u <= 18:
-		return {"text": "%du â€” Walkable Step (<=18u)" % height_u, "color": COL_GREEN}
+		return {"text": "%du — Walkable Step (<=18u)" % height_u, "color": COL_GREEN}
 	elif height_u <= 48:
-		return {"text": "%du â€” Standard Jump (<=48u)" % height_u, "color": COL_GREEN}
+		return {"text": "%du — Standard Jump (<=48u)" % height_u, "color": COL_GREEN}
 	elif height_u <= 64:
-		return {"text": "%du â€” Crouch-Jump (<=64u)" % height_u, "color": COL_ACC}
+		return {"text": "%du — Crouch-Jump (<=64u)" % height_u, "color": COL_ACC}
 	elif height_u <= 83:
-		return {"text": "%du â€” Heavy Height (83u)" % height_u, "color": COL_ACC}
+		return {"text": "%du — Heavy Height (83u)" % height_u, "color": COL_ACC}
 	elif height_u <= 128:
-		return {"text": "%du â€” Scout Double-Jump (<=128u)" % height_u, "color": COL_CYAN}
+		return {"text": "%du — Scout Double-Jump (<=128u)" % height_u, "color": COL_CYAN}
 	elif height_u <= 192:
-		return {"text": "%du â€” Soldier Rocket-Jump! (192u)" % height_u, "color": COL_RED}
+		return {"text": "%du — Soldier Rocket-Jump! (192u)" % height_u, "color": COL_RED}
 	else:
-		return {"text": "%du â€” High Sniper Perch / Wall (%du)" % [height_u, height_u], "color": Color(0.84, 0.56, 1.0)}
+		return {"text": "%du — High Sniper Perch / Wall" % height_u, "color": Color(0.84, 0.56, 1.0)}
+
+## Clean dark inset card section for Right Drawers (elevates visual hierarchy & readability!)
+static func make_section_card(title: String, fonts: Dictionary, accent: Color = COL_ACC) -> Dictionary:
+	var card := PanelContainer.new()
+	var sb := StyleBoxFlat.new()
+	sb.bg_color = Color(0.11, 0.10, 0.09, 0.96)
+	sb.border_color = Color(accent.r, accent.g, accent.b, 0.42)
+	sb.set_border_width_all(1)
+	sb.border_width_left = 3
+	sb.set_corner_radius_all(8)
+	sb.content_margin_left = 10
+	sb.content_margin_right = 10
+	sb.content_margin_top = 8
+	sb.content_margin_bottom = 8
+	card.add_theme_stylebox_override("panel", sb)
+
+	var vb := VBoxContainer.new()
+	vb.add_theme_constant_override("separation", 6)
+	card.add_child(vb)
+
+	if not title.is_empty():
+		var hl := Label.new()
+		hl.text = title
+		hl.add_theme_font_override("font", fonts.get("heading"))
+		hl.add_theme_font_size_override("font_size", 11)
+		hl.add_theme_color_override("font_color", accent)
+		vb.add_child(hl)
+	return {"panel": card, "vbox": vb}
 
 class HudFrame extends PanelContainer:
 	var lip_color: Color = COL_LIP_AMB

@@ -17,6 +17,12 @@ var _zoom: float = 1.0
 var _pan_px: Vector2 = Vector2.ZERO
 var _panning: bool = false
 var _last_solid_rects: Array = [] # [{idx, rect}]
+var _geo_dirty: bool = true
+var _cached_solids: Array = []
+var _cached_ents: Array = []
+var _cached_mn: Vector3 = Vector3(-16, 0, -16)
+var _cached_mx: Vector3 = Vector3(16, 8, 16)
+var _cached_floor_y: float = 0.0
 
 func setup(p_doc: Object, p_font: Font, p_mode: int = 0) -> void:
 	doc = p_doc
@@ -24,11 +30,47 @@ func setup(p_doc: Object, p_font: Font, p_mode: int = 0) -> void:
 	mode = p_mode
 	clip_contents = true
 	mouse_filter = Control.MOUSE_FILTER_STOP
+	_geo_dirty = true
 
-func refresh(p_sel_solid: int, p_cam_pos: Vector3) -> void:
+func mark_geometry_dirty() -> void:
+	_geo_dirty = true
+	queue_redraw()
+
+func refresh(p_sel_solid: int, p_cam_pos: Vector3, geo_changed: bool = false) -> void:
+	if geo_changed:
+		_geo_dirty = true
 	selected_solid = p_sel_solid
 	camera_pos = p_cam_pos
 	queue_redraw()
+
+func _rebuild_geo_cache() -> void:
+	_geo_dirty = false
+	_cached_solids.clear()
+	_cached_ents.clear()
+	_cached_mn = Vector3(-16, 0, -16)
+	_cached_mx = Vector3(16, 8, 16)
+	_cached_floor_y = 0.0
+	if doc == null:
+		return
+	var first := true
+	for i in range(doc.get_solid_count()):
+		var si: Dictionary = doc.get_solid_info(i)
+		if not si.get("valid", false) or si.get("is_skybox", false) or si.get("hidden", false):
+			continue
+		var b0: Vector3 = si["bounds_min"]
+		var b1: Vector3 = si["bounds_max"]
+		_cached_solids.append({"idx": i, "min": b0, "max": b1})
+		if first:
+			_cached_mn = b0; _cached_mx = b1; first = false
+		else:
+			_cached_mn = _cached_mn.min(b0); _cached_mx = _cached_mx.max(b1)
+		if (b1.x - b0.x) > 12.0 and (b1.z - b0.z) > 12.0 and (b1.y - b0.y) <= 2.0:
+			_cached_floor_y = b1.y
+	if mode == 0:
+		for e in doc.get_entities():
+			var cls: String = str(e["classname"])
+			if cls == "info_player_teamspawn" or cls == "team_control_point" or cls == "item_teamflag" or cls.begins_with("item_healthkit") or cls.begins_with("item_ammopack"):
+				_cached_ents.append({"cls": cls, "pos": e["pos"], "team": str(e["kv"].get("TeamNum", "2"))})
 
 func _gui_input(event: InputEvent) -> void:
 	if event is InputEventMouseButton:
@@ -68,26 +110,12 @@ func _draw() -> void:
 	draw_rect(Rect2(Vector2.ZERO, size), Color(0.075, 0.09, 0.11, 0.97), true)
 	draw_rect(Rect2(Vector2.ZERO, size), Color(0.26, 0.30, 0.36, 0.95), false, 1.5)
 
-	var mn := Vector3(-16, 0, -16)
-	var mx := Vector3(16, 8, 16)
-	var solids: Array = []
-	var floor_y := 0.0
-	if doc != null:
-		var first := true
-		for i in range(doc.get_solid_count()):
-			var si: Dictionary = doc.get_solid_info(i)
-			if not si.get("valid", false) or si.get("is_skybox", false) or si.get("hidden", false):
-				continue
-			var b0: Vector3 = si["bounds_min"]
-			var b1: Vector3 = si["bounds_max"]
-			solids.append({"idx": i, "min": b0, "max": b1})
-			if first:
-				mn = b0; mx = b1; first = false
-			else:
-				mn = mn.min(b0); mx = mx.max(b1)
-			# Detect primary ground top elevation for floor-relative jump guides
-			if (b1.x - b0.x) > 12.0 and (b1.z - b0.z) > 12.0 and (b1.y - b0.y) <= 2.0:
-				floor_y = b1.y
+	if _geo_dirty:
+		_rebuild_geo_cache()
+	var mn := _cached_mn
+	var mx := _cached_mx
+	var solids: Array = _cached_solids
+	var floor_y := _cached_floor_y
 
 	var span_x := maxf(12.0, mx.x - mn.x)
 	var pad := 16.0
@@ -175,14 +203,14 @@ func _draw() -> void:
 				if font != null:
 					draw_string(font, Vector2(pr.position.x + 5.0, pr.position.y + 12.0), g["lbl"], HORIZONTAL_ALIGNMENT_LEFT, -1, 10, g["col"])
 
-	# Entities & Camera dot in Top view
+	# Entities & Camera dot in Top view (cached — zero GDExtension overhead during pan/zoom!)
 	if doc != null and mode == 0:
-		for e in doc.get_entities():
-			var cls: String = str(e["classname"])
+		for e in _cached_ents:
+			var cls: String = e["cls"]
 			var ep: Vector3 = e["pos"]
 			var pt: Vector2 = to_px.call(ep.x, ep.z)
 			if cls == "info_player_teamspawn":
-				var c := Color(0.94, 0.30, 0.28) if str(e["kv"].get("TeamNum", "2")) == "2" else Color(0.28, 0.64, 0.96)
+				var c := Color(0.94, 0.30, 0.28) if e["team"] == "2" else Color(0.28, 0.64, 0.96)
 				draw_circle(pt, 4.0, c)
 			elif cls == "team_control_point" or cls == "item_teamflag":
 				draw_circle(pt, 4.8, Color(0.98, 0.80, 0.20))

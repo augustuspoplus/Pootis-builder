@@ -132,9 +132,36 @@ static func build_materials_drawer(app: Node3D, vbox: VBoxContainer) -> void:
 	mode_row.add_child(b_all)
 
 	var search := LineEdit.new()
-	search.placeholder_text = "Search 29k+ TF2 textures (wood, brick, blendâ€¦)"
+	search.placeholder_text = "Search 29k+ TF2 textures (wood, brick, blend...)"
 	search.text = app._mat_search_text
 	vbox.add_child(search)
+
+	# Recently Used Materials Quick Strip (1-click reuse without re-searching!)
+	if app.recent_materials.size() > 0:
+		var rcard := HudWidgets.make_section_card("RECENTLY USED MATERIALS", fonts, HudWidgets.COL_CYAN)
+		vbox.add_child(rcard["panel"])
+		var rrow := HFlowContainer.new()
+		rrow.add_theme_constant_override("h_separation", 4)
+		rrow.add_theme_constant_override("v_separation", 4)
+		(rcard["vbox"] as VBoxContainer).add_child(rrow)
+		for rm in app.recent_materials:
+			var rmp: String = str(rm)
+			var rb := Button.new()
+			rb.custom_minimum_size = Vector2(36, 36)
+			rb.tooltip_text = rmp
+			HudWidgets.style_tf2_button(rb, fonts["body"], 9, str(app.active_material).to_lower() == rmp.to_lower())
+			var rsw := TextureRect.new()
+			rsw.set_anchors_preset(Control.PRESET_FULL_RECT)
+			rsw.offset_left = 3; rsw.offset_right = -3; rsw.offset_top = 3; rsw.offset_bottom = -3
+			rsw.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+			rsw.stretch_mode = TextureRect.STRETCH_SCALE
+			rsw.mouse_filter = Control.MOUSE_FILTER_IGNORE
+			app.assets.request_material_swatch_async(rmp, rsw)
+			rb.add_child(rsw)
+			rb.pressed.connect(func():
+				app.active_material = rmp; app.active_tool = "paint"; app.audio.play("click"); app._open_materials_drawer()
+			)
+			rrow.add_child(rb)
 
 	var list_root := VBoxContainer.new()
 	list_root.add_theme_constant_override("separation", 6)
@@ -156,8 +183,9 @@ static func build_materials_drawer(app: Node3D, vbox: VBoxContainer) -> void:
 		sw.custom_minimum_size = Vector2(38, 38)
 		sw.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
 		sw.stretch_mode = TextureRect.STRETCH_SCALE
-		sw.texture = app.assets.get_material_swatch(mp)
 		sw.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		# Async non-blocking VTF decode — zero main-thread hitch when scrolling 31,506 materials!
+		app.assets.request_material_swatch_async(mp, sw)
 		hb.add_child(sw)
 		var nl := Label.new()
 		nl.text = label
@@ -172,6 +200,7 @@ static func build_materials_drawer(app: Node3D, vbox: VBoxContainer) -> void:
 		b.pressed.connect(func():
 			app.active_material = mp
 			app.active_tool = "paint"
+			app._track_recent_material(mp)
 			app.audio.play("click")
 			app._open_materials_drawer()
 		)
@@ -184,7 +213,7 @@ static func build_materials_drawer(app: Node3D, vbox: VBoxContainer) -> void:
 		var fl := flt.to_lower().strip_edges()
 		if app._mat_browse_all or fl.length() >= 3:
 			var found: PackedStringArray = app.core.search_materials(fl, 42)
-			list_root.add_child(_lbl("LIVE TF2 VPK RESULTS (%d shown â€” type to narrow):" % found.size(), fonts["heading"], 10, HudWidgets.COL_CYAN))
+			list_root.add_child(_lbl("LIVE TF2 VPK RESULTS (%d shown — type to narrow):" % found.size(), fonts["heading"], 10, HudWidgets.COL_CYAN))
 			var g := GridContainer.new(); g.columns = 2; g.add_theme_constant_override("h_separation", 4); g.add_theme_constant_override("v_separation", 4); list_root.add_child(g)
 			for m in found:
 				add_swatch_btn.call(g, str(m).get_file(), str(m))
@@ -1332,12 +1361,14 @@ static func build_history_drawer(app: Node3D, vbox: VBoxContainer) -> void:
 # ==============================================================================
 static func build_mvm_studio(app: Node3D, vbox: VBoxContainer) -> void:
 	var fonts: Dictionary = app.fonts
-	_sec(vbox, "1. STAMP MVM ROBOTS & BASE OBJECTIVES", fonts)
-	vbox.add_child(_lbl("Click any MvM piece below to stamp it at your cursor (or spawn directly onto the map).", fonts["body"], 11, HudWidgets.COL_TX_MUTED))
+	var c1 := HudWidgets.make_section_card("1. STAMP MVM ROBOTS & BASE OBJECTIVES", fonts, Color(0.74, 0.42, 0.96))
+	vbox.add_child(c1["panel"])
+	var v1: VBoxContainer = c1["vbox"]
+	v1.add_child(_lbl("Click any MvM piece below to stamp it at your cursor (or spawn directly onto the map).", fonts["body"], 10, HudWidgets.COL_TX_MUTED))
 
 	var r1 := GridContainer.new(); r1.columns = 2
 	r1.add_theme_constant_override("h_separation", 6); r1.add_theme_constant_override("v_separation", 6)
-	vbox.add_child(r1)
+	v1.add_child(r1)
 
 	var mvm_tools := [
 		{"t": "Robot Spawn",     "cls": "info_player_teamspawn", "kv": {"TeamNum": "3", "targetname": "spawnbot"}},
@@ -1369,10 +1400,12 @@ static func build_mvm_studio(app: Node3D, vbox: VBoxContainer) -> void:
 		)
 		r1.add_child(b)
 
-	_sec(vbox, "2. WAVE MISSION BUILDER (.POP FILE EXPORTER)", fonts)
-	vbox.add_child(_lbl("Generate a real Valve TF2 Mann vs. Machine .pop wave mission file for your map!", fonts["body"], 11, HudWidgets.COL_TX_MUTED))
+	var c2 := HudWidgets.make_section_card("2. WAVE MISSION BUILDER (.POP FILE EXPORTER)", fonts, HudWidgets.COL_ACC)
+	vbox.add_child(c2["panel"])
+	var v2: VBoxContainer = c2["vbox"]
+	v2.add_child(_lbl("Generate a real Valve TF2 Mann vs. Machine .pop wave mission file for your map!", fonts["body"], 10, HudWidgets.COL_TX_MUTED))
 
-	var wg := GridContainer.new(); wg.columns = 2; wg.add_theme_constant_override("h_separation", 6); vbox.add_child(wg)
+	var wg := GridContainer.new(); wg.columns = 2; wg.add_theme_constant_override("h_separation", 6); v2.add_child(wg)
 	var cash_sb := SpinBox.new(); cash_sb.min_value = 200; cash_sb.max_value = 5000; cash_sb.step = 100; cash_sb.value = app.mvm_start_cash; cash_sb.prefix = "Start $: "
 	var w1_sb := SpinBox.new(); w1_sb.min_value = 4; w1_sb.max_value = 60; w1_sb.step = 2; w1_sb.value = app.mvm_w1_scouts; w1_sb.prefix = "W1 Scouts: "
 	var w2_sb := SpinBox.new(); w2_sb.min_value = 4; w2_sb.max_value = 60; w2_sb.step = 2; w2_sb.value = app.mvm_w2_soldiers; w2_sb.prefix = "W2 Soldiers: "
@@ -1386,41 +1419,44 @@ static func build_mvm_studio(app: Node3D, vbox: VBoxContainer) -> void:
 
 	var tank_cb := CheckButton.new(); tank_cb.text = "Include Boss Tank in Wave 3"; tank_cb.button_pressed = app.mvm_has_tank
 	tank_cb.toggled.connect(func(on: bool): app.mvm_has_tank = on)
-	vbox.add_child(tank_cb)
+	v2.add_child(tank_cb)
 
 	var exp_b := Button.new(); exp_b.text = "Export Valve MvM .POP Mission File"
-	exp_b.custom_minimum_size = Vector2(0, 40)
+	exp_b.custom_minimum_size = Vector2(0, 38)
 	HudWidgets.style_tf2_button(exp_b, fonts["heading"], 11, true)
 	exp_b.pressed.connect(func():
 		var out_p: String = app.export_mvm_pop_mission()
 		app.audio.play("save")
 		app._toast("Exported MvM Wave Mission: " + out_p.get_file())
 	)
-	vbox.add_child(exp_b)
+	v2.add_child(exp_b)
 
 # ==============================================================================
 # 9. PAYLOAD TRACK SPLINE STUDIO — CLICK-TO-CHAIN TRACK NODES & CHECKPOINTS!
 # ==============================================================================
 static func build_payload_studio(app: Node3D, vbox: VBoxContainer) -> void:
 	var fonts: Dictionary = app.fonts
-	_sec(vbox, "1. CLICK-TO-CHAIN PAYLOAD TRACK SPLINE", fonts)
-	vbox.add_child(_lbl("Click points along your map to automatically build & link Payload track nodes (pb_track_01 -> 02 -> 03...) with live 3D yellow rails!", fonts["body"], 11, HudWidgets.COL_TX_MUTED))
+	var c1 := HudWidgets.make_section_card("1. CLICK-TO-CHAIN PAYLOAD TRACK SPLINE", fonts, Color(0.98, 0.80, 0.20))
+	vbox.add_child(c1["panel"])
+	var v1: VBoxContainer = c1["vbox"]
+	v1.add_child(_lbl("Click points along your map to automatically build & link Payload track nodes (pb_track_01 -> 02 -> 03...) with live 3D yellow rails!", fonts["body"], 10, HudWidgets.COL_TX_MUTED))
 
 	var chain_b := Button.new()
 	chain_b.text = "ACTIVE: Click 3D to Add Track Node" if app.active_tool == "payload_track" else "Start Clicking Payload Track Spline"
-	chain_b.custom_minimum_size = Vector2(0, 40)
+	chain_b.custom_minimum_size = Vector2(0, 38)
 	HudWidgets.style_tf2_button(chain_b, fonts["heading"], 11, true)
 	chain_b.pressed.connect(func(): app.audio.play("click"); app._select_tool("payload_track"))
-	vbox.add_child(chain_b)
+	v1.add_child(chain_b)
 
 	var reset_b := Button.new(); reset_b.text = "Reset Track Chain Counter (Current: %d nodes)" % app._payload_track_idx
 	HudWidgets.style_tf2_button(reset_b, fonts["body"], 10)
 	reset_b.pressed.connect(func(): app.audio.play("click"); app._payload_track_idx = 0; app._open_payload_studio())
-	vbox.add_child(reset_b)
+	v1.add_child(reset_b)
 
-	_sec(vbox, "2. STAMP PAYLOAD LANDMARKS", fonts)
+	var c2 := HudWidgets.make_section_card("2. STAMP PAYLOAD LANDMARKS", fonts, HudWidgets.COL_ACC)
+	vbox.add_child(c2["panel"])
 	var pg := GridContainer.new(); pg.columns = 2; pg.add_theme_constant_override("h_separation", 6); pg.add_theme_constant_override("v_separation", 6)
-	vbox.add_child(pg)
+	(c2["vbox"] as VBoxContainer).add_child(pg)
 	for item in [
 		{"t": "Payload Cart",  "preset": "bomb_cart"},
 		{"t": "Checkpoint",    "preset": "cap_point"},

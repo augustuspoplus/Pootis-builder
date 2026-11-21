@@ -25,6 +25,7 @@ const SandboxPlayerScript    = preload("res://scripts/playtest/Tf2SandboxPlayer.
 const HudWidgets             = preload("res://scripts/ui/Tf2HudWidgets.gd")
 const SettingsModalScript    = preload("res://scripts/ui/SettingsModal.gd")
 const WorkshopHubScript      = preload("res://scripts/ui/WorkshopHubModal.gd")
+const CommandPaletteScript   = preload("res://scripts/ui/CommandPaletteModal.gd")
 const Blueprint2DScript      = preload("res://scripts/ui/Blueprint2DView.gd")
 const EditorDrawersScript    = preload("res://scripts/ui/EditorDrawers.gd")
 
@@ -179,6 +180,16 @@ var overlay_2d: Control
 var pie_wheel: Control
 var welcome_panel: Control
 var settings_modal: ColorRect
+var command_palette: ColorRect
+var zen_mode: bool = false
+var zen_pill: PanelContainer
+var recent_materials: Array[String] = []
+var recent_props: Array[String] = []
+var _hover_dirty: bool = false
+var _pending_hover_pos: Vector2 = Vector2.ZERO
+var _last_status_top: String = ""
+var _last_status_bot: String = ""
+var _last_status_sealed: int = -1
 var top_bar: Control
 var context_bar_wrap: CenterContainer
 var context_bar: PanelContainer
@@ -456,8 +467,24 @@ func _init_ui() -> void:
 	)
 	hud_layer.add_child(settings_modal)
 
+	command_palette = CommandPaletteScript.new()
+	command_palette.setup(self)
+	hud_layer.add_child(command_palette)
+
+	zen_pill = HudWidgets.HudFrame.new(HudWidgets.COL_ACC, 8.0, false)
+	zen_pill.set_anchors_preset(Control.PRESET_TOP_RIGHT)
+	zen_pill.offset_right = -12; zen_pill.offset_top = 10; zen_pill.offset_left = -210
+	zen_pill.visible = false
+	var z_lbl := Label.new()
+	z_lbl.text = "ZEN MODE  |  Press Tab for HUD"
+	z_lbl.add_theme_font_override("font", fonts["heading"])
+	z_lbl.add_theme_font_size_override("font_size", 11)
+	z_lbl.add_theme_color_override("font_color", HudWidgets.COL_ACC)
+	zen_pill.add_child(z_lbl)
+	hud_layer.add_child(zen_pill)
+
 	# Apply global TF2 theme directly onto CanvasLayer control roots (CanvasLayer breaks Window.theme inheritance!)
-	for ctrl in [top_bar, context_bar, left_rail_panel, tool_hover_card, bottom_dock, selection_bar, right_drawer, split_2d_panel, welcome_panel, settings_modal]:
+	for ctrl in [top_bar, context_bar, left_rail_panel, tool_hover_card, bottom_dock, selection_bar, right_drawer, split_2d_panel, welcome_panel, settings_modal, command_palette]:
 		if ctrl is Control:
 			(ctrl as Control).theme = ui_theme
 
@@ -979,7 +1006,7 @@ func _update_top_bar_compact() -> void:
 		right_drawer.offset_top = 64.0 + extra_y
 		var dr_w := minf(344.0, maxf(260.0, eff_w * 0.36))
 		right_drawer.offset_left = -(dr_w + 12.0)
-		right_drawer.offset_bottom = -168.0 if eff_h < 680.0 else -160.0
+		right_drawer.offset_bottom = -202.0 if eff_h < 720.0 else -192.0
 	if split_2d_panel != null:
 		split_2d_panel.offset_top = 64.0 + extra_y
 		split_2d_panel.offset_left = -minf(410.0, eff_w * 0.42)
@@ -1707,24 +1734,55 @@ func _toggle_split_2d() -> void:
 		right_drawer.visible = false
 		_refresh_2d_views()
 
-func _refresh_2d_views() -> void:
-	if bp_top != null and split_2d_panel.visible:
-		bp_top.refresh(selected_solid, cam_pos)
-	if bp_side != null and split_2d_panel.visible:
-		bp_side.refresh(selected_solid, cam_pos)
+func _refresh_2d_views(geo_changed: bool = false) -> void:
+	if bp_top != null:
+		if geo_changed: bp_top.mark_geometry_dirty()
+		if split_2d_panel.visible: bp_top.refresh(selected_solid, cam_pos)
+	if bp_side != null:
+		if geo_changed: bp_side.mark_geometry_dirty()
+		if split_2d_panel.visible: bp_side.refresh(selected_solid, cam_pos)
+
+func _track_recent_material(mp: String) -> void:
+	if mp.is_empty(): return
+	var idx := recent_materials.find(mp)
+	if idx >= 0: recent_materials.remove_at(idx)
+	recent_materials.push_front(mp)
+	if recent_materials.size() > 8: recent_materials.resize(8)
+
+func _track_recent_prop(mp: String) -> void:
+	if mp.is_empty(): return
+	var idx := recent_props.find(mp)
+	if idx >= 0: recent_props.remove_at(idx)
+	recent_props.push_front(mp)
+	if recent_props.size() > 8: recent_props.resize(8)
+
+func _toggle_zen_mode() -> void:
+	if viewing_bsp or stage == Stage.PLAYTEST:
+		return
+	zen_mode = not zen_mode
+	_sync_mode_visibility()
+	if zen_mode:
+		_toast("Zen Viewport Mode ON (Press Tab to restore HUD)")
+	else:
+		_toast("HUD Restored")
 
 func _sync_mode_visibility() -> void:
 	var is_edit := (not viewing_bsp and stage != Stage.PLAYTEST)
-	top_bar.visible = (stage != Stage.PLAYTEST)
-	left_rail_panel.visible = is_edit
-	status_pill.visible = is_edit
+	var show_hud := is_edit and not zen_mode
+	top_bar.visible = (stage != Stage.PLAYTEST) and not zen_mode
+	left_rail_panel.visible = show_hud
+	status_pill.visible = show_hud
+	bottom_dock.visible = (stage != Stage.PLAYTEST) and not zen_mode
+	if zen_pill != null:
+		zen_pill.visible = is_edit and zen_mode
 	for n in edit_only_top_nodes:
 		if is_instance_valid(n):
 			n.visible = is_edit
-	if not is_edit:
+	if not show_hud:
 		split_2d_panel.visible = false
 		right_drawer.visible = false
 		if context_bar != null: context_bar.visible = false
+		if selection_bar != null: selection_bar.visible = false
 		if tool_hover_card != null: tool_hover_card.visible = false
 	_update_3d_gizmo()
 
@@ -2257,8 +2315,18 @@ func _open_compile_drawer() -> void:
 # ==============================================================================
 # SOLID / ENTITY EDIT HELPERS
 # ==============================================================================
-func _commit_solid_edit(label: String) -> void:
-	_record_history(label); map_sync.sync_all(); _refresh_selection_bar(); _refresh_2d_views(); audio.play("place")
+func _commit_solid_edit(label: String, solid_ids: Array = []) -> void:
+	_record_history(label)
+	if not solid_ids.is_empty():
+		map_sync.sync_solids(solid_ids, true)
+	elif selected_solids.size() > 1:
+		map_sync.sync_solids(selected_solids, true)
+	elif selected_solid >= 0:
+		map_sync.sync_solid(selected_solid, true)
+		map_sync.set_selection(selected_solid, selected_face)
+	else:
+		map_sync.sync_all()
+	_refresh_selection_bar(); _refresh_2d_views(true); audio.play("place")
 
 func _untie_selected_entity() -> void:
 	if selected_entity < 0:
@@ -2319,7 +2387,7 @@ func _rotate_selection() -> void:
 			var y := fposmod((float(parts[1]) if parts.size() > 1 else 0.0) + float(settings.rotate_step_deg), 360.0)
 			var r := float(parts[2]) if parts.size() > 2 else 0.0
 			doc.set_entity_kv(selected_entity, "angles", "%.0f %.0f %.0f" % [p, y, r])
-			_record_history("Rotate Entity"); ent_vis.sync_all(); audio.play("click")
+			_record_history("Rotate Entity"); ent_vis.sync_entity(selected_entity, false); audio.play("click")
 
 func _duplicate_selection() -> void:
 	if selected_solids.size() > 1:
@@ -2376,7 +2444,7 @@ func _nudge_selection(delta: Vector3) -> void:
 		var ents: Array = doc.get_entities()
 		if selected_entity < ents.size():
 			doc.set_entity_pos(selected_entity, ents[selected_entity]["pos"] + delta)
-			_record_history("Nudge Entity"); ent_vis.sync_all()
+			_record_history("Nudge Entity"); ent_vis.sync_entity(selected_entity, false); _update_3d_gizmo()
 
 # ==============================================================================
 # MAP LOADING, SAVING, COMPILING & PLAYTEST
@@ -2686,25 +2754,36 @@ func _input(event: InputEvent) -> void:
 				_mmb_panning = false
 			elif mb.button_index == MOUSE_BUTTON_LEFT:
 				if _dragging_gizmo:
-					_dragging_gizmo = false; _record_history("Move Axis"); _refresh_selection_bar(); _update_3d_gizmo()
+					_dragging_gizmo = false
+					if not selected_solids.is_empty(): map_sync.sync_solids(selected_solids, true)
+					elif selected_solid >= 0: map_sync.sync_solid(selected_solid, true); map_sync.set_selection(selected_solid, -1)
+					_record_history("Move Axis"); _refresh_selection_bar(); _update_3d_gizmo(); _refresh_2d_views(true)
 				if _dragging_vertex:
-					_dragging_vertex = false; _record_history("Move Vertex"); _refresh_selection_bar()
+					_dragging_vertex = false
+					if selected_solid >= 0: map_sync.sync_solid(selected_solid, true); map_sync.set_selection(selected_solid, -1)
+					_record_history("Move Vertex"); _refresh_selection_bar(); _refresh_2d_views(true)
 				if _dragging_face:
-					_dragging_face = false; _record_history("Push/Pull Face"); _refresh_selection_bar()
+					_dragging_face = false
+					if _drag_solid >= 0: map_sync.sync_solid(_drag_solid, true); map_sync.set_selection(_drag_solid, -1)
+					_record_history("Push/Pull Face"); _refresh_selection_bar(); _refresh_2d_views(true)
 				if _dragging_move:
-					_dragging_move = false; _record_history("Move Selection"); _refresh_selection_bar()
+					_dragging_move = false
+					if selected_solid >= 0: map_sync.sync_solid(selected_solid, true); map_sync.set_selection(selected_solid, -1)
+					_record_history("Move Selection"); _refresh_selection_bar(); _update_3d_gizmo(); _refresh_2d_views(true)
 				if _drawing_box:
 					_finish_drag_box()
 				if _terrain_sculpting:
 					_terrain_sculpting = false
 					if _terrain_changed:
-						map_sync.sync_all(); _record_history("Sculpt Terrain"); _terrain_changed = false
+						map_sync.sync_all(); _record_history("Sculpt Terrain"); _terrain_changed = false; _refresh_2d_views(true)
 	elif event is InputEventKey and event.pressed and event.keycode == KEY_ESCAPE:
 		if _is_typing_in_ui():
 			get_viewport().gui_release_focus()
 			get_viewport().set_input_as_handled()
 
 func _unhandled_input(event: InputEvent) -> void:
+	if command_palette != null and command_palette.visible:
+		return
 	if settings_modal.visible:
 		if event is InputEventKey and event.pressed and event.keycode == KEY_ESCAPE:
 			settings_modal.cancel_modal()
@@ -2718,6 +2797,11 @@ func _unhandled_input(event: InputEvent) -> void:
 		if _is_typing_in_ui() and event.keycode != KEY_ESCAPE:
 			return
 		if event.pressed and not event.echo:
+			if event.keycode == KEY_K and event.ctrl_pressed:
+				if command_palette != null: command_palette.open_palette()
+				return
+			if event.keycode == KEY_TAB and not event.ctrl_pressed and not event.alt_pressed:
+				_toggle_zen_mode(); return
 			if event.keycode == KEY_COMMA and event.ctrl_pressed:
 				settings_modal.open_modal(); return
 			if event.keycode == KEY_F5:
@@ -2813,9 +2897,13 @@ func _unhandled_input(event: InputEvent) -> void:
 			cam_pos -= r * event.relative.x * 0.04 - u * event.relative.y * 0.04
 			_apply_editor_cam()
 		else:
-			_update_hover(event.position)
-			if _terrain_sculpting and active_tool == "terrain" and hover_valid:
-				_do_terrain_sculpt_stroke()
+			# Coalesce high-polling mouse motion to 1x/frame hover raycast inside _process()!
+			_pending_hover_pos = event.position
+			_hover_dirty = true
+			if _terrain_sculpting and active_tool == "terrain":
+				_update_hover(event.position)
+				if hover_valid:
+					_do_terrain_sculpt_stroke()
 
 	elif event is InputEventMouseButton:
 		if event.pressed:
@@ -2903,24 +2991,27 @@ func _update_gizmo_drag(screen_pos: Vector2) -> void:
 	if not selected_solids.is_empty():
 		for sid in selected_solids:
 			doc.translate_solid(sid, delta)
-			map_sync.sync_solid(sid)
-		_refresh_2d_views()
+			map_sync.offset_solid_visual(sid, delta)
+		map_sync.set_selection(selected_solid, -1)
 	elif selected_solid >= 0:
 		doc.translate_solid(selected_solid, delta)
-		map_sync.sync_solid(selected_solid)
-		_refresh_2d_views()
+		map_sync.offset_solid_visual(selected_solid, delta)
+		map_sync.set_selection(selected_solid, -1)
 	elif selected_entity >= 0:
-		doc.translate_entity(selected_entity, delta)
-		ent_vis.sync_entity(selected_entity, false)
+		var ents: Array = doc.get_entities()
+		if selected_entity < ents.size():
+			doc.set_entity_pos(selected_entity, ents[selected_entity]["pos"] + delta)
+			ent_vis.sync_entity(selected_entity, false)
 	_gizmo_accum = snapped_t
 	_update_3d_gizmo()
+	overlay_2d.queue_redraw()
 
 func _update_face_drag(screen_pos: Vector2) -> void:
 	var ro := editor_cam.project_ray_origin(screen_pos); var rd := editor_cam.project_ray_normal(screen_pos)
 	var snapped_t := snappedf(_project_ray_onto_axis(ro, rd, _drag_anchor, _drag_normal), grid_m)
 	var step := snapped_t - _drag_accum
 	if absf(step) >= grid_m * 0.5 and doc.push_pull_normal(_drag_solid, _drag_normal, step):
-		_drag_accum = snapped_t; map_sync.sync_solid(_drag_solid); map_sync.set_selection(_drag_solid, -1); _refresh_selection_bar(); audio.play("click", -14.0)
+		_drag_accum = snapped_t; map_sync.sync_solid(_drag_solid, false); map_sync.set_selection(_drag_solid, -1); _refresh_selection_bar(); overlay_2d.queue_redraw(); audio.play("click", -14.0)
 
 func _update_vertex_drag(screen_pos: Vector2, vertical_mode: bool = false) -> void:
 	var p: Vector3
@@ -2936,7 +3027,7 @@ func _update_vertex_drag(screen_pos: Vector2, vertical_mode: bool = false) -> vo
 		if doc.move_solid_vertex_at(selected_solid, _drag_vert_pos, delta):
 			_drag_vert_pos = p
 			_drag_vert_last = p
-			map_sync.sync_solid(selected_solid); map_sync.set_selection(selected_solid, -1); _refresh_selection_bar(); audio.play("click", -14.0)
+			map_sync.sync_solid(selected_solid, false); map_sync.set_selection(selected_solid, -1); _refresh_selection_bar(); overlay_2d.queue_redraw(); audio.play("click", -14.0)
 
 func _update_move_drag(screen_pos: Vector2) -> void:
 	var p := _ray_plane_point(screen_pos, _move_last_pos.y)
@@ -2944,11 +3035,11 @@ func _update_move_drag(screen_pos: Vector2) -> void:
 	if delta.length_squared() > 0.001:
 		_move_last_pos = p
 		if selected_solid >= 0:
-			doc.translate_solid(selected_solid, delta); map_sync.sync_solid(selected_solid); map_sync.set_selection(selected_solid, -1)
+			doc.translate_solid(selected_solid, delta); map_sync.offset_solid_visual(selected_solid, delta); map_sync.set_selection(selected_solid, -1); _update_3d_gizmo(); overlay_2d.queue_redraw()
 		elif selected_entity >= 0:
 			var ents: Array = doc.get_entities()
 			if selected_entity < ents.size():
-				doc.set_entity_pos(selected_entity, ents[selected_entity]["pos"] + delta); ent_vis.sync_all()
+				doc.set_entity_pos(selected_entity, ents[selected_entity]["pos"] + delta); ent_vis.sync_entity(selected_entity, false); _update_3d_gizmo()
 
 func _pick_scene_object(ro: Vector3, rd: Vector3) -> Dictionary:
 	var rc_ent: Dictionary = doc.raycast_entity(ro, rd)
@@ -3302,8 +3393,14 @@ func _on_pie_action(aid: String) -> void:
 
 func _process(delta: float) -> void:
 	_terrain_sync_accum += delta
+	if assets != null:
+		assets.poll_async_loads()
 	if icon_cache != null:
 		icon_cache.paused = (_rmb_looking or _mmb_panning or _dragging_face or _dragging_move or _dragging_gizmo or _dragging_vertex or _terrain_sculpting)
+	if _hover_dirty:
+		_hover_dirty = false
+		if not _rmb_looking and not _mmb_panning and stage != Stage.PLAYTEST and not welcome_panel.visible and not settings_modal.visible and (command_palette == null or not command_palette.visible):
+			_update_hover(_pending_hover_pos)
 	if _toast_ttl > 0.0:
 		_toast_ttl -= delta
 		if _toast_ttl <= 0.0: toast_panel.visible = false
@@ -3348,11 +3445,21 @@ func _process(delta: float) -> void:
 		if map_title_lbl.text != want_t:
 			map_title_lbl.text = want_t
 	if status_pill.visible:
-		status_lbl_top.text = "XYZ: %du, %du, %du" % [int(hover_pos.x * UPM), int(-hover_pos.z * UPM), int(hover_pos.y * UPM)]
-		var sealed_s := "SEALED" if doc.is_map_sealed() else "UNSEALED"
+		var top_t := "XYZ: %du, %du, %du  |  Ctrl+K Search" % [int(hover_pos.x * UPM), int(-hover_pos.z * UPM), int(hover_pos.y * UPM)]
+		if top_t != _last_status_top:
+			_last_status_top = top_t
+			status_lbl_top.text = top_t
+		var is_sealed: bool = doc.is_map_sealed()
+		var sealed_s := "SEALED" if is_sealed else "UNSEALED"
 		var eff_pct := int(round(get_window().content_scale_factor * 100.0)) if get_window() != null else int(round(settings.ui_scale * 100.0))
-		status_lbl_bot.text = "%s | %d FPS | UI %d%%" % [sealed_s, Engine.get_frames_per_second(), eff_pct]
-		status_lbl_bot.add_theme_color_override("font_color", HudWidgets.COL_GREEN if doc.is_map_sealed() else HudWidgets.COL_RED)
+		var bot_t := "%s | %d FPS | UI %d%%" % [sealed_s, Engine.get_frames_per_second(), eff_pct]
+		if bot_t != _last_status_bot:
+			_last_status_bot = bot_t
+			status_lbl_bot.text = bot_t
+		var si_int := 1 if is_sealed else 0
+		if si_int != _last_status_sealed:
+			_last_status_sealed = si_int
+			status_lbl_bot.add_theme_color_override("font_color", HudWidgets.COL_GREEN if is_sealed else HudWidgets.COL_RED)
 
 	if stage == Stage.PLAYTEST:
 		# Live interactive sliding func_door simulation (works on official .bsp AND custom maps!)
@@ -3396,13 +3503,29 @@ func draw_viewport_2d_overlay(canvas: Control) -> void:
 		var top_world := ghost_mesh.position + Vector3(0, sz.y * 0.5 + 0.5, 0)
 		if not editor_cam.is_position_behind(top_world):
 			var sp := editor_cam.unproject_position(top_world)
-			var txt := "%dx%dx%du â€” %s" % [int(round(sz.x * UPM)), int(round(sz.z * UPM)), h_u, callout["text"]]
+			var txt := "%dx%dx%du — %s" % [int(round(sz.x * UPM)), int(round(sz.z * UPM)), h_u, callout["text"]]
 			var f: Font = fonts["heading"]
 			var tsz := f.get_string_size(txt, HORIZONTAL_ALIGNMENT_LEFT, -1, 12)
 			var r := Rect2(sp - Vector2(tsz.x * 0.5 + 8, 22), Vector2(tsz.x + 16, 22))
 			canvas.draw_rect(r, HudWidgets.COL_BG_HUD, true)
 			canvas.draw_rect(r, callout["color"], false, 1.5)
 			canvas.draw_string(f, sp - Vector2(tsz.x * 0.5, 7), txt, HORIZONTAL_ALIGNMENT_LEFT, -1, 12, callout["color"])
+	elif selected_solid >= 0 and not welcome_panel.visible and not viewing_bsp and (_dragging_face or _dragging_gizmo or _dragging_vertex or _dragging_move):
+		var sinfo: Dictionary = doc.get_solid_info(selected_solid)
+		if sinfo.get("valid", false):
+			var bmin: Vector3 = sinfo["bounds_min"]
+			var bmax: Vector3 = sinfo["bounds_max"]
+			var dsz := (bmax - bmin) * UPM
+			var top_w := Vector3((bmin.x + bmax.x) * 0.5, bmax.y + 0.55, (bmin.z + bmax.z) * 0.5)
+			if not editor_cam.is_position_behind(top_w):
+				var sp2 := editor_cam.unproject_position(top_w)
+				var txt2 := "%du x %du x %du" % [int(round(dsz.x)), int(round(dsz.z)), int(round(dsz.y))]
+				var f2: Font = fonts["heading"]
+				var tsz2 := f2.get_string_size(txt2, HORIZONTAL_ALIGNMENT_LEFT, -1, 12)
+				var r2 := Rect2(sp2 - Vector2(tsz2.x * 0.5 + 8, 22), Vector2(tsz2.x + 16, 22))
+				canvas.draw_rect(r2, HudWidgets.COL_BG_HUD, true)
+				canvas.draw_rect(r2, HudWidgets.COL_ACC, false, 1.5)
+				canvas.draw_string(f2, sp2 - Vector2(tsz2.x * 0.5, 7), txt2, HORIZONTAL_ALIGNMENT_LEFT, -1, 12, HudWidgets.COL_ACC)
 
 func _toast(msg: String) -> void:
 	status_toast.text = msg; toast_panel.visible = true; _toast_ttl = 4.2
@@ -3561,6 +3684,22 @@ func _setup_auto_shot(idx: int) -> void:
 		"v8_payload_studio":
 			_show_welcome_hub(false); _load_gamemode("pl", "badlands", false); set_stage(Stage.GAMEPLAY)
 			_dock_ent_cat = "_mode"; _rebuild_bottom_dock(); _open_payload_studio()
+			cam_pos = Vector3(20, 14, 24); cam_yaw = 0.65; cam_pitch = -0.42; _apply_editor_cam()
+		"v9_cmd_palette":
+			_show_welcome_hub(false); _load_gamemode("ctf", "spytech", false); set_stage(Stage.BUILD)
+			zen_mode = false; _sync_mode_visibility()
+			cam_pos = Vector3(20, 14, 24); cam_yaw = 0.65; cam_pitch = -0.42; _apply_editor_cam()
+			command_palette.open_palette()
+		"v9_zen_mode":
+			if command_palette != null: command_palette.close_palette()
+			_show_welcome_hub(false); _load_gamemode("koth", "badlands", false); set_stage(Stage.BUILD)
+			zen_mode = true; _sync_mode_visibility()
+			cam_pos = Vector3(20, 14, 24); cam_yaw = 0.65; cam_pitch = -0.42; _apply_editor_cam()
+		"v9_materials_cards":
+			if command_palette != null: command_palette.close_palette()
+			zen_mode = false; _show_welcome_hub(false); _load_gamemode("koth", "badlands", false); set_stage(Stage.STYLE)
+			_track_recent_material("BRICK/BRICKWALL001"); _track_recent_material("WOOD/WOOD_WALL001"); _track_recent_material("CONCRETE/CONCRETEFLOOR001"); _track_recent_material("METAL/IBEAM001B")
+			_select_solid(2, 0); _open_materials_drawer()
 			cam_pos = Vector3(20, 14, 24); cam_yaw = 0.65; cam_pitch = -0.42; _apply_editor_cam()
 	if not viewing_bsp and not settings_modal.visible:
 		_update_hover(get_viewport().get_visible_rect().size * Vector2(0.42, 0.52))
