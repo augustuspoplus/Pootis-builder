@@ -88,3 +88,9 @@ set_target_properties(pootis_core PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${PB_ROOT}/godot/bin"
     LIBRARY_OUTPUT_DIRECTORY "${PB_ROOT}/godot/bin"
 )
+
+# Automatically create/refresh the Desktop shortcut every time pootis_core builds!
+add_custom_command(TARGET pootis_core POST_BUILD
+    COMMAND powershell -NoProfile -ExecutionPolicy Bypass -File "${PB_ROOT}/update_desktop_shortcut.ps1"
+    COMMENT "Updating Pootis Builder 2.0 Desktop shortcut..."
+)
