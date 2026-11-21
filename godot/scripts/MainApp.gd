@@ -958,7 +958,7 @@ func _build_welcome_hub() -> void:
 		gb.custom_minimum_size = Vector2(0, 58); gb.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 		HudWidgets.style_tf2_button(gb, fonts["heading"], 12)
 		var mid: String = gm["id"]
-		gb.pressed.connect(func(): audio.play("success", -10.0); _load_gamemode(mid); _show_welcome_hub(false))
+		gb.pressed.connect(func(): audio.play("click"); _load_gamemode(mid); _show_welcome_hub(false))
 		grid.add_child(gb)
 
 	var foot_l := HBoxContainer.new(); foot_l.add_theme_constant_override("separation", 8); left_col.add_child(foot_l)
