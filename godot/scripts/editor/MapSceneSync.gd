@@ -8,15 +8,19 @@ var doc: Object
 var assets: RefCounted
 var show_skybox_shell: bool = false
 var show_tool_volumes: bool = true
+var show_clips: bool = true
 var selected_solid: int = -1
 var selected_face: int = -1
+var hovered_solid: int = -1
 
 var solids_root: Node3D
 var selection_box: MeshInstance3D
+var hover_box: MeshInstance3D
 var face_handles_root: Node3D
 
 var _solid_nodes: Dictionary = {} # solid_idx -> Node3D
 var _tool_mat_cache: Dictionary = {}
+var _handle_data: Array = [] # [{pos, normal, solid_idx}]
 
 func setup(p_doc: Object, p_assets: RefCounted) -> void:
 	doc = p_doc
@@ -30,6 +34,11 @@ func setup(p_doc: Object, p_assets: RefCounted) -> void:
 		selection_box.name = "SelectionHighlight"
 		selection_box.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 		add_child(selection_box)
+	if hover_box == null:
+		hover_box = MeshInstance3D.new()
+		hover_box.name = "HoverHighlight"
+		hover_box.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		add_child(hover_box)
 	if face_handles_root == null:
 		face_handles_root = Node3D.new()
 		face_handles_root.name = "FacePullHandles"
@@ -81,13 +90,15 @@ func sync_solid(idx: int) -> void:
 		return
 
 	var is_sky: bool = info.get("is_skybox", false)
+	var prim_mat: String = str(info.get("material", "")).to_lower()
+	var is_clip: bool = prim_mat.find("toolsclip") != -1 or prim_mat.find("toolsplayerclip") != -1
 	var holder := Node3D.new()
 	holder.name = "Solid_%d" % idx
 	holder.set_meta("solid_idx", idx)
 	holder.set_meta("is_skybox", is_sky)
 
-	# Visual mesh (skip skybox sealing shell unless show_skybox_shell is enabled)
-	if not is_sky or show_skybox_shell:
+	# Visual mesh (skip skybox sealing shell unless show_skybox_shell is enabled; hide clips when show_clips is false)
+	if (not is_sky or show_skybox_shell) and (not is_clip or show_clips):
 		var surfaces: Array = d["surfaces"]
 		if surfaces.size() > 0:
 			var mesh := ArrayMesh.new()
@@ -144,29 +155,44 @@ func set_selection(solid_idx: int, face_idx: int = -1) -> void:
 	selected_face = face_idx
 	_rebuild_selection_visuals()
 
-func _rebuild_selection_visuals() -> void:
-	selection_box.mesh = null
-	for ch in face_handles_root.get_children():
-		ch.queue_free()
-
-	if doc == null or selected_solid < 0 or selected_solid >= doc.get_solid_count():
+func set_hover(solid_idx: int) -> void:
+	if hovered_solid == solid_idx:
 		return
-
-	var d: Dictionary = doc.get_solid_info(selected_solid)
-	if not d.get("valid", false):
+	hovered_solid = solid_idx
+	hover_box.mesh = null
+	if doc == null or hovered_solid < 0 or hovered_solid == selected_solid or hovered_solid >= doc.get_solid_count():
 		return
+	var d: Dictionary = doc.get_solid_info(hovered_solid)
+	if not d.get("valid", false) or d.get("is_skybox", false):
+		return
+	hover_box.mesh = _make_wire_box(d["bounds_min"], d["bounds_max"], Color(0.20, 0.90, 1.0, 0.92), 0.03)
 
-	var bmin: Vector3 = d["bounds_min"]
-	var bmax: Vector3 = d["bounds_max"]
-	var pad := Vector3(0.02, 0.02, 0.02)
+func hit_test_face_handle(ray_origin: Vector3, ray_dir: Vector3) -> Dictionary:
+	var rd := ray_dir.normalized()
+	var best_t := 1e9
+	var best := {}
+	for h in _handle_data:
+		var hp: Vector3 = h["pos"]
+		var to_h := hp - ray_origin
+		var proj := to_h.dot(rd)
+		if proj < 0.1:
+			continue
+		var closest := ray_origin + rd * proj
+		var dist := closest.distance_to(hp)
+		var grab_r := clampf(proj * 0.045, 0.32, 1.15)
+		if dist < grab_r and proj < best_t:
+			best_t = proj
+			best = h
+	return best
+
+func _make_wire_box(bmin: Vector3, bmax: Vector3, col: Color, pad_val: float = 0.025) -> ImmediateMesh:
+	var pad := Vector3(pad_val, pad_val, pad_val)
 	var a := bmin - pad
 	var b := bmax + pad
-
-	# Glowing TF2 amber wireframe selection box
 	var im := ImmediateMesh.new()
 	var mat := StandardMaterial3D.new()
 	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	mat.albedo_color = Color(0.95, 0.65, 0.16, 1.0)
+	mat.albedo_color = col
 	mat.no_depth_test = true
 	im.surface_begin(Mesh.PRIMITIVE_LINES, mat)
 	var corners := [
@@ -184,24 +210,41 @@ func _rebuild_selection_visuals() -> void:
 		im.surface_add_vertex(corners[e[0]])
 		im.surface_add_vertex(corners[e[1]])
 	im.surface_end()
-	selection_box.mesh = im
+	return im
 
-	# 6 interactive 3D Push/Pull Face Handles (+X,-X,+Y,-Y,+Z,-Z)
+func _rebuild_selection_visuals() -> void:
+	selection_box.mesh = null
+	_handle_data.clear()
+	for ch in face_handles_root.get_children():
+		ch.queue_free()
+
+	if doc == null or selected_solid < 0 or selected_solid >= doc.get_solid_count():
+		return
+
+	var d: Dictionary = doc.get_solid_info(selected_solid)
+	if not d.get("valid", false):
+		return
+
+	var bmin: Vector3 = d["bounds_min"]
+	var bmax: Vector3 = d["bounds_max"]
+	selection_box.mesh = _make_wire_box(bmin, bmax, Color(0.98, 0.68, 0.16, 1.0), 0.03)
+
+	# 6 interactive 3D Push/Pull Face Handles (+X,-X,+Y,-Y,+Z,-Z) — bigger & easier to grab!
 	var mid := (bmin + bmax) * 0.5
 	var dirs := [
-		{"n": Vector3(1, 0, 0),  "pos": Vector3(bmax.x + 0.35, mid.y, mid.z), "col": Color(0.92, 0.32, 0.24)},
-		{"n": Vector3(-1, 0, 0), "pos": Vector3(bmin.x - 0.35, mid.y, mid.z), "col": Color(0.92, 0.32, 0.24)},
-		{"n": Vector3(0, 1, 0),  "pos": Vector3(mid.x, bmax.y + 0.35, mid.z), "col": Color(0.96, 0.72, 0.18)},
-		{"n": Vector3(0, -1, 0), "pos": Vector3(mid.x, bmin.y - 0.35, mid.z), "col": Color(0.96, 0.72, 0.18)},
-		{"n": Vector3(0, 0, 1),  "pos": Vector3(mid.x, mid.y, bmax.z + 0.35), "col": Color(0.28, 0.62, 0.92)},
-		{"n": Vector3(0, 0, -1), "pos": Vector3(mid.x, mid.y, bmin.z - 0.35), "col": Color(0.28, 0.62, 0.92)},
+		{"n": Vector3(1, 0, 0),  "pos": Vector3(bmax.x + 0.55, mid.y, mid.z), "col": Color(0.95, 0.30, 0.22)},
+		{"n": Vector3(-1, 0, 0), "pos": Vector3(bmin.x - 0.55, mid.y, mid.z), "col": Color(0.95, 0.30, 0.22)},
+		{"n": Vector3(0, 1, 0),  "pos": Vector3(mid.x, bmax.y + 0.55, mid.z), "col": Color(0.98, 0.76, 0.18)},
+		{"n": Vector3(0, -1, 0), "pos": Vector3(mid.x, bmin.y - 0.55, mid.z), "col": Color(0.98, 0.76, 0.18)},
+		{"n": Vector3(0, 0, 1),  "pos": Vector3(mid.x, mid.y, bmax.z + 0.55), "col": Color(0.24, 0.66, 0.96)},
+		{"n": Vector3(0, 0, -1), "pos": Vector3(mid.x, mid.y, bmin.z - 0.55), "col": Color(0.24, 0.66, 0.96)},
 	]
 	for item in dirs:
 		var handle := MeshInstance3D.new()
 		var cone := CylinderMesh.new()
 		cone.top_radius = 0.0
-		cone.bottom_radius = 0.14
-		cone.height = 0.34
+		cone.bottom_radius = 0.22
+		cone.height = 0.52
 		handle.mesh = cone
 		var hmat := StandardMaterial3D.new()
 		hmat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
@@ -220,9 +263,8 @@ func _rebuild_selection_visuals() -> void:
 			handle.rotation_degrees = Vector3(90, 0, 0)
 		elif n == Vector3(0, 0, -1):
 			handle.rotation_degrees = Vector3(-90, 0, 0)
-		handle.set_meta("pull_normal", n)
-		handle.set_meta("solid_idx", selected_solid)
 		face_handles_root.add_child(handle)
+		_handle_data.append({"pos": item["pos"], "normal": n, "solid_idx": selected_solid})
 
 func _resolve_material(mpath: String, is_sky: bool) -> Material:
 	var low := mpath.to_lower()

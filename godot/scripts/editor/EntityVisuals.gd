@@ -1,18 +1,26 @@
 class_name EntityVisuals
 extends Node3D
 
-## Milestone 5 — Real 3D TF2 .mdl Entity Visualizer + 3D Spline Track Ribbon
-## + Glowing 3D Bezier Logic Wires + Dynamic Point Lights.
+## Milestone 5 + 17 — Real 3D TF2 .mdl Entity Visualizer + 3D Spline Track Ribbon
+## + Glowing 3D Bezier Logic Wires + Dynamic Point Lights + VisGroups + Selection/Hover Boxes.
 
 var doc: Object
 var assets: RefCounted
 var show_logic_wires: bool = true
 var show_volumes: bool = true
+var show_triggers: bool = true
+var show_props: bool = true
+var show_lights: bool = true
 var selected_entity: int = -1
+var hovered_entity: int = -1
 
 var ents_root: Node3D
 var wires_mesh: MeshInstance3D
 var track_mesh: MeshInstance3D
+var selection_box: MeshInstance3D
+var hover_box: MeshInstance3D
+
+var _ent_bounds: Dictionary = {} # ent_idx -> [bmin: Vector3, bmax: Vector3]
 
 const ENTITY_MODELS := {
 	"item_healthkit_small":  "models/items/medkit_small.mdl",
@@ -41,6 +49,29 @@ func setup(p_doc: Object, p_assets: RefCounted) -> void:
 		track_mesh.name = "PayloadTracks3D"
 		track_mesh.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 		add_child(track_mesh)
+	if selection_box == null:
+		selection_box = MeshInstance3D.new()
+		selection_box.name = "EntitySelectionHighlight"
+		selection_box.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		add_child(selection_box)
+	if hover_box == null:
+		hover_box = MeshInstance3D.new()
+		hover_box.name = "EntityHoverHighlight"
+		hover_box.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		add_child(hover_box)
+
+func clear_all() -> void:
+	if ents_root != null:
+		for ch in ents_root.get_children():
+			ch.queue_free()
+	if wires_mesh != null:
+		wires_mesh.mesh = null
+	if track_mesh != null:
+		track_mesh.mesh = null
+	_ent_bounds.clear()
+	selected_entity = -1
+	hovered_entity = -1
+	_rebuild_highlight_boxes()
 
 func sync_all() -> void:
 	if doc == null:
@@ -49,6 +80,7 @@ func sync_all() -> void:
 		ch.queue_free()
 	wires_mesh.mesh = null
 	track_mesh.mesh = null
+	_ent_bounds.clear()
 
 	var ents: Array = doc.get_entities()
 	var target_pos := {} # targetname -> Vector3
@@ -64,6 +96,60 @@ func sync_all() -> void:
 		_spawn_entity_node(i, e, pos)
 
 	_rebuild_wires_and_tracks(ents, target_pos)
+	if selected_entity >= ents.size():
+		selected_entity = -1
+	if hovered_entity >= ents.size():
+		hovered_entity = -1
+	_rebuild_highlight_boxes()
+
+func set_selection(ent_idx: int) -> void:
+	selected_entity = ent_idx
+	_rebuild_highlight_boxes()
+
+func set_hover(ent_idx: int) -> void:
+	if hovered_entity == ent_idx:
+		return
+	hovered_entity = ent_idx
+	_rebuild_highlight_boxes()
+
+func _rebuild_highlight_boxes() -> void:
+	if selection_box != null:
+		selection_box.mesh = null
+		if selected_entity >= 0 and _ent_bounds.has(selected_entity):
+			var bb: Array = _ent_bounds[selected_entity]
+			selection_box.mesh = _make_wire_box(bb[0], bb[1], Color(0.98, 0.68, 0.16, 1.0), 0.06)
+	if hover_box != null:
+		hover_box.mesh = null
+		if hovered_entity >= 0 and hovered_entity != selected_entity and _ent_bounds.has(hovered_entity):
+			var bb: Array = _ent_bounds[hovered_entity]
+			hover_box.mesh = _make_wire_box(bb[0], bb[1], Color(0.20, 0.90, 1.0, 0.92), 0.05)
+
+func _make_wire_box(bmin: Vector3, bmax: Vector3, col: Color, pad_val: float = 0.04) -> ImmediateMesh:
+	var pad := Vector3(pad_val, pad_val, pad_val)
+	var a := bmin - pad
+	var b := bmax + pad
+	var im := ImmediateMesh.new()
+	var mat := StandardMaterial3D.new()
+	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	mat.albedo_color = col
+	mat.no_depth_test = true
+	im.surface_begin(Mesh.PRIMITIVE_LINES, mat)
+	var corners := [
+		Vector3(a.x, a.y, a.z), Vector3(b.x, a.y, a.z),
+		Vector3(b.x, a.y, b.z), Vector3(a.x, a.y, b.z),
+		Vector3(a.x, b.y, a.z), Vector3(b.x, b.y, a.z),
+		Vector3(b.x, b.y, b.z), Vector3(a.x, b.y, b.z),
+	]
+	var edges := [
+		[0,1],[1,2],[2,3],[3,0],
+		[4,5],[5,6],[6,7],[7,4],
+		[0,4],[1,5],[2,6],[3,7],
+	]
+	for e in edges:
+		im.surface_add_vertex(corners[e[0]])
+		im.surface_add_vertex(corners[e[1]])
+	im.surface_end()
+	return im
 
 func _spawn_entity_node(idx: int, e: Dictionary, pos: Vector3) -> void:
 	var cls: String = str(e["classname"])
@@ -83,6 +169,8 @@ func _spawn_entity_node(idx: int, e: Dictionary, pos: Vector3) -> void:
 		mdl_path = ENTITY_MODELS[cls]
 
 	if not mdl_path.is_empty() and mdl_path.to_lower().ends_with(".mdl") and assets != null:
+		if not show_props and cls.begins_with("prop_"):
+			return
 		var mesh: ArrayMesh = assets.get_model_mesh(mdl_path)
 		if mesh != null:
 			var mi := MeshInstance3D.new()
@@ -91,15 +179,21 @@ func _spawn_entity_node(idx: int, e: Dictionary, pos: Vector3) -> void:
 			mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
 			holder.add_child(mi)
 			ents_root.add_child(holder)
+			var aabb := mesh.get_aabb()
+			var bmin := pos + aabb.position
+			var bmax := pos + aabb.position + aabb.size
+			_ent_bounds[idx] = [bmin, bmax]
 			return
 
-	# 2. Brush Entities (func_door, trigger_*, func_respawnroom, func_capturezone, func_upgradestation)
+	# 2. Brush Entities (func_door, trigger_*, func_respawnroom, func_capturezone, func_upgradestation, func_detail)
 	if is_brush:
-		if not show_volumes and cls.begins_with("trigger_"):
+		var is_trig := cls.begins_with("trigger_") or cls == "func_respawnroom" or cls == "func_capturezone" or cls == "func_nobuild"
+		if (not show_volumes or not show_triggers) and is_trig:
 			ents_root.add_child(holder)
 			return
 		var bmin: Vector3 = e["bounds_min"]
 		var bmax: Vector3 = e["bounds_max"]
+		_ent_bounds[idx] = [bmin, bmax]
 		var sz := (bmax - bmin).max(Vector3(0.2, 0.2, 0.2))
 		var mi := MeshInstance3D.new()
 		var bm := BoxMesh.new()
@@ -115,6 +209,11 @@ func _spawn_entity_node(idx: int, e: Dictionary, pos: Vector3) -> void:
 		elif cls == "func_door":
 			col = Color(0.55, 0.60, 0.65, 0.82)
 			mat.shading_mode = BaseMaterial3D.SHADING_MODE_PER_PIXEL
+		elif cls == "func_detail":
+			col = Color(0.58, 0.72, 0.84, 0.76)
+			mat.shading_mode = BaseMaterial3D.SHADING_MODE_PER_PIXEL
+		elif cls == "func_water":
+			col = Color(0.18, 0.55, 0.78, 0.52)
 		elif cls == "trigger_hurt":
 			col = Color(0.96, 0.16, 0.16, 0.34)
 		elif cls == "trigger_push":
@@ -152,10 +251,13 @@ func _spawn_entity_node(idx: int, e: Dictionary, pos: Vector3) -> void:
 		cyl.material_override = mat
 		holder.add_child(cyl)
 		ents_root.add_child(holder)
+		_ent_bounds[idx] = [pos + Vector3(-0.75, 0.0, -0.75), pos + Vector3(0.75, 2.6, 0.75)]
 		return
 
 	# 4. Real Godot OmniLight3D + glowing bulb for TF2 point lights!
 	if cls == "light" or cls == "light_spot":
+		if not show_lights:
+			return
 		var lcol := _parse_light_color(str(kv.get("_light", "255 240 210 300")))
 		var omni := OmniLight3D.new()
 		omni.light_color = lcol
@@ -166,7 +268,7 @@ func _spawn_entity_node(idx: int, e: Dictionary, pos: Vector3) -> void:
 
 		var bulb := MeshInstance3D.new()
 		var sm := SphereMesh.new()
-		sm.radius = 0.24
+		sm.radius = 0.28
 		bulb.mesh = sm
 		var bmat := StandardMaterial3D.new()
 		bmat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
@@ -174,13 +276,14 @@ func _spawn_entity_node(idx: int, e: Dictionary, pos: Vector3) -> void:
 		bulb.material_override = bmat
 		holder.add_child(bulb)
 		ents_root.add_child(holder)
+		_ent_bounds[idx] = [pos - Vector3(0.35, 0.35, 0.35), pos + Vector3(0.35, 0.35, 0.35)]
 		return
 
 	# 5. Path Track node (yellow rail beacon)
 	if cls == "path_track":
 		var node_m := MeshInstance3D.new()
 		var sm := SphereMesh.new()
-		sm.radius = 0.30
+		sm.radius = 0.32
 		node_m.mesh = sm
 		var mat := StandardMaterial3D.new()
 		mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
@@ -188,9 +291,10 @@ func _spawn_entity_node(idx: int, e: Dictionary, pos: Vector3) -> void:
 		node_m.material_override = mat
 		holder.add_child(node_m)
 		ents_root.add_child(holder)
+		_ent_bounds[idx] = [pos - Vector3(0.4, 0.4, 0.4), pos + Vector3(0.4, 0.4, 0.4)]
 		return
 
-	# 6. Generic Logic Entity icon cube (light_environment, tf_gamerules, logic_relay, etc.)
+	# 6. Generic Logic Entity icon cube (tf_gamerules, logic_relay, etc.)
 	if cls != "light_environment":
 		var box := MeshInstance3D.new()
 		var bm := BoxMesh.new()
@@ -202,6 +306,7 @@ func _spawn_entity_node(idx: int, e: Dictionary, pos: Vector3) -> void:
 		box.material_override = mat
 		holder.add_child(box)
 		ents_root.add_child(holder)
+		_ent_bounds[idx] = [pos - Vector3(0.35, 0.35, 0.35), pos + Vector3(0.35, 0.35, 0.35)]
 
 func _rebuild_wires_and_tracks(ents: Array, target_pos: Dictionary) -> void:
 	# 1. Payload / Tank 3D Spline Track Lines
@@ -220,7 +325,6 @@ func _rebuild_wires_and_tracks(ents: Array, target_pos: Dictionary) -> void:
 				var p0: Vector3 = e["pos"]
 				var p1: Vector3 = target_pos[nxt]
 				var side := (p1 - p0).cross(Vector3.UP).normalized() * 0.42
-				# Double steel rails + center guide!
 				tim.surface_add_vertex(p0 + side)
 				tim.surface_add_vertex(p1 + side)
 				tim.surface_add_vertex(p0 - side)

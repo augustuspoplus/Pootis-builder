@@ -74,6 +74,12 @@ public:
     bool delete_solid(int solid_idx);
     int duplicate_solid(int solid_idx, const Vector3& offset_g);
     int mirror_solid_x(int solid_idx, bool rotational_180 = false);
+    bool push_pull_normal(int solid_idx, const Vector3& normal_g, float delta_m);
+    bool rotate_solid_y(int solid_idx, float deg);
+    int clip_solid(int solid_idx, const Vector3& plane_pt_g, const Vector3& plane_normal_g, int keep_mode = 0);
+    int tie_solid_to_entity(int solid_idx, const String& classname, const Dictionary& kv);
+    int duplicate_entity(int ent_idx, const Vector3& offset_g);
+    Dictionary raycast_entity(const Vector3& ray_origin_g, const Vector3& ray_dir_g) const;
 
     // Source Displacement Terrain
     int make_terrain_patch(const Vector3& min_g, const Vector3& max_g, int power, const String& material);

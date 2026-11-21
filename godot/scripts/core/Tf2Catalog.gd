@@ -5,10 +5,18 @@ extends RefCounted
 ## Jump-Height Reference Table, and TF2 Map Coach Analyzer.
 
 const MATERIAL_CATEGORIES := {
+	"Dev Blockout": [
+		{"name": "Dev Orange Grid", "mat": "DEV/DEV_MEASUREGENERIC01"},
+		{"name": "Dev Grey Grid",   "mat": "DEV/DEV_MEASUREGENERIC01B"},
+		{"name": "Dev Blend Orange","mat": "DEV/DEV_BLENDMEASURE"},
+		{"name": "Dev Blend Grey",  "mat": "DEV/DEV_BLENDMEASURE2"},
+		{"name": "Dev Wall Grid",   "mat": "DEV/DEV_MEASUREWALL01A"},
+		{"name": "Dev Crate Grid",  "mat": "DEV/DEV_MEASURECRATE01"},
+	],
 	"Floors": [
 		{"name": "Concrete Slab",   "mat": "CONCRETE/CONCRETEFLOOR007A"},
 		{"name": "Concrete Light",  "mat": "CONCRETE/CONCRETEFLOOR001A"},
-		{"name": "Steel Grate",     "mat": "METAL/FLOOR_PLATE01"},
+		{"name": "Steel Grate",     "mat": "METAL/METALGRATE011A"},
 		{"name": "Cobblestone",     "mat": "MEDIEVAL/COBBLESTONE001"},
 		{"name": "Wood Planks",     "mat": "WOOD/WOOD_FLOOR002"},
 		{"name": "Badlands Dirt",   "mat": "NATURE/DIRTGROUND001"},
@@ -18,12 +26,12 @@ const MATERIAL_CATEGORIES := {
 	"Walls": [
 		{"name": "Barn Wood",       "mat": "WOOD/WOOD_WALL002"},
 		{"name": "RED Wood",        "mat": "WOOD/WOOD_WALL007"},
-		{"name": "BLU Wood",        "mat": "WOOD/WOOD_WALL005"},
+		{"name": "BLU Wood",        "mat": "WOOD/WOOD_WALL005A"},
 		{"name": "Red Brick",       "mat": "BRICK/BRICKWALL001"},
 		{"name": "Concrete Wall",   "mat": "CONCRETE/CONCRETEWALL001A"},
 		{"name": "RED Concrete",    "mat": "CONCRETE/CONCRETEWALL002A"},
 		{"name": "BLU Concrete",    "mat": "CONCRETE/CONCRETEWALL001D"},
-		{"name": "Castle Stone",    "mat": "MEDIEVAL/STONEWALL002"},
+		{"name": "Castle Stone",    "mat": "MEDIEVAL/STONEWALL001A"},
 	],
 	"Roofs & Metal": [
 		{"name": "RED Barn Roof",   "mat": "METAL/METALROOF004A"},
@@ -44,7 +52,7 @@ const MATERIAL_CATEGORIES := {
 
 const PROP_CATEGORIES := {
 	"Cover & Crates": [
-		{"name": "Mining Crate",     "mdl": "models/props_mining/miningcrate001.mdl"},
+		{"name": "Mining Crate",     "mdl": "models/props_2fort/miningcrate001.mdl"},
 		{"name": "Barrel 01",        "mdl": "models/props_farm/wooden_barrel.mdl"},
 		{"name": "Shipping Crate",   "mdl": "models/props_2fort/miningcrate002.mdl"},
 		{"name": "Hay Bale",         "mdl": "models/props_farm/haypile001.mdl"},
@@ -52,18 +60,18 @@ const PROP_CATEGORIES := {
 		{"name": "Computer Wall",    "mdl": "models/props_spytech/computer_wall02.mdl"},
 	],
 	"Industrial & Turbine": [
-		{"name": "Turbine Generator","mdl": "models/props_spytech/terminal_chair.mdl"},
-		{"name": "Cargo Container",  "mdl": "models/props_granary/grain_machinery_set1.mdl"},
-		{"name": "Steel Support",    "mdl": "models/props_2fort/metalbucket001.mdl"},
+		{"name": "Turbine Chair",    "mdl": "models/props_spytech/terminal_chair.mdl"},
+		{"name": "Grain Machinery",  "mdl": "models/props_granary/grain_machinery_set1.mdl"},
+		{"name": "Steel Bucket",     "mdl": "models/props_2fort/metalbucket001.mdl"},
 		{"name": "Work Light",       "mdl": "models/props_lights/lamp001.mdl"},
 		{"name": "Oil Drum",         "mdl": "models/props_badlands/barrel01.mdl"},
-		{"name": "Vent Fan",         "mdl": "models/props_spytech/vent_fan.mdl"},
+		{"name": "Spytech Vent",     "mdl": "models/props_spytech/vent_system_vent01.mdl"},
 	],
 	"Nature & Outdoor": [
 		{"name": "Alpine Pine Tree", "mdl": "models/props_foliage/tree_pine01.mdl"},
 		{"name": "Pine Tree Tall",   "mdl": "models/props_foliage/tree_pine_huge.mdl"},
 		{"name": "Boulder Rock",     "mdl": "models/props_nature/rock_worn001.mdl"},
-		{"name": "Desert Cactus",    "mdl": "models/props_badlands/cactus01.mdl"},
+		{"name": "Desert Cactus",    "mdl": "models/props_foliage/cactus01.mdl"},
 		{"name": "Shrub Bush",       "mdl": "models/props_foliage/shrub_03a.mdl"},
 	],
 	"Gameplay & MvM": [

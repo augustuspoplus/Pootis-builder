@@ -295,6 +295,13 @@ void Tf2MapDoc::_bind_methods() {
     ClassDB::bind_method(D_METHOD("duplicate_solid", "solid_idx", "offset_g"), &Tf2MapDoc::duplicate_solid);
     ClassDB::bind_method(D_METHOD("mirror_solid_x", "solid_idx", "rotational_180"),
                          &Tf2MapDoc::mirror_solid_x, DEFVAL(false));
+    ClassDB::bind_method(D_METHOD("push_pull_normal", "solid_idx", "normal_g", "delta_m"), &Tf2MapDoc::push_pull_normal);
+    ClassDB::bind_method(D_METHOD("rotate_solid_y", "solid_idx", "deg"), &Tf2MapDoc::rotate_solid_y);
+    ClassDB::bind_method(D_METHOD("clip_solid", "solid_idx", "plane_pt_g", "plane_normal_g", "keep_mode"),
+                         &Tf2MapDoc::clip_solid, DEFVAL(0));
+    ClassDB::bind_method(D_METHOD("tie_solid_to_entity", "solid_idx", "classname", "kv"), &Tf2MapDoc::tie_solid_to_entity);
+    ClassDB::bind_method(D_METHOD("duplicate_entity", "ent_idx", "offset_g"), &Tf2MapDoc::duplicate_entity);
+    ClassDB::bind_method(D_METHOD("raycast_entity", "ray_origin_g", "ray_dir_g"), &Tf2MapDoc::raycast_entity);
 
     ClassDB::bind_method(D_METHOD("make_terrain_patch", "min_g", "max_g", "power", "material"), &Tf2MapDoc::make_terrain_patch);
     ClassDB::bind_method(D_METHOD("sculpt_terrain", "center_g", "radius_m", "strength_m", "mode"),
@@ -1077,6 +1084,189 @@ Dictionary Tf2MapDoc::raycast_face(const Vector3& ray_origin_g, const Vector3& r
     out["face_normal"] = toGodotDir(f.planeN);
     out["face_center"] = toGodotPos(fc);
     out["material"] = toGodot(f.material);
+    return out;
+}
+
+bool Tf2MapDoc::push_pull_normal(int solid_idx, const Vector3& normal_g, float delta_m) {
+    if (solid_idx < 0 || solid_idx >= static_cast<int>(doc_.worldSolids().size())) return false;
+    const glm::vec3 targetN = glm::normalize(toSourceDir(normal_g));
+    const auto& s = doc_.worldSolids()[solid_idx];
+    int bestFace = -1;
+    float bestDot = 0.55f;
+    for (int fi = 0; fi < static_cast<int>(s.faces.size()); ++fi) {
+        const float d = glm::dot(s.faces[fi].planeN, targetN);
+        if (d > bestDot) {
+            bestDot = d;
+            bestFace = fi;
+        }
+    }
+    if (bestFace < 0) return false;
+    return push_pull_face(solid_idx, bestFace, delta_m);
+}
+
+bool Tf2MapDoc::rotate_solid_y(int solid_idx, float deg) {
+    if (solid_idx < 0 || solid_idx >= static_cast<int>(doc_.worldSolids().size())) return false;
+    pb::map::Solid& s = doc_.worldSolids()[solid_idx];
+    const glm::vec3 ctr = s.center();
+    const float rad = deg * 3.14159265358979323846f / 180.0f;
+    const float cs = std::cos(rad), sn = std::sin(rad);
+    auto rotPt = [&](const glm::vec3& p) {
+        const glm::vec3 d = p - ctr;
+        return glm::vec3(ctr.x + d.x * cs - d.y * sn, ctr.y + d.x * sn + d.y * cs, p.z);
+    };
+    auto rotDir = [&](const glm::vec3& v) {
+        return glm::vec3(v.x * cs - v.y * sn, v.x * sn + v.y * cs, v.z);
+    };
+    pb::map::Solid backup = s;
+    for (auto& f : s.faces) {
+        const glm::vec3 nn = glm::normalize(rotDir(f.planeN));
+        glm::vec3 pt = f.verts.empty() ? (f.planeN * f.planeD) : f.verts[0];
+        pt = rotPt(pt);
+        f.planeN = nn;
+        f.planeD = glm::dot(nn, pt);
+        f.planeFromPoints = false;
+        const glm::vec3 u = rotDir(glm::vec3(f.uAxis));
+        const glm::vec3 v = rotDir(glm::vec3(f.vAxis));
+        f.uAxis = glm::vec4(u, f.uAxis.w);
+        f.vAxis = glm::vec4(v, f.vAxis.w);
+    }
+    s.polygonise();
+    if (!s.valid) {
+        s = std::move(backup);
+        return false;
+    }
+    doc_.markDirty();
+    return true;
+}
+
+int Tf2MapDoc::clip_solid(int solid_idx, const Vector3& plane_pt_g, const Vector3& plane_normal_g, int keep_mode) {
+    if (solid_idx < 0 || solid_idx >= static_cast<int>(doc_.worldSolids().size())) return -1;
+    const glm::vec3 pt = toSourcePos(plane_pt_g);
+    const glm::vec3 n = glm::normalize(toSourceDir(plane_normal_g));
+    const float d = glm::dot(n, pt);
+    const pb::map::Solid orig = doc_.worldSolids()[solid_idx];
+    const std::string mat = orig.faces.empty() ? "CONCRETE/CONCRETEWALL001A" : orig.faces[0].material;
+
+    pb::map::Solid backPart = orig;
+    pb::map::Solid frontPart = orig;
+    const bool backOk = backPart.clip(n, d, mat);
+    const bool frontOk = frontPart.clip(-n, -d, mat);
+
+    if (keep_mode == 1) {
+        if (!frontOk) return -1;
+        frontPart.id = orig.id;
+        doc_.worldSolids()[solid_idx] = std::move(frontPart);
+        doc_.markDirty();
+        return solid_idx;
+    } else if (keep_mode == 2) {
+        if (!backOk) return -1;
+        backPart.id = orig.id;
+        doc_.worldSolids()[solid_idx] = std::move(backPart);
+        doc_.markDirty();
+        return solid_idx;
+    } else {
+        if (!backOk || !frontOk) return -1;
+        backPart.id = orig.id;
+        frontPart.id = doc_.nextId();
+        doc_.worldSolids()[solid_idx] = std::move(backPart);
+        const int newIdx = static_cast<int>(doc_.worldSolids().size());
+        doc_.worldSolids().push_back(std::move(frontPart));
+        doc_.markDirty();
+        return newIdx;
+    }
+}
+
+int Tf2MapDoc::tie_solid_to_entity(int solid_idx, const String& classname, const Dictionary& kv) {
+    if (solid_idx < 0 || solid_idx >= static_cast<int>(doc_.worldSolids().size())) return -1;
+    pb::map::Solid s = std::move(doc_.worldSolids()[solid_idx]);
+    doc_.worldSolids().erase(doc_.worldSolids().begin() + solid_idx);
+
+    pb::map::MapEntity e;
+    e.id = doc_.nextId();
+    e.classname = toStd(classname);
+    e.origin = s.center();
+    e.kv.set("classname", e.classname);
+    Array keys = kv.keys();
+    for (int i = 0; i < keys.size(); ++i) {
+        e.kv.set(toStd(String(keys[i])), toStd(String(kv[keys[i]])));
+    }
+    e.solids.push_back(std::move(s));
+    const int idx = static_cast<int>(doc_.entities().size());
+    doc_.entities().push_back(std::move(e));
+    doc_.markDirty();
+    return idx;
+}
+
+int Tf2MapDoc::duplicate_entity(int ent_idx, const Vector3& offset_g) {
+    if (ent_idx < 0 || ent_idx >= static_cast<int>(doc_.entities().size())) return -1;
+    pb::map::MapEntity copy = doc_.entities()[ent_idx];
+    copy.id = doc_.nextId();
+    const glm::vec3 dU = glm::round(toSourcePos(offset_g));
+    copy.origin += dU;
+    char buf[96];
+    std::snprintf(buf, sizeof(buf), "%g %g %g", copy.origin.x, copy.origin.y, copy.origin.z);
+    copy.kv.set("origin", buf);
+    for (auto& s : copy.solids) {
+        s.id = doc_.nextId();
+        s.translate(dU);
+    }
+    const int idx = static_cast<int>(doc_.entities().size());
+    doc_.entities().push_back(std::move(copy));
+    doc_.markDirty();
+    return idx;
+}
+
+Dictionary Tf2MapDoc::raycast_entity(const Vector3& ray_origin_g, const Vector3& ray_dir_g) const {
+    Dictionary out;
+    out["hit"] = false;
+    const Vector3 rd = ray_dir_g.normalized();
+    float bestT = 1e30f;
+    int bestIdx = -1;
+
+    for (int i = 0; i < static_cast<int>(doc_.entities().size()); ++i) {
+        const auto& e = doc_.entities()[i];
+        if (e.hidden || e.classname == "light_environment" || e.classname == "tf_gamerules" ||
+            e.classname == "team_control_point_master" || e.classname.rfind("tf_logic_", 0) == 0)
+            continue;
+        Vector3 bmin, bmax;
+        if (e.isBrush()) {
+            glm::vec3 mn(1e30f), mx(-1e30f);
+            for (const auto& s : e.solids) {
+                mn = glm::min(mn, s.boundsMin);
+                mx = glm::max(mx, s.boundsMax);
+            }
+            const Vector3 a = toGodotPos(mn), b = toGodotPos(mx);
+            bmin = Vector3(std::min(a.x, b.x), std::min(a.y, b.y), std::min(a.z, b.z));
+            bmax = Vector3(std::max(a.x, b.x), std::max(a.y, b.y), std::max(a.z, b.z));
+        } else {
+            const Vector3 p = toGodotPos(e.origin);
+            const Vector3 ext(0.95f, 1.35f, 0.95f);
+            bmin = p - Vector3(ext.x, 0.1f, ext.z);
+            bmax = p + Vector3(ext.x, ext.y * 2.0f, ext.z);
+        }
+        // Slab ray-AABB intersection
+        float tmin = 0.05f, tmax = 400.0f;
+        for (int a = 0; a < 3; ++a) {
+            const float inv = (std::fabs(rd[a]) > 1e-6f) ? (1.0f / rd[a]) : 1e6f;
+            float t0 = (bmin[a] - ray_origin_g[a]) * inv;
+            float t1 = (bmax[a] - ray_origin_g[a]) * inv;
+            if (t0 > t1) std::swap(t0, t1);
+            tmin = std::max(tmin, t0);
+            tmax = std::min(tmax, t1);
+        }
+        if (tmax >= tmin && tmin < bestT) {
+            bestT = tmin;
+            bestIdx = i;
+        }
+    }
+
+    if (bestIdx < 0) return out;
+    const auto& e = doc_.entities()[bestIdx];
+    out["hit"] = true;
+    out["entity_idx"] = bestIdx;
+    out["classname"] = toGodot(e.classname);
+    out["pos"] = toGodotPos(e.origin);
+    out["t"] = bestT;
     return out;
 }
 
