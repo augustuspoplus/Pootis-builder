@@ -205,108 +205,393 @@ static func build_materials_drawer(app: Node3D, vbox: VBoxContainer) -> void:
 	search.text_changed.connect(populate)
 
 # ==============================================================================
-# 2. ALL-TF2 3D PROP BROWSER (Curated + ALL 7,000+ .MDL Search + Spinning 3D Preview!)
+# 2. ORGANIZED VISUAL 3D TF2 PROP BROWSER (Category Boxes + 16,697 VPK Models!)
 # ==============================================================================
 static func build_props_drawer(app: Node3D, vbox: VBoxContainer) -> void:
 	var fonts: Dictionary = app.fonts
-	# Live Rotating 3D Valve .mdl Preview SubViewport
+
+	# Search bar + Saved Favorites toggle
+	var top_row := HBoxContainer.new()
+	top_row.add_theme_constant_override("separation", 6)
+	vbox.add_child(top_row)
+
+	var search := LineEdit.new()
+	search.placeholder_text = "Search 16,697 TF2 props (snow, pine, crate, barrel...)"
+	search.text = app._prop_search_text
+	search.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	top_row.add_child(search)
+
+	var fav_btn := Button.new()
+	fav_btn.text = "Saved (%d)" % app._prop_favorites.size()
+	HudWidgets.style_tf2_button(fav_btn, fonts["heading"], 10, app._prop_favorites_only)
+	fav_btn.pressed.connect(func():
+		app.audio.play("click")
+		app._prop_favorites_only = not app._prop_favorites_only
+		if app._prop_favorites_only:
+			app._prop_active_cat = ""
+		app._open_props_drawer()
+	)
+	top_row.add_child(fav_btn)
+
+	# Breadcrumb / Active Box Header when inside a Category Box or Favorites
+	var showing_grid: bool = app._prop_favorites_only or not app._prop_active_cat.is_empty() or app._prop_search_text.strip_edges().length() >= 2
+	if showing_grid:
+		var bc_row := HBoxContainer.new()
+		bc_row.add_theme_constant_override("separation", 6)
+		vbox.add_child(bc_row)
+
+		var back_b := Button.new()
+		back_b.text = "< All Prop Boxes"
+		HudWidgets.style_tf2_button(back_b, fonts["heading"], 10)
+		back_b.pressed.connect(func():
+			app.audio.play("click")
+			app._prop_active_cat = ""
+			app._prop_favorites_only = false
+			app._prop_search_text = ""
+			app._open_props_drawer()
+		)
+		bc_row.add_child(back_b)
+
+		var cat_lbl := "SAVED FAVORITES" if app._prop_favorites_only else (
+			str(Tf2CatalogScript.get_prop_box(app._prop_active_cat).get("name", "SEARCH RESULTS")).to_upper()
+			if not app._prop_active_cat.is_empty() else "SEARCH RESULTS"
+		)
+		var bl := _lbl(cat_lbl, fonts["heading"], 12, HudWidgets.COL_ACC)
+		bl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		bl.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+		bc_row.add_child(bl)
+
+	# Compact Live Rotating 3D Valve .mdl Preview (when browsing props)
+	var pv_row := HBoxContainer.new()
+	pv_row.add_theme_constant_override("separation", 8)
+	vbox.add_child(pv_row)
+
 	var pv_frame := PanelContainer.new()
-	pv_frame.custom_minimum_size = Vector2(0, 140)
+	pv_frame.custom_minimum_size = Vector2(96, 86)
 	var psb := StyleBoxFlat.new()
-	psb.bg_color = Color(0.10, 0.09, 0.08, 1.0)
+	psb.bg_color = Color(0.09, 0.08, 0.07, 1.0)
 	psb.border_color = HudWidgets.COL_ACC
-	psb.set_border_width_all(1); psb.set_corner_radius_all(6)
+	psb.set_border_width_all(1); psb.set_corner_radius_all(8)
 	pv_frame.add_theme_stylebox_override("panel", psb)
-	vbox.add_child(pv_frame)
+	pv_row.add_child(pv_frame)
 
 	var svc := SubViewportContainer.new()
-	svc.stretch = true; svc.custom_minimum_size = Vector2(280, 134)
+	svc.stretch = true; svc.custom_minimum_size = Vector2(92, 82)
 	pv_frame.add_child(svc)
 	var svp := SubViewport.new()
 	svp.own_world_3d = true; svp.render_target_update_mode = SubViewport.UPDATE_ALWAYS
 	svc.add_child(svp)
 	var pwe := WorldEnvironment.new()
 	var penv := Environment.new()
-	penv.background_mode = Environment.BG_COLOR; penv.background_color = Color(0.13, 0.11, 0.10)
+	penv.background_mode = Environment.BG_COLOR; penv.background_color = Color(0.11, 0.10, 0.09)
 	penv.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
-	penv.ambient_light_color = Color(0.88, 0.86, 0.82); penv.ambient_light_energy = 1.0
+	penv.ambient_light_color = Color(0.90, 0.88, 0.84); penv.ambient_light_energy = 1.1
 	pwe.environment = penv; svp.add_child(pwe)
 	var pl := DirectionalLight3D.new(); pl.rotation_degrees = Vector3(-35, 42, 0); pl.light_energy = 1.5; svp.add_child(pl)
-	var pcam := Camera3D.new(); pcam.fov = 42.0; svp.add_child(pcam)
+	var pcam := Camera3D.new(); pcam.fov = 40.0; svp.add_child(pcam)
 	var pmesh: ArrayMesh = app.assets.get_model_mesh(app.active_prop_mdl)
 	var pmi := MeshInstance3D.new(); pmi.mesh = pmesh; svp.add_child(pmi)
 	app._prop_preview_mesh = pmi
 	if pmesh != null:
 		var aabb := pmesh.get_aabb()
 		var center := aabb.position + aabb.size * 0.5
-		var rad := maxf(aabb.size.length() * 0.62, 0.6)
+		var rad := maxf(aabb.size.length() * 0.60, 0.55)
 		pmi.position = -center
 		pcam.look_at_from_position(Vector3(rad * 1.15, rad * 0.65, rad * 1.15), Vector3.ZERO, Vector3.UP)
 	else:
 		pcam.look_at_from_position(Vector3(2.5, 1.5, 2.5), Vector3.ZERO, Vector3.UP)
 
-	vbox.add_child(_lbl("Active: " + app.active_prop_mdl, fonts["mono"], 10, HudWidgets.COL_ACC))
+	var pv_info := VBoxContainer.new()
+	pv_info.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	pv_info.add_theme_constant_override("separation", 3)
+	pv_row.add_child(pv_info)
+	pv_info.add_child(_lbl("ACTIVE PROP", fonts["heading"], 10, HudWidgets.COL_ACC))
+	pv_info.add_child(_lbl(app.active_prop_mdl.get_file().get_basename().replace("_", " ").capitalize(), fonts["heading"], 13, HudWidgets.COL_TX))
+	pv_info.add_child(_lbl(app.active_prop_mdl, fonts["mono"], 9, HudWidgets.COL_TX_MUTED))
+	pv_info.add_child(_lbl("Drag any 3D card onto the map or click to stamp!", fonts["body"], 10, HudWidgets.COL_GREEN))
 
-	var mrow := HBoxContainer.new(); mrow.add_theme_constant_override("separation", 4); vbox.add_child(mrow)
-	var bc := Button.new(); bc.text = "Curated Props"; bc.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	HudWidgets.style_tf2_button(bc, fonts["heading"], 10, not app._prop_browse_all)
-	bc.pressed.connect(func(): app._prop_browse_all = false; app._open_props_drawer())
-	mrow.add_child(bc)
-	var ba := Button.new(); ba.text = "ALL 7,000+ TF2 Models"; ba.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	HudWidgets.style_tf2_button(ba, fonts["heading"], 10, app._prop_browse_all)
-	ba.pressed.connect(func(): app._prop_browse_all = true; app._open_props_drawer())
-	mrow.add_child(ba)
+	# Main Content Area: EITHER Organized Category Boxes OR 3D Prop Grid!
+	var list_root := VBoxContainer.new()
+	list_root.add_theme_constant_override("separation", 8)
+	vbox.add_child(list_root)
 
-	var search := LineEdit.new()
-	search.placeholder_text = "Search ALL TF2 .mdl props (2fort, farm, spytech, barrel, train…)"
-	search.text = app._prop_search_text
-	vbox.add_child(search)
+	var make_prop_card := func(parent_grid: GridContainer, nm: String, mp: String) -> void:
+		var is_sel: bool = (app.active_prop_mdl == mp)
+		var is_fav: bool = app._prop_favorites.has(mp)
+		var card := HudWidgets.DraggablePropCard.new()
+		card.custom_minimum_size = Vector2(118, 122)
+		card.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		card.tooltip_text = "%s\n(%s)\nClick to select or drag into 3D!" % [nm, mp]
+		card.drag_payload = {"kind": "prop", "mdl": mp, "name": nm}
+		var sb_n := StyleBoxFlat.new()
+		sb_n.bg_color = Color(0.24, 0.19, 0.14, 0.98) if is_sel else HudWidgets.COL_BG_CARD
+		sb_n.border_color = HudWidgets.COL_ACC if is_sel else HudWidgets.COL_SLOT_BD
+		sb_n.set_border_width_all(2 if is_sel else 1)
+		sb_n.set_corner_radius_all(8)
+		var sb_h := sb_n.duplicate()
+		sb_h.bg_color = HudWidgets.COL_SLOT_HOV
+		sb_h.border_color = HudWidgets.COL_ACC
+		card.add_theme_stylebox_override("normal", sb_n)
+		card.add_theme_stylebox_override("hover", sb_h)
+		card.add_theme_stylebox_override("pressed", sb_h)
+		card.focus_mode = Control.FOCUS_NONE
 
-	var list_root := VBoxContainer.new(); list_root.add_theme_constant_override("separation", 5); vbox.add_child(list_root)
+		var cvb := VBoxContainer.new()
+		cvb.set_anchors_preset(Control.PRESET_FULL_RECT)
+		cvb.offset_left = 5; cvb.offset_right = -5; cvb.offset_top = 5; cvb.offset_bottom = -5
+		cvb.add_theme_constant_override("separation", 3)
+		cvb.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		card.add_child(cvb)
+
+		var tr := TextureRect.new()
+		tr.custom_minimum_size = Vector2(72, 74)
+		tr.size_flags_vertical = Control.SIZE_EXPAND_FILL
+		tr.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+		tr.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+		tr.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		var ic: Texture2D = app.icon_cache.get_icon(mp) if app.icon_cache != null else null
+		if ic != null:
+			tr.texture = ic
+			card.drag_icon = ic
+		elif app.icon_cache != null:
+			# Update card texture live as soon as the 3D icon baker finishes this .mdl!
+			var weak_tr: WeakRef = weakref(tr)
+			var weak_card: WeakRef = weakref(card)
+			app.icon_cache.icon_ready.connect(func(k: String, tex: Texture2D):
+				if k == mp:
+					var t_obj = weak_tr.get_ref()
+					var c_obj = weak_card.get_ref()
+					if t_obj != null:
+						t_obj.texture = tex
+					if c_obj != null:
+						c_obj.drag_icon = tex
+			)
+		cvb.add_child(tr)
+
+		var nl := Label.new()
+		nl.text = nm
+		nl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		nl.clip_text = true
+		nl.add_theme_font_override("font", fonts["body"])
+		nl.add_theme_font_size_override("font_size", 10)
+		nl.add_theme_color_override("font_color", HudWidgets.COL_ACC if is_sel else HudWidgets.COL_TX)
+		nl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		cvb.add_child(nl)
+
+		# Top-right Favorite Star button
+		var star_b := Button.new()
+		star_b.text = "*" if is_fav else "+"
+		star_b.tooltip_text = "Remove from Saved Favorites" if is_fav else "Save to Favorites"
+		star_b.set_anchors_preset(Control.PRESET_TOP_RIGHT)
+		star_b.offset_left = -24; star_b.offset_right = -3; star_b.offset_top = 3; star_b.offset_bottom = 22
+		star_b.focus_mode = Control.FOCUS_NONE
+		var sbs := StyleBoxFlat.new()
+		sbs.bg_color = HudWidgets.COL_ACC if is_fav else Color(0.12, 0.10, 0.09, 0.78)
+		sbs.set_corner_radius_all(5)
+		star_b.add_theme_stylebox_override("normal", sbs)
+		star_b.add_theme_stylebox_override("hover", sbs)
+		star_b.add_theme_font_size_override("font_size", 11)
+		star_b.add_theme_color_override("font_color", Color(0.10, 0.07, 0.04) if is_fav else HudWidgets.COL_TX_MUTED)
+		star_b.pressed.connect(func():
+			app.audio.play("click")
+			if app._prop_favorites.has(mp):
+				app._prop_favorites.erase(mp)
+			else:
+				app._prop_favorites.append(mp)
+			Tf2CatalogScript.save_prop_favorites(app._prop_favorites)
+			app._open_props_drawer()
+		)
+		card.add_child(star_b)
+
+		card.pressed.connect(func():
+			app.active_prop_mdl = mp
+			app.active_tool = "place_prop"
+			app.audio.play("click")
+			app._refresh_context_bar()
+			app._toast("Click in 3D (or drag card) to place " + nm)
+			app._open_props_drawer()
+		)
+		parent_grid.add_child(card)
+
 	var populate := func(flt: String) -> void:
 		app._prop_search_text = flt
 		for ch in list_root.get_children():
 			ch.queue_free()
 		var fl := flt.to_lower().strip_edges()
-		if app._prop_browse_all or fl.length() >= 3:
-			var found: PackedStringArray = app.core.search_models(fl, 60)
-			list_root.add_child(_lbl("ALL TF2 MODELS (%d shown — click to select & place):" % found.size(), fonts["heading"], 10, HudWidgets.COL_CYAN))
-			var g := GridContainer.new(); g.columns = 2; list_root.add_child(g)
+
+		# Case A: Favorites view
+		if app._prop_favorites_only:
+			if app._prop_favorites.is_empty():
+				list_root.add_child(_lbl("No saved props yet! Click the '+' badge on any prop card to favorite it.", fonts["body"], 11, HudWidgets.COL_TX_MUTED))
+				return
+			var fg := GridContainer.new(); fg.columns = 3; fg.add_theme_constant_override("h_separation", 6); fg.add_theme_constant_override("v_separation", 6)
+			list_root.add_child(fg)
+			for mp in app._prop_favorites:
+				if not fl.is_empty() and mp.to_lower().find(fl) == -1:
+					continue
+				make_prop_card.call(fg, mp.get_file().get_basename().replace("_", " ").capitalize(), mp)
+			return
+
+		# Case B: Global search across all 16,697 VPK models (when not inside a specific box)
+		if app._prop_active_cat.is_empty() and fl.length() >= 2:
+			var found: PackedStringArray = app.core.search_models(fl, 45)
+			list_root.add_child(_lbl("LIVE VPK SEARCH (%d props matching '%s'):" % [found.size(), fl], fonts["heading"], 10, HudWidgets.COL_CYAN))
+			var sg := GridContainer.new(); sg.columns = 3; sg.add_theme_constant_override("h_separation", 6); sg.add_theme_constant_override("v_separation", 6)
+			list_root.add_child(sg)
 			for m in found:
 				var mp := str(m)
-				var b := Button.new()
-				b.text = mp.get_file().get_basename()
-				b.tooltip_text = mp
-				b.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-				HudWidgets.style_tf2_button(b, fonts["body"], 10, app.active_prop_mdl == mp)
-				b.pressed.connect(func():
-					app.active_prop_mdl = mp; app.active_tool = "place_prop"
-					app.audio.play("click"); app._toast("Click in 3D to place " + mp.get_file())
-					app._open_props_drawer()
-				)
-				g.add_child(b)
+				make_prop_card.call(sg, mp.get_file().get_basename().replace("_", " ").capitalize(), mp)
 			return
-		for cat in Tf2CatalogScript.PROP_CATEGORIES.keys():
-			var items: Array = []
-			for item in Tf2CatalogScript.PROP_CATEGORIES[cat]:
-				if fl.is_empty() or str(item["name"]).to_lower().find(fl) != -1 or str(item["mdl"]).to_lower().find(fl) != -1:
-					items.append(item)
-			if items.is_empty(): continue
-			_sec(list_root, str(cat).to_upper(), fonts)
-			var g := GridContainer.new(); g.columns = 2; list_root.add_child(g)
-			for item in items:
-				var mp: String = item["mdl"]
-				var nm: String = item["name"]
-				var b := Button.new(); b.text = nm; b.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-				HudWidgets.style_tf2_button(b, fonts["body"], 11, app.active_prop_mdl == mp)
-				b.pressed.connect(func():
-					app.active_prop_mdl = mp; app.active_tool = "place_prop"
-					app.audio.play("click"); app._toast("Click in 3D to place " + nm)
+
+		# Case C: Organized Category Folder Boxes Grid! (Winter, Trees, Crates, Rocks, Industrial, Spytech, Lights, Medieval, Gameplay)
+		if app._prop_active_cat.is_empty():
+			_sec(list_root, "ORGANIZED PROP BOXES (CLICK A CATEGORY TO BROWSE)", fonts)
+			var bg := GridContainer.new()
+			bg.columns = 2
+			bg.add_theme_constant_override("h_separation", 8)
+			bg.add_theme_constant_override("v_separation", 8)
+			list_root.add_child(bg)
+
+			for box in Tf2CatalogScript.PROP_FOLDER_BOXES:
+				var cid: String = str(box["id"])
+				var cname: String = str(box["name"])
+				var csub: String = str(box["subtitle"])
+				var ccol: Color = box["color"]
+				var cicon: String = str(box["icon"])
+
+				var btn := Button.new()
+				btn.custom_minimum_size = Vector2(0, 72)
+				btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+				btn.focus_mode = Control.FOCUS_NONE
+				var sb := StyleBoxFlat.new()
+				sb.bg_color = HudWidgets.COL_BG_CARD
+				sb.border_color = HudWidgets.COL_SLOT_BD
+				sb.border_width_left = 4
+				sb.border_width_top = 1; sb.border_width_right = 1; sb.border_width_bottom = 1
+				sb.border_color = ccol
+				sb.set_corner_radius_all(8)
+				var sbh := sb.duplicate()
+				sbh.bg_color = HudWidgets.COL_SLOT_HOV
+				sbh.border_color = HudWidgets.COL_ACC
+				btn.add_theme_stylebox_override("normal", sb)
+				btn.add_theme_stylebox_override("hover", sbh)
+				btn.add_theme_stylebox_override("pressed", sbh)
+
+				var hb := HBoxContainer.new()
+				hb.set_anchors_preset(Control.PRESET_FULL_RECT)
+				hb.offset_left = 10; hb.offset_right = -8; hb.offset_top = 6; hb.offset_bottom = -6
+				hb.add_theme_constant_override("separation", 8)
+				hb.mouse_filter = Control.MOUSE_FILTER_IGNORE
+				btn.add_child(hb)
+
+				var tr := TextureRect.new()
+				tr.custom_minimum_size = Vector2(46, 46)
+				tr.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+				tr.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+				tr.mouse_filter = Control.MOUSE_FILTER_IGNORE
+				if app.icon_cache != null:
+					tr.texture = app.icon_cache.get_icon(cicon)
+				hb.add_child(tr)
+
+				var tvb := VBoxContainer.new()
+				tvb.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+				tvb.alignment = BoxContainer.ALIGNMENT_CENTER
+				tvb.add_theme_constant_override("separation", 2)
+				tvb.mouse_filter = Control.MOUSE_FILTER_IGNORE
+				hb.add_child(tvb)
+
+				var t1 := _lbl(cname, fonts["heading"], 11, HudWidgets.COL_TX)
+				t1.mouse_filter = Control.MOUSE_FILTER_IGNORE
+				tvb.add_child(t1)
+				var t2 := _lbl(csub, fonts["body"], 9, HudWidgets.COL_TX_MUTED)
+				t2.mouse_filter = Control.MOUSE_FILTER_IGNORE
+				tvb.add_child(t2)
+
+				btn.pressed.connect(func():
+					app.audio.play("click")
+					app._prop_active_cat = cid
 					app._open_props_drawer()
 				)
-				g.add_child(b)
+				bg.add_child(btn)
+			return
+
+		# Case D: Inside a selected Category Box -> 3-column Visual 3D Prop Grid!
+		var items: Array[Dictionary] = Tf2CatalogScript.get_props_for_box(app.core, app._prop_active_cat, fl, 48)
+		if items.is_empty():
+			list_root.add_child(_lbl("No props found in this box matching '%s'." % fl, fonts["body"], 11, HudWidgets.COL_TX_MUTED))
+			return
+		var pg := GridContainer.new()
+		pg.columns = 3
+		pg.add_theme_constant_override("h_separation", 6)
+		pg.add_theme_constant_override("v_separation", 6)
+		list_root.add_child(pg)
+		for it in items:
+			make_prop_card.call(pg, str(it["name"]), str(it["mdl"]))
+
 	populate.call(app._prop_search_text)
 	search.text_changed.connect(populate)
+
+	# PLACEMENT OPTIONS FOOTER CARD (Team Skin, Random Yaw, Snap Normal, Scale, Rotate!)
+	var opt_card := PanelContainer.new()
+	var osb := StyleBoxFlat.new()
+	osb.bg_color = Color(0.08, 0.07, 0.06, 0.96)
+	osb.border_color = HudWidgets.COL_SLOT_BD
+	osb.set_border_width_all(1); osb.set_corner_radius_all(8)
+	osb.set_content_margin_all(10)
+	opt_card.add_theme_stylebox_override("panel", osb)
+	vbox.add_child(opt_card)
+
+	var ovb := VBoxContainer.new()
+	ovb.add_theme_constant_override("separation", 6)
+	opt_card.add_child(ovb)
+	_sec(ovb, "PLACEMENT OPTIONS", fonts)
+
+	var skin_row := HBoxContainer.new(); skin_row.add_theme_constant_override("separation", 5); ovb.add_child(skin_row)
+	var slbl := _lbl("Team Skin:", fonts["body"], 11, HudWidgets.COL_TX)
+	slbl.custom_minimum_size = Vector2(76, 0)
+	skin_row.add_child(slbl)
+	var skin_opts := [{"t": "Neutral", "v": 0, "team": 0}, {"t": "RED", "v": 1, "team": 2}, {"t": "BLU", "v": 2, "team": 3}]
+	for so in skin_opts:
+		var sb_btn := Button.new()
+		sb_btn.text = so["t"]
+		sb_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		HudWidgets.style_tf2_button(sb_btn, fonts["heading"], 10, app.prop_skin == int(so["v"]), int(so["team"]))
+		var sv: int = int(so["v"])
+		sb_btn.pressed.connect(func(): app.audio.play("click"); app.prop_skin = sv; app._open_props_drawer())
+		skin_row.add_child(sb_btn)
+
+	var ry_cb := CheckButton.new()
+	ry_cb.text = "Random Yaw (Trees / Rocks)"
+	ry_cb.button_pressed = app.prop_random_yaw
+	ry_cb.toggled.connect(func(on: bool): app.prop_random_yaw = on)
+	ovb.add_child(ry_cb)
+
+	var sn_cb := CheckButton.new()
+	sn_cb.text = "Snap to Surface Normal"
+	sn_cb.button_pressed = app.prop_snap_normal
+	sn_cb.toggled.connect(func(on: bool): app.prop_snap_normal = on)
+	ovb.add_child(sn_cb)
+
+	var sr_row := HBoxContainer.new(); sr_row.add_theme_constant_override("separation", 6); ovb.add_child(sr_row)
+	var sc_minus := Button.new(); sc_minus.text = "-"
+	HudWidgets.style_tf2_button(sc_minus, fonts["heading"], 11)
+	var sc_lbl := _lbl("Scale: %.2fx" % app.prop_scale, fonts["mono"], 11, HudWidgets.COL_TX)
+	var sc_plus := Button.new(); sc_plus.text = "+"
+	HudWidgets.style_tf2_button(sc_plus, fonts["heading"], 11)
+	sc_minus.pressed.connect(func(): app.prop_scale = maxf(0.25, snappedf(app.prop_scale - 0.25, 0.25)); sc_lbl.text = "Scale: %.2fx" % app.prop_scale)
+	sc_plus.pressed.connect(func(): app.prop_scale = minf(4.0, snappedf(app.prop_scale + 0.25, 0.25)); sc_lbl.text = "Scale: %.2fx" % app.prop_scale)
+	sr_row.add_child(sc_minus); sr_row.add_child(sc_lbl); sr_row.add_child(sc_plus)
+
+	var rot_b := Button.new()
+	rot_b.text = "Yaw: %d° (R)" % int(app.prop_yaw_deg)
+	rot_b.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	HudWidgets.style_tf2_button(rot_b, fonts["body"], 10)
+	rot_b.pressed.connect(func():
+		app.prop_yaw_deg = fmod(app.prop_yaw_deg + 90.0, 360.0)
+		rot_b.text = "Yaw: %d° (R)" % int(app.prop_yaw_deg)
+		app.audio.play("click")
+	)
+	sr_row.add_child(rot_b)
 
 # ==============================================================================
 # 3. ALL-450+ TF2 FGD ENTITY BROWSER (Shift+E — base.fgd + tf.fgd + tf-abs.fgd!)
@@ -577,24 +862,95 @@ static func build_inspector_drawer(app: Node3D, vbox: VBoxContainer) -> void:
 	vbox.add_child(_lbl("Click any solid or entity in 3D to inspect & edit its Hammer properties, FGD SmartEdit choices, flags, and I/O wires.", fonts["body"], 12, HudWidgets.COL_TX_MUTED))
 
 # ==============================================================================
-# 5. VERTICAL CLIFF & DISPLACEMENT TERRAIN STUDIO (Phase 3 Engine Overhaul!)
+# 5. INTUITIVE TERRAIN & CANYON CLIFF STUDIO (Visual Presets + Blend Painter!)
 # ==============================================================================
 static func build_terrain_drawer(app: Node3D, vbox: VBoxContainer) -> void:
 	var fonts: Dictionary = app.fonts
-	_sec(vbox, "CREATE DISPLACEMENTS (FLOORS & VERTICAL CLIFFS)", fonts)
-	var b_floor := Button.new(); b_floor.text = "+ Flat Ground Patch (512×512u Power-3)"
-	HudWidgets.style_tf2_button(b_floor, fonts["heading"], 11, true)
-	b_floor.pressed.connect(func():
-		var p: Vector3 = app.hover_pos if app.hover_valid else Vector3.ZERO
-		app.doc.make_terrain_patch(p + Vector3(-8, -1, -8), p + Vector3(8, 0, 8), 3, Tf2GamemodesScript.get_biome(app.active_biome)["floor"])
-		app.doc.record_undo("Add Terrain Patch")
-		app.map_sync.sync_all(); app.audio.play("place")
-		app._toast("Added Power-3 Ground Displacement! Hold LMB to sculpt.")
-	)
-	vbox.add_child(b_floor)
+	_sec(vbox, "1. STAMP TERRAIN OR CANYON CLIFF PRESET", fonts)
 
-	# Cliff Facing Direction + Height controls!
+	var pgrid := GridContainer.new()
+	pgrid.columns = 2
+	pgrid.add_theme_constant_override("h_separation", 8)
+	pgrid.add_theme_constant_override("v_separation", 8)
+	vbox.add_child(pgrid)
+
+	var presets := [
+		{"id": "cliff",  "name": "Canyon Cliff",  "sub": "Vertical rocky wall",  "ic": "preset_cliff"},
+		{"id": "hill",   "name": "Rolling Hill",  "sub": "Organic ground mound", "ic": "preset_hill"},
+		{"id": "mesa",   "name": "Mesa Plateau",  "sub": "Flat-top high ground", "ic": "preset_mesa"},
+		{"id": "crater", "name": "Crater Basin",  "sub": "Sunken battle bowl",   "ic": "preset_crater"},
+	]
+	for pr in presets:
+		var pid: String = pr["id"]
+		var card := Button.new()
+		card.custom_minimum_size = Vector2(0, 74)
+		card.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		card.focus_mode = Control.FOCUS_NONE
+		var sb := StyleBoxFlat.new()
+		sb.bg_color = HudWidgets.COL_BG_CARD
+		sb.border_color = HudWidgets.COL_ACC if pid == "cliff" else HudWidgets.COL_SLOT_BD
+		sb.set_border_width_all(1); sb.set_corner_radius_all(8)
+		var sbh := sb.duplicate(); sbh.bg_color = HudWidgets.COL_SLOT_HOV; sbh.border_color = HudWidgets.COL_ACC
+		card.add_theme_stylebox_override("normal", sb)
+		card.add_theme_stylebox_override("hover", sbh)
+		card.add_theme_stylebox_override("pressed", sbh)
+
+		var hb := HBoxContainer.new()
+		hb.set_anchors_preset(Control.PRESET_FULL_RECT)
+		hb.offset_left = 6; hb.offset_right = -6; hb.offset_top = 6; hb.offset_bottom = -6
+		hb.add_theme_constant_override("separation", 8)
+		hb.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		card.add_child(hb)
+
+		var art := HudWidgets.VectorToolIcon.new(pr["ic"], false, HudWidgets.COL_ACC)
+		art.custom_minimum_size = Vector2(54, 54)
+		hb.add_child(art)
+
+		var tvb := VBoxContainer.new()
+		tvb.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		tvb.alignment = BoxContainer.ALIGNMENT_CENTER
+		tvb.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		hb.add_child(tvb)
+		var l1 := _lbl(pr["name"], fonts["heading"], 11, HudWidgets.COL_TX); l1.mouse_filter = Control.MOUSE_FILTER_IGNORE; tvb.add_child(l1)
+		var l2 := _lbl(pr["sub"], fonts["body"], 9, HudWidgets.COL_TX_MUTED); l2.mouse_filter = Control.MOUSE_FILTER_IGNORE; tvb.add_child(l2)
+
+		card.pressed.connect(func():
+			var p: Vector3 = app.hover_pos if app.hover_valid else Vector3(0, 0, -6)
+			var mat := "NATURE/BLENDROCKWALLDIRT001"
+			if pid == "cliff":
+				var a := p + Vector3(-8, 0, 0); var b := p + Vector3(8, 0, 0)
+				if app.cliff_facing == 1: a = p + Vector3(8, 0, 0); b = p + Vector3(-8, 0, 0)
+				elif app.cliff_facing == 2: a = p + Vector3(0, 0, 8); b = p + Vector3(0, 0, -8)
+				elif app.cliff_facing == 3: a = p + Vector3(0, 0, -8); b = p + Vector3(0, 0, 8)
+				var cid: int = app.doc.make_cliff_wall(a, b, app.cliff_height_m, 2.5, app.cliff_power, mat, 1.2)
+				if cid >= 0:
+					app.terrain_axis_mode = 0
+					app.doc.record_undo("Add Canyon Cliff")
+					app.map_sync.sync_all(); app._select_solid(cid, -1); app.audio.play("place")
+					app._toast("Stamped Canyon Cliff Wall! Hold LMB to sculpt.")
+			else:
+				var sid: int = app.doc.make_terrain_patch(p + Vector3(-8, -1, -8), p + Vector3(8, 0, 8), 3, Tf2GamemodesScript.get_biome(app.active_biome)["floor"])
+				if sid >= 0:
+					if pid == "hill":
+						app.doc.sculpt_terrain(p, 7.5, 2.6, 0, 1)
+						app.doc.sculpt_terrain(p, 6.0, 0.8, 2, 1)
+					elif pid == "mesa":
+						app.doc.sculpt_terrain(p, 6.8, 3.2, 0, 1)
+						app.doc.sculpt_terrain(p, 4.8, 3.0, 3, 1)
+					elif pid == "crater":
+						app.doc.sculpt_terrain(p, 6.5, 2.4, 1, 1)
+					app.terrain_axis_mode = 1
+					app.doc.record_undo("Add " + pr["name"])
+					app.map_sync.sync_all(); app._select_solid(sid, -1); app.audio.play("place")
+					app._toast("Stamped %s! Hold LMB in 3D to sculpt." % pr["name"])
+		)
+		pgrid.add_child(card)
+
+	# Compact Cliff Facing & Height strip (Hammer units!)
 	var cf_row := HBoxContainer.new(); cf_row.add_theme_constant_override("separation", 4); vbox.add_child(cf_row)
+	var cf_lbl := _lbl("Cliff Facing:", fonts["body"], 10, HudWidgets.COL_TX_MUTED)
+	cf_lbl.custom_minimum_size = Vector2(72, 0); cf_lbl.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	cf_row.add_child(cf_lbl)
 	var dir_names: Array[String] = ["South", "North", "East", "West"]
 	for di in range(4):
 		var db := Button.new(); db.text = dir_names[di]; db.size_flags_horizontal = Control.SIZE_EXPAND_FILL
@@ -603,67 +959,122 @@ static func build_terrain_drawer(app: Node3D, vbox: VBoxContainer) -> void:
 		db.pressed.connect(func(): app.cliff_facing = dv; app._open_terrain_studio())
 		cf_row.add_child(db)
 
-	var ch_lbl := Label.new(); ch_lbl.text = "Cliff Height: %du  |  Power: %d" % [int(round(app.cliff_height_m * 32.0)), app.cliff_power]
+	var ch_lbl := _lbl("Cliff Height: %du  |  Mesh Detail: Power-%d" % [int(round(app.cliff_height_m * 32.0)), app.cliff_power], fonts["body"], 11, HudWidgets.COL_TX)
 	vbox.add_child(ch_lbl)
 	var ch_sl := HSlider.new(); ch_sl.min_value = 6.0; ch_sl.max_value = 16.0; ch_sl.step = 1.0; ch_sl.value = app.cliff_height_m
-	ch_sl.value_changed.connect(func(v): app.cliff_height_m = v; ch_lbl.text = "Cliff Height: %du  |  Power: %d" % [int(round(v * 32.0)), app.cliff_power])
+	ch_sl.value_changed.connect(func(v): app.cliff_height_m = v; ch_lbl.text = "Cliff Height: %du  |  Mesh Detail: Power-%d" % [int(round(v * 32.0)), app.cliff_power])
 	vbox.add_child(ch_sl)
 
-	var b_cliff := Button.new(); b_cliff.text = "+ Vertical Rocky Cliff Wall (512×%du!)" % int(round(app.cliff_height_m * 32.0))
-	HudWidgets.style_tf2_button(b_cliff, fonts["heading"], 11, false, 3)
-	b_cliff.pressed.connect(func():
-		var p: Vector3 = app.hover_pos if app.hover_valid else Vector3(0, 0, -10)
-		var mat := "NATURE/BLENDROCKWALLDIRT001"
-		var a := p + Vector3(-8, 0, 0); var b := p + Vector3(8, 0, 0)
-		if app.cliff_facing == 1: a = p + Vector3(8, 0, 0); b = p + Vector3(-8, 0, 0)
-		elif app.cliff_facing == 2: a = p + Vector3(0, 0, 8); b = p + Vector3(0, 0, -8)
-		elif app.cliff_facing == 3: a = p + Vector3(0, 0, -8); b = p + Vector3(0, 0, 8)
-		var cid: int = app.doc.make_cliff_wall(a, b, app.cliff_height_m, 2.5, app.cliff_power, mat, 1.2)
-		if cid >= 0:
-			app.doc.record_undo("Add Rocky Cliff Wall")
-			app.map_sync.sync_all(); app._select_solid(cid, -1); app.audio.play("place")
-			app._toast("Built stratified TF2 Canyon Cliff Wall! Sculpt with Axis = Face Nrm.")
-	)
-	vbox.add_child(b_cliff)
+	_sec(vbox, "2. SCULPT BRUSH (HOLD LMB ON TERRAIN)", fonts)
+	var brushes := [
+		{"m": 0, "t": "Raise",   "ic": "raise"},
+		{"m": 1, "t": "Lower",   "ic": "lower"},
+		{"m": 2, "t": "Smooth",  "ic": "smooth"},
+		{"m": 3, "t": "Flatten", "ic": "flatten"},
+		{"m": 6, "t": "Noise",   "ic": "noise"},
+		{"m": 4, "t": "Blend",   "ic": "paint"},
+	]
+	var bg := GridContainer.new(); bg.columns = 3
+	bg.add_theme_constant_override("h_separation", 6); bg.add_theme_constant_override("v_separation", 6)
+	vbox.add_child(bg)
+	for br in brushes:
+		var mv: int = int(br["m"])
+		var is_act: bool = (app.terrain_mode == mv) or (mv == 4 and app.terrain_mode == 5)
+		var b := Button.new()
+		b.custom_minimum_size = Vector2(0, 48)
+		b.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		HudWidgets.style_tf2_button(b, fonts["heading"], 10, is_act)
+		var bvb := VBoxContainer.new()
+		bvb.set_anchors_preset(Control.PRESET_FULL_RECT)
+		bvb.offset_top = 4; bvb.offset_bottom = -3
+		bvb.alignment = BoxContainer.ALIGNMENT_CENTER
+		bvb.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		b.add_child(bvb)
+		var vic := HudWidgets.VectorToolIcon.new(br["ic"], is_act, HudWidgets.COL_ACC)
+		vic.custom_minimum_size = Vector2(22, 22)
+		vic.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+		bvb.add_child(vic)
+		var bl := _lbl(br["t"], fonts["heading"], 10, Color(0.10, 0.07, 0.04) if is_act else HudWidgets.COL_TX)
+		bl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		bl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		bvb.add_child(bl)
+		b.pressed.connect(func(): app.audio.play("click"); app.terrain_mode = mv; app._open_terrain_studio())
+		bg.add_child(b)
 
-	_sec(vbox, "SCULPT & PAINT ALPHA MODE", fonts)
-	var mnames := ["Raise", "Lower", "Smooth", "Flatten", "Paint Alpha+", "Paint Alpha-", "Rock Noise"]
-	var g := GridContainer.new(); g.columns = 2; vbox.add_child(g)
-	for i in range(mnames.size()):
-		var b := Button.new(); b.text = mnames[i]; b.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		HudWidgets.style_tf2_button(b, fonts["body"], 10, app.terrain_mode == i)
-		var mv := i
-		b.pressed.connect(func(): app.terrain_mode = mv; app._open_terrain_studio())
-		g.add_child(b)
+	# Plain-English Sculpt Direction Toggle!
+	var dir_row := HBoxContainer.new(); dir_row.add_theme_constant_override("separation", 5); vbox.add_child(dir_row)
+	var b_push := Button.new(); b_push.text = "Push Out (Cliffs)"; b_push.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	HudWidgets.style_tf2_button(b_push, fonts["heading"], 10, app.terrain_axis_mode == 0)
+	b_push.pressed.connect(func(): app.terrain_axis_mode = 0; app._open_terrain_studio())
+	dir_row.add_child(b_push)
+	var b_up := Button.new(); b_up.text = "Up & Down (Ground)"; b_up.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	HudWidgets.style_tf2_button(b_up, fonts["heading"], 10, app.terrain_axis_mode == 1)
+	b_up.pressed.connect(func(): app.terrain_axis_mode = 1; app._open_terrain_studio())
+	dir_row.add_child(b_up)
 
-	_sec(vbox, "SCULPT AXIS (HAMMER Z-UP AXES)", fonts)
-	var ax_row := HBoxContainer.new(); ax_row.add_theme_constant_override("separation", 3); vbox.add_child(ax_row)
-	var anames := ["Face Nrm", "Up (Z)", "East (X)", "North (Y)"]
-	for i in range(4):
-		var b := Button.new(); b.text = anames[i]; b.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		HudWidgets.style_tf2_button(b, fonts["body"], 10, app.terrain_axis_mode == i)
-		var av := i
-		b.pressed.connect(func(): app.terrain_axis_mode = av; app._open_terrain_studio())
-		ax_row.add_child(b)
+	# Visual Side-by-Side Texture Blend Painter (NO cryptic "Paint Alpha+" / "Alpha-"!)
+	_sec(vbox, "3. VISUAL TEXTURE BLEND PAINTER", fonts)
+	var blend_row := HBoxContainer.new(); blend_row.add_theme_constant_override("separation", 8); vbox.add_child(blend_row)
+	var blend_layers := [
+		{"m": 4, "name": "Badlands Rock", "mat": "NATURE/ROCKWALL001"},
+		{"m": 5, "name": "Canyon Dirt",   "mat": "NATURE/DIRTGROUND001"},
+	]
+	for bl_item in blend_layers:
+		var lm: int = int(bl_item["m"])
+		var is_l: bool = (app.terrain_mode == lm)
+		var lb := Button.new()
+		lb.custom_minimum_size = Vector2(0, 52)
+		lb.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		HudWidgets.style_tf2_button(lb, fonts["body"], 10, is_l)
+		var lhb := HBoxContainer.new()
+		lhb.set_anchors_preset(Control.PRESET_FULL_RECT)
+		lhb.offset_left = 5; lhb.offset_right = -5; lhb.offset_top = 5; lhb.offset_bottom = -5
+		lhb.add_theme_constant_override("separation", 6)
+		lhb.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		lb.add_child(lhb)
+		var sw := TextureRect.new()
+		sw.custom_minimum_size = Vector2(38, 38)
+		sw.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+		sw.stretch_mode = TextureRect.STRETCH_SCALE
+		sw.texture = app.assets.get_material_swatch(bl_item["mat"])
+		sw.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		lhb.add_child(sw)
+		var ltxt := _lbl("Paint:\n" + bl_item["name"], fonts["body"], 10, Color(0.10, 0.07, 0.04) if is_l else HudWidgets.COL_TX)
+		ltxt.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		ltxt.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+		ltxt.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		lhb.add_child(ltxt)
+		lb.pressed.connect(func():
+			app.audio.play("click")
+			app.terrain_mode = lm
+			app._toast("Texture Blend Brush: Painting %s!" % bl_item["name"])
+			app._open_terrain_studio()
+		)
+		blend_row.add_child(lb)
 
-	var r_lbl := Label.new(); r_lbl.text = "Brush Radius: %du" % int(round(app.terrain_radius_m * 32.0)); vbox.add_child(r_lbl)
+	var r_lbl := _lbl("Brush Radius: %du" % int(round(app.terrain_radius_m * 32.0)), fonts["body"], 11, HudWidgets.COL_TX); vbox.add_child(r_lbl)
 	var r_sl := HSlider.new(); r_sl.min_value = 1.5; r_sl.max_value = 12.0; r_sl.step = 0.5; r_sl.value = app.terrain_radius_m
 	r_sl.value_changed.connect(func(v): app.terrain_radius_m = v; r_lbl.text = "Brush Radius: %du" % int(round(v * 32.0)))
 	vbox.add_child(r_sl)
 
-	var s_lbl := Label.new(); s_lbl.text = "Brush Strength: %du" % int(round(app.terrain_strength_m * 32.0)); vbox.add_child(s_lbl)
+	var s_lbl := _lbl("Brush Strength: %du" % int(round(app.terrain_strength_m * 32.0)), fonts["body"], 11, HudWidgets.COL_TX); vbox.add_child(s_lbl)
 	var s_sl := HSlider.new(); s_sl.min_value = 0.25; s_sl.max_value = 3.5; s_sl.step = 0.25; s_sl.value = app.terrain_strength_m
 	s_sl.value_changed.connect(func(v): app.terrain_strength_m = v; s_lbl.text = "Brush Strength: %du" % int(round(v * 32.0)))
 	vbox.add_child(s_sl)
 
-	_sec(vbox, "HAMMER SEW & SUBDIVIDE", fonts)
-	var t_row := HBoxContainer.new(); t_row.add_theme_constant_override("separation", 5); vbox.add_child(t_row)
-	var b_sew := Button.new(); b_sew.text = "Sew All Edges"; b_sew.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	HudWidgets.style_tf2_button(b_sew, fonts["heading"], 11)
+	_sec(vbox, "4. SEAM STITCHING & SMOOTHING", fonts)
+	var t_row := HBoxContainer.new(); t_row.add_theme_constant_override("separation", 6); vbox.add_child(t_row)
+	var b_sew := Button.new(); b_sew.text = "Auto-Sew All Seams"; b_sew.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	b_sew.focus_mode = Control.FOCUS_NONE
+	b_sew.add_theme_stylebox_override("normal", HudWidgets.make_button_style(Color(0.15, 0.42, 0.22, 0.96), HudWidgets.COL_GREEN, 7, 10, 7))
+	b_sew.add_theme_stylebox_override("hover", HudWidgets.make_button_style(Color(0.20, 0.52, 0.28, 1.0), Color(0.7, 1.0, 0.78), 7, 10, 7))
+	b_sew.add_theme_stylebox_override("pressed", HudWidgets.make_button_style(Color(0.12, 0.34, 0.18, 1.0), HudWidgets.COL_GREEN, 7, 10, 7))
+	b_sew.add_theme_font_override("font", fonts["heading"]); b_sew.add_theme_font_size_override("font_size", 11)
+	b_sew.add_theme_color_override("font_color", Color(0.92, 1.0, 0.94))
 	b_sew.pressed.connect(func():
 		var n: int = app.doc.sew_displacements()
 		app.doc.record_undo("Sew Displacements"); app.map_sync.sync_all(); app.audio.play("carve")
-		app._toast("Sewed %d displacement seam vertices cleanly (0 cracks)!" % n)
+		app._toast("Auto-Sewed %d displacement seam vertices (0 cracks)!" % n)
 	)
 	t_row.add_child(b_sew)
 

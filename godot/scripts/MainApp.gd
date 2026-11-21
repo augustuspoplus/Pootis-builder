@@ -124,9 +124,18 @@ var _mat_search_text: String = ""
 var _mat_browse_all: bool = false
 var _prop_search_text: String = ""
 var _prop_browse_all: bool = false
+var _prop_active_cat: String = ""
+var _prop_favorites_only: bool = false
+var _prop_favorites: Array[String] = []
+var prop_skin: int = 0          # 0=Neutral, 1=RED, 2=BLU
+var prop_random_yaw: bool = false
+var prop_snap_normal: bool = true
+var prop_scale: float = 1.0
+var prop_yaw_deg: float = 0.0
 var _ent_search_text: String = ""
 var _insp_tab: int = 0
 var _prop_preview_mesh: MeshInstance3D = null
+var _gizmo_root: Node3D = null
 var _autosave_accum: float = 0.0
 
 # Orbit / Fly camera state
@@ -144,7 +153,14 @@ var pie_wheel: Control
 var welcome_panel: Control
 var settings_modal: ColorRect
 var top_bar: Control
+var context_bar_wrap: CenterContainer
+var context_bar: PanelContainer
+var context_hbox: HBoxContainer
 var left_rail_panel: PanelContainer
+var tool_hover_card: PanelContainer
+var tool_hover_title: Label
+var tool_hover_key: Label
+var tool_hover_desc: Label
 var bottom_dock: Control
 var selection_bar_wrap: CenterContainer
 var selection_bar: PanelContainer
@@ -328,6 +344,43 @@ func _create_editor_helpers() -> void:
 	brush_ring.material_override = bmat; brush_ring.visible = false
 	add_child(brush_ring)
 
+	# 3D RGB Transform Axis Gizmo (shown on selected solid or entity!)
+	_gizmo_root = Node3D.new()
+	_gizmo_root.name = "TransformGizmo3D"
+	_gizmo_root.visible = false
+	add_child(_gizmo_root)
+	var axes := [
+		{"dir": Vector3.RIGHT,   "rot": Vector3(0, 0, -90), "col": Color(0.96, 0.24, 0.22, 0.96)},
+		{"dir": Vector3.UP,      "rot": Vector3(0, 0, 0),   "col": Color(0.24, 0.92, 0.36, 0.96)},
+		{"dir": Vector3.BACK,    "rot": Vector3(90, 0, 0),  "col": Color(0.24, 0.56, 0.98, 0.96)},
+	]
+	for ax in axes:
+		var amat := StandardMaterial3D.new()
+		amat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		amat.no_depth_test = true
+		amat.render_priority = 10
+		amat.albedo_color = ax["col"]
+		var shaft := MeshInstance3D.new()
+		var cm := CylinderMesh.new(); cm.top_radius = 0.045; cm.bottom_radius = 0.045; cm.height = 1.65
+		shaft.mesh = cm; shaft.material_override = amat
+		shaft.rotation_degrees = ax["rot"]
+		shaft.position = (ax["dir"] as Vector3) * 0.85
+		_gizmo_root.add_child(shaft)
+		var tip := MeshInstance3D.new()
+		var tm2 := CylinderMesh.new(); tm2.top_radius = 0.0; tm2.bottom_radius = 0.14; tm2.height = 0.40
+		tip.mesh = tm2; tip.material_override = amat
+		tip.rotation_degrees = ax["rot"]
+		tip.position = (ax["dir"] as Vector3) * 1.85
+		_gizmo_root.add_child(tip)
+	var gdot := MeshInstance3D.new()
+	var gs := SphereMesh.new(); gs.radius = 0.14; gs.height = 0.28
+	gdot.mesh = gs
+	var dmat := StandardMaterial3D.new()
+	dmat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED; dmat.no_depth_test = true; dmat.render_priority = 11
+	dmat.albedo_color = Color(0.98, 0.82, 0.32, 1.0)
+	gdot.material_override = dmat
+	_gizmo_root.add_child(gdot)
+
 # ==============================================================================
 # UI CONSTRUCTION (Expanded Current Floating TF2 HUD — 100% Responsive!)
 # ==============================================================================
@@ -342,8 +395,12 @@ func _init_ui() -> void:
 	var ui_theme: Theme = HudWidgets.create_global_theme(fonts)
 	get_tree().root.theme = ui_theme
 
+	_prop_favorites = Tf2CatalogScript.load_prop_favorites()
+
 	_build_top_bar()
+	_build_context_bar()
 	_build_left_rail()
+	_build_tool_hover_card()
 	_build_toast_pill()
 	_build_selection_bar()
 	_build_bottom_dock()
@@ -364,7 +421,7 @@ func _init_ui() -> void:
 	hud_layer.add_child(settings_modal)
 
 	# Apply global TF2 theme directly onto CanvasLayer control roots (CanvasLayer breaks Window.theme inheritance!)
-	for ctrl in [top_bar, left_rail_panel, bottom_dock, selection_bar, right_drawer, split_2d_panel, welcome_panel, settings_modal]:
+	for ctrl in [top_bar, context_bar, left_rail_panel, tool_hover_card, bottom_dock, selection_bar, right_drawer, split_2d_panel, welcome_panel, settings_modal]:
 		if ctrl is Control:
 			(ctrl as Control).theme = ui_theme
 
@@ -382,8 +439,8 @@ func _init_ui() -> void:
 func _build_toast_pill() -> void:
 	toast_wrap = CenterContainer.new()
 	toast_wrap.set_anchors_preset(Control.PRESET_TOP_WIDE)
-	toast_wrap.offset_top = 60
-	toast_wrap.offset_bottom = 96
+	toast_wrap.offset_top = 100
+	toast_wrap.offset_bottom = 136
 	toast_wrap.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	hud_layer.add_child(toast_wrap)
 
@@ -430,9 +487,126 @@ func _build_status_pill() -> void:
 	status_lbl_bot.add_theme_color_override("font_color", HudWidgets.COL_GREEN)
 	vb.add_child(status_lbl_bot)
 
+func _build_context_bar() -> void:
+	context_bar_wrap = CenterContainer.new()
+	context_bar_wrap.set_anchors_preset(Control.PRESET_TOP_WIDE)
+	context_bar_wrap.offset_top = 56
+	context_bar_wrap.offset_bottom = 94
+	context_bar_wrap.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	hud_layer.add_child(context_bar_wrap)
+
+	context_bar = HudWidgets.HudFrame.new(HudWidgets.COL_LIP_AMB, 8.0, false)
+	context_bar.visible = false
+	context_bar_wrap.add_child(context_bar)
+
+	context_hbox = HBoxContainer.new()
+	context_hbox.alignment = BoxContainer.ALIGNMENT_CENTER
+	context_hbox.add_theme_constant_override("separation", 6)
+	context_bar.add_child(context_hbox)
+
+func _refresh_context_bar() -> void:
+	if context_hbox == null:
+		return
+	for ch in context_hbox.get_children():
+		ch.queue_free()
+	if viewing_bsp or stage == Stage.PLAYTEST:
+		context_bar.visible = false
+		return
+
+	var add_tag := func(txt: String) -> void:
+		var l := Label.new()
+		l.text = txt
+		l.add_theme_font_override("font", fonts["heading"])
+		l.add_theme_font_size_override("font_size", 11)
+		l.add_theme_color_override("font_color", HudWidgets.COL_ACC)
+		context_hbox.add_child(l)
+
+	var add_chip := func(txt: String, act: bool, fn: Callable) -> void:
+		var b := Button.new()
+		b.text = txt
+		HudWidgets.style_tf2_button(b, fonts["body"], 10, act)
+		b.pressed.connect(func(): audio.play("click"); fn.call())
+		context_hbox.add_child(b)
+
+	if active_tool == "wall":
+		context_bar.visible = true
+		add_tag.call("WALL CHAIN")
+		for th in [0.5, 0.75, 1.0, 2.0]:
+			var tv: float = th
+			add_chip.call("%du Thick" % int(round(tv * UPM)), absf(wall_thick_m - tv) < 0.05, func(): wall_thick_m = tv; _refresh_context_bar())
+		for wh in [4.5, 6.0, 8.0]:
+			var wv: float = wh
+			add_chip.call("%du High" % int(round(wv * UPM)), absf(wall_height_m - wv) < 0.1, func(): wall_height_m = wv; _refresh_context_bar())
+	elif active_tool == "floor":
+		context_bar.visible = true
+		add_tag.call("DRAG BOX")
+		for bh in [0.5, 1.0, 2.0, 4.5, 8.0]:
+			var bv: float = bh
+			add_chip.call("%du High" % int(round(bv * UPM)), absf(box_height_m - bv) < 0.05, func(): box_height_m = bv; _refresh_context_bar())
+	elif active_tool == "terrain":
+		context_bar.visible = true
+		add_tag.call("TERRAIN STUDIO")
+		add_chip.call("Radius %du" % int(round(terrain_radius_m * UPM)), false, func(): terrain_radius_m = clampf(terrain_radius_m + 1.0, 1.5, 12.0) if terrain_radius_m < 10.0 else 2.5; _refresh_context_bar())
+		add_chip.call("Push Out (Cliffs)" if terrain_axis_mode == 0 else "Up & Down (Ground)", true, func(): terrain_axis_mode = 1 if terrain_axis_mode == 0 else 0; _refresh_context_bar(); if right_drawer.visible: _open_terrain_studio())
+		add_chip.call("Auto-Sew Seams", false, func(): var n: int = doc.sew_displacements(); doc.record_undo("Sew"); map_sync.sync_all(); _toast("Auto-Sewed %d vertices!" % n))
+	elif active_tool == "place_prop":
+		context_bar.visible = true
+		add_tag.call("PROP: " + active_prop_mdl.get_file().get_basename().to_upper())
+		add_chip.call("Yaw %d° (R)" % int(prop_yaw_deg), false, func(): prop_yaw_deg = fmod(prop_yaw_deg + 90.0, 360.0); _refresh_context_bar())
+		var sk_names := ["Neutral", "RED", "BLU"]
+		add_chip.call("Skin: " + sk_names[clampi(prop_skin, 0, 2)], prop_skin > 0, func(): prop_skin = (prop_skin + 1) % 3; _refresh_context_bar())
+		add_chip.call("Prop Boxes...", false, func(): _open_props_drawer())
+	elif active_tool == "vertex":
+		context_bar.visible = true
+		add_tag.call("VERTEX EDIT")
+		add_chip.call("Grid %du" % GRID_STEPS[grid_idx], false, func(): _step_grid(1, true); _refresh_context_bar())
+		add_chip.call("Done (1)", true, func(): _select_tool("select"))
+	else:
+		context_bar.visible = false
+
+func _build_tool_hover_card() -> void:
+	tool_hover_card = HudWidgets.HudFrame.new(HudWidgets.COL_ACC, 9.0, true)
+	tool_hover_card.set_anchors_preset(Control.PRESET_TOP_LEFT)
+	tool_hover_card.offset_left = 78
+	tool_hover_card.offset_top = 68
+	tool_hover_card.custom_minimum_size = Vector2(236, 0)
+	tool_hover_card.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	tool_hover_card.visible = false
+	hud_layer.add_child(tool_hover_card)
+
+	var vb := VBoxContainer.new()
+	vb.add_theme_constant_override("separation", 3)
+	vb.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	tool_hover_card.add_child(vb)
+
+	var hr := HBoxContainer.new()
+	hr.add_theme_constant_override("separation", 6)
+	hr.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	vb.add_child(hr)
+
+	tool_hover_title = Label.new()
+	tool_hover_title.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	tool_hover_title.add_theme_font_override("font", fonts["heading"])
+	tool_hover_title.add_theme_font_size_override("font_size", 13)
+	tool_hover_title.add_theme_color_override("font_color", HudWidgets.COL_ACC)
+	hr.add_child(tool_hover_title)
+
+	tool_hover_key = Label.new()
+	tool_hover_key.add_theme_font_override("font", fonts["mono"])
+	tool_hover_key.add_theme_font_size_override("font_size", 10)
+	tool_hover_key.add_theme_color_override("font_color", HudWidgets.COL_TX)
+	hr.add_child(tool_hover_key)
+
+	tool_hover_desc = Label.new()
+	tool_hover_desc.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	tool_hover_desc.add_theme_font_override("font", fonts["body"])
+	tool_hover_desc.add_theme_font_size_override("font_size", 11)
+	tool_hover_desc.add_theme_color_override("font_color", HudWidgets.COL_TX_MUTED)
+	vb.add_child(tool_hover_desc)
+
 func _build_left_rail() -> void:
-	# Slim Floating Hammer Quick-Tool Rail (Matches Mockups 1-3!)
-	left_rail_panel = HudWidgets.HudFrame.new(HudWidgets.COL_LIP_AMB, 9.0, true)
+	# Overhauled Left Icon Rail with crisp vector icons + hover tooltip cards!
+	left_rail_panel = HudWidgets.HudFrame.new(HudWidgets.COL_LIP_AMB, 10.0, true)
 	left_rail_panel.set_anchors_preset(Control.PRESET_TOP_LEFT)
 	left_rail_panel.offset_left = 12
 	left_rail_panel.offset_top = 68
@@ -443,31 +617,53 @@ func _rebuild_left_rail() -> void:
 	for ch in left_rail_panel.get_children():
 		ch.queue_free()
 	var vb := VBoxContainer.new()
-	vb.add_theme_constant_override("separation", 4)
+	vb.add_theme_constant_override("separation", 5)
 	left_rail_panel.add_child(vb)
 
 	var items := [
-		{"id": "select",   "t": "Sel",    "tip": "Select & Face-Pull (1)"},
-		{"id": "floor",    "t": "Box",    "tip": "Drag-to-Draw Box / Floor (2)"},
-		{"id": "wall",     "t": "Wall",   "tip": "Point-to-Point Wall Chain (3)"},
-		{"id": "clip",     "t": "Clip",   "tip": "Clip Solid (Shift+X)"},
-		{"id": "vertex",   "t": "Vert",   "tip": "Vertex Manipulation (Shift+V)"},
-		{"id": "hollow",   "t": "Hlw",    "tip": "Make Hollow Room"},
-		{"id": "carve",    "t": "Crv",    "tip": "Carve Doorway (8)"},
-		{"id": "terrain",  "t": "Clf",    "tip": "Cliff & Displacement Studio (9)"},
-		{"id": "entities", "t": "Ent",    "tip": "All 450+ FGD Entities (Shift+E)"},
-		{"id": "hide",     "t": "Hide",   "tip": "QuickHide Selected (H) / Unhide (U)"},
+		{"id": "select",   "title": "Select & Move",     "key": "1",       "desc": "Pick solids/entities, drag faces to push/pull, or inspect properties."},
+		{"id": "floor",    "title": "Draw Box / Floor",  "key": "2",       "desc": "Click and drag to draw a solid floor slab, crate, or cover block."},
+		{"id": "wall",     "title": "Wall Chain Tool",   "key": "3",       "desc": "Click corners point-to-point to chain angled walls cleanly."},
+		{"id": "clip",     "title": "Clip / Slice",      "key": "Shift+X", "desc": "Slice selected brush cleanly along a plane to create angles & ramps."},
+		{"id": "vertex",   "title": "Vertex Edit",       "key": "Shift+V", "desc": "Drag glowing corner handles (hold Shift for vertical up/down)."},
+		{"id": "hollow",   "title": "Make Hollow",       "key": "Ctrl+H",  "desc": "Turn the selected solid block into an instant hollow room (-16u)."},
+		{"id": "carve",    "title": "Carve Doorway",     "key": "8",       "desc": "Punch a clean 112u TF2 doorway straight through any wall."},
+		{"id": "terrain",  "title": "Terrain & Cliffs",  "key": "9",       "desc": "Stamp Canyon Cliffs, Hills, Mesas, sculpt terrain & paint blends."},
+		{"id": "entities", "title": "All 452 Entities",  "key": "Shift+E", "desc": "Browse and place every Valve TF2 + ABS FGD entity class."},
+		{"id": "hide",     "title": "QuickHide",         "key": "H / U",   "desc": "Hide selected brush out of your way (press U to unhide all)."},
 	]
-	for it in items:
+	for idx in range(items.size()):
+		var it: Dictionary = items[idx]
 		var tid: String = it["id"]
 		var is_act := (active_tool == tid)
 		var b := Button.new()
-		b.text = it["t"]
-		b.tooltip_text = it["tip"]
-		b.custom_minimum_size = Vector2(44, 34)
+		b.custom_minimum_size = Vector2(44, 42)
 		HudWidgets.style_tf2_button(b, fonts["heading"], 10, is_act)
+
+		var vic := HudWidgets.VectorToolIcon.new(tid, is_act, HudWidgets.COL_ACC)
+		vic.set_anchors_preset(Control.PRESET_FULL_RECT)
+		b.add_child(vic)
+
+		var row_y: float = 68.0 + float(idx) * 47.0
+		var t_title: String = it["title"]
+		var t_key: String = "[" + str(it["key"]) + "]"
+		var t_desc: String = it["desc"]
+		b.mouse_entered.connect(func():
+			if tool_hover_card != null:
+				tool_hover_title.text = t_title
+				tool_hover_key.text = t_key
+				tool_hover_desc.text = t_desc
+				tool_hover_card.offset_top = row_y
+				tool_hover_card.visible = true
+		)
+		b.mouse_exited.connect(func():
+			if tool_hover_card != null:
+				tool_hover_card.visible = false
+		)
 		b.pressed.connect(func():
 			audio.play("click")
+			if tool_hover_card != null:
+				tool_hover_card.visible = false
 			if tid == "clip": _open_clip_drawer()
 			elif tid == "hollow": _do_hollow_selected()
 			elif tid == "entities": _open_fgd_entity_drawer()
@@ -801,9 +997,9 @@ func _build_right_drawer() -> void:
 	right_drawer = HudWidgets.HudFrame.new(HudWidgets.COL_LIP_AMB, 10.0, true)
 	right_drawer.set_anchors_preset(Control.PRESET_RIGHT_WIDE)
 	right_drawer.offset_right = -12
-	right_drawer.offset_left = -376
+	right_drawer.offset_left = -444
 	right_drawer.offset_top = 66
-	right_drawer.offset_bottom = -170
+	right_drawer.offset_bottom = -132
 	right_drawer.visible = false
 	hud_layer.add_child(right_drawer)
 
@@ -898,7 +1094,7 @@ func _build_playtest_hud() -> void:
 func _build_welcome_hub() -> void:
 	welcome_panel = ColorRect.new()
 	welcome_panel.set_anchors_preset(Control.PRESET_FULL_RECT)
-	welcome_panel.color = Color(0.06, 0.05, 0.04, 0.72)
+	welcome_panel.color = Color(0.06, 0.05, 0.04, 0.78)
 	hud_layer.add_child(welcome_panel)
 
 	var center := CenterContainer.new()
@@ -906,83 +1102,148 @@ func _build_welcome_hub() -> void:
 	welcome_panel.add_child(center)
 
 	var card := HudWidgets.HudFrame.new(HudWidgets.COL_LIP_AMB, 14.0, true)
-	card.custom_minimum_size = Vector2(920, 560)
+	card.custom_minimum_size = Vector2(1040, 620)
 	center.add_child(card)
 
 	var vb := VBoxContainer.new(); vb.add_theme_constant_override("separation", 10)
 	card.add_child(vb)
 
-	var hdr := HBoxContainer.new(); vb.add_child(hdr)
+	var hdr := HBoxContainer.new(); hdr.add_theme_constant_override("separation", 8); vb.add_child(hdr)
+	var title_vb := VBoxContainer.new(); title_vb.size_flags_horizontal = Control.SIZE_EXPAND_FILL; hdr.add_child(title_vb)
 	var title := Label.new()
-	title.text = "MANN CO. MAP WORKSHOP — POOTIS BUILDER 2.0"
-	title.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	title.add_theme_font_override("font", fonts["heading"]); title.add_theme_font_size_override("font_size", 21)
+	title.text = "MANN CO. WORKSHOP HUB"
+	title.add_theme_font_override("font", fonts["heading"]); title.add_theme_font_size_override("font_size", 24)
 	title.add_theme_color_override("font_color", HudWidgets.COL_ACC)
-	hdr.add_child(title)
+	title_vb.add_child(title)
+
+	var sub := Label.new()
+	sub.text = "POOTIS BUILDER 2.0  —  All 12 TF2 Gamemodes, %d FGD Entities & %d Official Valve TF2 Maps" % [
+		core.get_fgd_class_count(), core.list_maps().size()
+	]
+	sub.add_theme_font_override("font", fonts["body"]); sub.add_theme_font_size_override("font_size", 12)
+	sub.add_theme_color_override("font_color", HudWidgets.COL_TX_MUTED)
+	title_vb.add_child(sub)
+
+	var open_vmf_h := Button.new(); open_vmf_h.text = "Open .VMF"
+	HudWidgets.style_tf2_button(open_vmf_h, fonts["body"], 12)
+	open_vmf_h.pressed.connect(func(): audio.play("click"); _open_file_dialog("vmf"))
+	hdr.add_child(open_vmf_h)
 
 	var set_hb := Button.new(); set_hb.text = "Settings"
 	HudWidgets.style_tf2_button(set_hb, fonts["body"], 12)
 	set_hb.pressed.connect(func(): audio.play("click"); settings_modal.open_modal())
 	hdr.add_child(set_hb)
 
-	var resume_b := Button.new(); resume_b.text = "Resume Editor"
+	var resume_b := Button.new(); resume_b.text = "Continue Editing"
 	HudWidgets.style_tf2_button(resume_b, fonts["heading"], 13, true)
 	resume_b.pressed.connect(func(): audio.play("click"); _show_welcome_hub(false))
 	hdr.add_child(resume_b)
 
-	var sub := Label.new()
-	sub.text = "Pick ANY of the 12 TF2 Gamemodes to build (with all %d TF2+ABS FGD entities & VPK assets), or open any of your %d official Valve TF2 maps!" % [
-		core.get_fgd_class_count(), core.list_maps().size()
-	]
-	sub.add_theme_font_override("font", fonts["body"]); sub.add_theme_font_size_override("font_size", 12)
-	sub.add_theme_color_override("font_color", HudWidgets.COL_TX_MUTED)
-	vb.add_child(sub)
-
-	var cols := HBoxContainer.new(); cols.size_flags_vertical = Control.SIZE_EXPAND_FILL; cols.add_theme_constant_override("separation", 14)
+	var cols := HBoxContainer.new(); cols.size_flags_vertical = Control.SIZE_EXPAND_FILL; cols.add_theme_constant_override("separation", 16)
 	vb.add_child(cols)
 
+	# LEFT COLUMN: VISUAL GAMEMODE STARTER CARDS
 	var left_col := VBoxContainer.new(); left_col.size_flags_horizontal = Control.SIZE_EXPAND_FILL; left_col.size_flags_stretch_ratio = 1.45
-	left_col.add_theme_constant_override("separation", 6); cols.add_child(left_col)
+	left_col.add_theme_constant_override("separation", 8); cols.add_child(left_col)
 
-	var gm_hdr := Label.new(); gm_hdr.text = "CREATE NEW TF2 MAP (ALL 12 GAMEMODES)"
+	var gm_hdr := Label.new(); gm_hdr.text = "START A NEW TF2 MAP (ALL 12 GAMEMODES)"
 	gm_hdr.add_theme_font_override("font", fonts["heading"]); gm_hdr.add_theme_font_size_override("font_size", 13)
+	gm_hdr.add_theme_color_override("font_color", HudWidgets.COL_ACC)
 	left_col.add_child(gm_hdr)
 
-	var grid := GridContainer.new(); grid.columns = 3; grid.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	var gm_scroll := ScrollContainer.new(); gm_scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL; left_col.add_child(gm_scroll)
+	var grid := GridContainer.new(); grid.columns = 2; grid.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	grid.add_theme_constant_override("h_separation", 8); grid.add_theme_constant_override("v_separation", 8)
-	left_col.add_child(grid)
+	gm_scroll.add_child(grid)
 
+	var gm_icons := {
+		"koth": "cap_point", "pl": "bomb_cart", "plr": "bomb_cart", "ctf": "intel",
+		"cp_5cp": "spawn_red", "cp_ad": "cap_point", "mvm": "upgrade_station", "arena": "spawn_blu",
+		"medieval": "barrel", "sd": "intel", "pass": "sentry", "mge_jump": "dispenser",
+	}
 	for gm in Tf2GamemodesScript.GAMEMODES:
-		var gb := Button.new()
-		gb.text = "%s\n(%s)" % [gm["name"], gm["short"]]
-		gb.custom_minimum_size = Vector2(0, 58); gb.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		HudWidgets.style_tf2_button(gb, fonts["heading"], 12)
 		var mid: String = gm["id"]
+		var gb := Button.new()
+		gb.custom_minimum_size = Vector2(0, 68); gb.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		gb.focus_mode = Control.FOCUS_NONE
+		var gsb := StyleBoxFlat.new()
+		gsb.bg_color = HudWidgets.COL_BG_CARD; gsb.border_color = HudWidgets.COL_SLOT_BD
+		gsb.set_border_width_all(1); gsb.set_corner_radius_all(9)
+		var gsbh := gsb.duplicate(); gsbh.bg_color = HudWidgets.COL_SLOT_HOV; gsbh.border_color = HudWidgets.COL_ACC
+		gb.add_theme_stylebox_override("normal", gsb); gb.add_theme_stylebox_override("hover", gsbh); gb.add_theme_stylebox_override("pressed", gsbh)
+
+		var ghb := HBoxContainer.new()
+		ghb.set_anchors_preset(Control.PRESET_FULL_RECT)
+		ghb.offset_left = 8; ghb.offset_right = -8; ghb.offset_top = 6; ghb.offset_bottom = -6
+		ghb.add_theme_constant_override("separation", 10)
+		ghb.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		gb.add_child(ghb)
+
+		var ic_box := PanelContainer.new()
+		ic_box.custom_minimum_size = Vector2(52, 52)
+		ic_box.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		var isb := StyleBoxFlat.new()
+		isb.bg_color = Color(0.10, 0.09, 0.08, 0.96); isb.border_color = HudWidgets.COL_ACC
+		isb.set_border_width_all(1); isb.set_corner_radius_all(7)
+		ic_box.add_theme_stylebox_override("panel", isb)
+		ghb.add_child(ic_box)
+
+		var itr := TextureRect.new()
+		itr.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+		itr.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+		itr.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		var ikey: String = str(gm_icons.get(mid, "crate"))
+		if icon_cache != null:
+			var itex: Texture2D = icon_cache.get_icon(ikey)
+			if itex != null:
+				itr.texture = itex
+			else:
+				var w_itr: WeakRef = weakref(itr)
+				icon_cache.icon_ready.connect(func(k: String, tx: Texture2D):
+					if k == ikey:
+						var o = w_itr.get_ref()
+						if o != null: o.texture = tx
+				)
+		ic_box.add_child(itr)
+
+		var gtvb := VBoxContainer.new()
+		gtvb.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		gtvb.alignment = BoxContainer.ALIGNMENT_CENTER
+		gtvb.add_theme_constant_override("separation", 2)
+		gtvb.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		ghb.add_child(gtvb)
+		var g1 := Label.new(); g1.text = str(gm["name"])
+		g1.add_theme_font_override("font", fonts["heading"]); g1.add_theme_font_size_override("font_size", 12)
+		g1.add_theme_color_override("font_color", HudWidgets.COL_TX); g1.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		gtvb.add_child(g1)
+		var g2 := Label.new(); g2.text = "%s  •  Starter Arena" % str(gm["short"])
+		g2.add_theme_font_override("font", fonts["body"]); g2.add_theme_font_size_override("font_size", 10)
+		g2.add_theme_color_override("font_color", HudWidgets.COL_TX_MUTED); g2.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		gtvb.add_child(g2)
+
 		gb.pressed.connect(func(): audio.play("click"); _load_gamemode(mid); _show_welcome_hub(false))
 		grid.add_child(gb)
 
 	var foot_l := HBoxContainer.new(); foot_l.add_theme_constant_override("separation", 8); left_col.add_child(foot_l)
-	var open_vmf := Button.new(); open_vmf.text = "Open Existing .VMF..."
-	HudWidgets.style_tf2_button(open_vmf, fonts["body"], 12)
-	open_vmf.pressed.connect(func(): _open_file_dialog("vmf"))
-	foot_l.add_child(open_vmf)
-	var open_imp := Button.new(); open_imp.text = "Import 3D Model (.OBJ/.GLB)..."
-	HudWidgets.style_tf2_button(open_imp, fonts["body"], 12)
-	open_imp.pressed.connect(func(): _show_welcome_hub(false); _open_file_dialog("model"))
+	var open_imp := Button.new(); open_imp.text = "Import 3D Model (.OBJ / .GLB)..."
+	HudWidgets.style_tf2_button(open_imp, fonts["body"], 11)
+	open_imp.pressed.connect(func(): audio.play("click"); _show_welcome_hub(false); _open_file_dialog("model"))
 	foot_l.add_child(open_imp)
 
-	var right_col := VBoxContainer.new(); right_col.size_flags_horizontal = Control.SIZE_EXPAND_FILL; right_col.size_flags_stretch_ratio = 1.0
-	right_col.add_theme_constant_override("separation", 6); cols.add_child(right_col)
+	# RIGHT COLUMN: OFFICIAL TF2 MAPS GALLERY WITH GAMEMODE TAGS
+	var right_col := VBoxContainer.new(); right_col.size_flags_horizontal = Control.SIZE_EXPAND_FILL; right_col.size_flags_stretch_ratio = 1.1
+	right_col.add_theme_constant_override("separation", 8); cols.add_child(right_col)
 
-	var bsp_hdr := Label.new(); bsp_hdr.text = "OFFICIAL TF2 MAPS (%d INSTALLED)" % core.list_maps().size()
+	var bsp_hdr := Label.new(); bsp_hdr.text = "EXPLORE OFFICIAL TF2 MAPS (%d INSTALLED)" % core.list_maps().size()
 	bsp_hdr.add_theme_font_override("font", fonts["heading"]); bsp_hdr.add_theme_font_size_override("font_size", 13)
+	bsp_hdr.add_theme_color_override("font_color", HudWidgets.COL_ACC)
 	right_col.add_child(bsp_hdr)
 
-	var search := LineEdit.new(); search.placeholder_text = "Filter maps (upward, turbine, degroot, ambush...)"
+	var search := LineEdit.new(); search.placeholder_text = "Filter 150+ official TF2 maps (upward, turbine, degroot...)"
 	right_col.add_child(search)
 
 	var map_scroll := ScrollContainer.new(); map_scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL; right_col.add_child(map_scroll)
-	var map_list := VBoxContainer.new(); map_list.size_flags_horizontal = Control.SIZE_EXPAND_FILL; map_list.add_theme_constant_override("separation", 4)
+	var map_list := VBoxContainer.new(); map_list.size_flags_horizontal = Control.SIZE_EXPAND_FILL; map_list.add_theme_constant_override("separation", 5)
 	map_scroll.add_child(map_list)
 
 	var all_maps: PackedStringArray = core.list_maps()
@@ -1001,15 +1262,48 @@ func _build_welcome_hub() -> void:
 				if not ordered.has(m): ordered.append(m)
 		for m in ordered:
 			if shown >= 45: break
-			var mb := Button.new(); mb.text = m; mb.alignment = HORIZONTAL_ALIGNMENT_LEFT; mb.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-			HudWidgets.style_tf2_button(mb, fonts["body"], 11)
 			var mcopy := m
+			var prefix := m.get_slice("_", 0).to_upper()
+			var mb := Button.new()
+			mb.custom_minimum_size = Vector2(0, 38)
+			mb.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+			HudWidgets.style_tf2_button(mb, fonts["body"], 11)
+			var mhb := HBoxContainer.new()
+			mhb.set_anchors_preset(Control.PRESET_FULL_RECT)
+			mhb.offset_left = 10; mhb.offset_right = -10
+			mhb.alignment = BoxContainer.ALIGNMENT_CENTER
+			mhb.mouse_filter = Control.MOUSE_FILTER_IGNORE
+			mb.add_child(mhb)
+			var ml := Label.new(); ml.text = m.get_basename()
+			ml.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+			ml.add_theme_font_override("font", fonts["body"]); ml.add_theme_font_size_override("font_size", 12)
+			ml.add_theme_color_override("font_color", HudWidgets.COL_TX); ml.mouse_filter = Control.MOUSE_FILTER_IGNORE
+			mhb.add_child(ml)
+			var mtag := Label.new(); mtag.text = " " + prefix + " "
+			mtag.add_theme_font_override("font", fonts["heading"]); mtag.add_theme_font_size_override("font_size", 10)
+			mtag.add_theme_color_override("font_color", HudWidgets.COL_CYAN if prefix in ["PL", "PLR", "CTF"] else HudWidgets.COL_ACC)
+			mtag.mouse_filter = Control.MOUSE_FILTER_IGNORE
+			mhb.add_child(mtag)
 			mb.pressed.connect(func(): audio.play("click"); _load_official_bsp(mcopy); _show_welcome_hub(false))
 			map_list.add_child(mb)
 			shown += 1
 
 	populate_maps.call("")
 	search.text_changed.connect(populate_maps)
+
+	# FOOTER: VPK & VAC-Safe Status Pill
+	var foot := HBoxContainer.new(); foot.add_theme_constant_override("separation", 10); vb.add_child(foot)
+	var rec := Label.new()
+	rec.text = "Tip: Press F5 anytime to playtest with Scout / Soldier / Heavy / Pyro / Demo!"
+	rec.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	rec.add_theme_font_override("font", fonts["body"]); rec.add_theme_font_size_override("font_size", 11)
+	rec.add_theme_color_override("font_color", HudWidgets.COL_TX_MUTED)
+	foot.add_child(rec)
+	var vpk_badge := Label.new()
+	vpk_badge.text = "  TF2 VPKs Mounted  •  16,697 Models  •  VAC-Safe  "
+	vpk_badge.add_theme_font_override("font", fonts["heading"]); vpk_badge.add_theme_font_size_override("font_size", 11)
+	vpk_badge.add_theme_color_override("font_color", HudWidgets.COL_GREEN)
+	foot.add_child(vpk_badge)
 
 # ==============================================================================
 # DRAG-AND-DROP FROM REAL 3D TF2 ASSET TRAY INTO 3D VIEWPORT!
@@ -1050,7 +1344,11 @@ func on_viewport_drop(screen_pos: Vector2, data: Dictionary) -> void:
 		_toast("Dropped %s cleanly onto map at (%du, %du, %du)!" % [pid, int(pos.x * UPM), int(-pos.z * UPM), int(pos.y * UPM)])
 	elif kind == "prop":
 		var mdl: String = str(data.get("mdl", active_prop_mdl))
-		var eid: int = doc.add_point_entity("prop_static", pos, {"model": mdl, "angles": "0 0 0", "solid": "6"})
+		var yaw_val: float = randf_range(0.0, 360.0) if prop_random_yaw else prop_yaw_deg
+		var kv := {"model": mdl, "angles": "0 %d 0" % int(round(yaw_val)), "solid": "6", "skin": str(prop_skin)}
+		if absf(prop_scale - 1.0) > 0.01:
+			kv["modelscale"] = "%.2f" % prop_scale
+		var eid: int = doc.add_point_entity("prop_static", pos, kv)
 		doc.record_undo("Drop Prop")
 		ent_vis.sync_all()
 		if eid >= 0: _select_entity(eid)
@@ -1115,6 +1413,31 @@ func _sync_mode_visibility() -> void:
 	if not is_edit:
 		split_2d_panel.visible = false
 		right_drawer.visible = false
+		if context_bar != null: context_bar.visible = false
+		if tool_hover_card != null: tool_hover_card.visible = false
+	_update_3d_gizmo()
+
+func _update_3d_gizmo() -> void:
+	if _gizmo_root == null:
+		return
+	if viewing_bsp or stage == Stage.PLAYTEST:
+		_gizmo_root.visible = false
+		return
+	if selected_solid >= 0:
+		var info: Dictionary = doc.get_solid_info(selected_solid)
+		var bmin: Vector3 = info.get("bounds_min", Vector3.ZERO)
+		var bmax: Vector3 = info.get("bounds_max", Vector3.ZERO)
+		_gizmo_root.position = (bmin + bmax) * 0.5
+		_gizmo_root.visible = true
+	elif selected_entity >= 0:
+		var ents: Array = doc.get_entities()
+		if selected_entity < ents.size():
+			_gizmo_root.position = (ents[selected_entity]["pos"] as Vector3) + Vector3(0, 0.8, 0)
+			_gizmo_root.visible = true
+		else:
+			_gizmo_root.visible = false
+	else:
+		_gizmo_root.visible = false
 
 func _show_welcome_hub(show: bool) -> void:
 	welcome_panel.visible = show
@@ -1127,6 +1450,7 @@ func _clear_selection() -> void:
 	ent_vis.set_selection(-1)
 	_refresh_selection_bar()
 	_refresh_2d_views()
+	_update_3d_gizmo()
 
 func _select_solid(sidx: int, fidx: int = -1) -> void:
 	selected_solid = sidx; selected_face = fidx; selected_entity = -1
@@ -1134,12 +1458,14 @@ func _select_solid(sidx: int, fidx: int = -1) -> void:
 	map_sync.set_selection(sidx, fidx)
 	_refresh_selection_bar()
 	_refresh_2d_views()
+	_update_3d_gizmo()
 
 func _select_entity(eidx: int) -> void:
 	selected_entity = eidx; selected_solid = -1; selected_face = -1
 	map_sync.set_selection(-1, -1)
 	ent_vis.set_selection(eidx)
 	_refresh_selection_bar()
+	_update_3d_gizmo()
 
 func _step_grid(dir: int, wrap: bool = false) -> void:
 	grid_idx = (grid_idx + dir) % GRID_STEPS.size() if wrap else clampi(grid_idx + dir, 0, GRID_STEPS.size() - 1)
@@ -1174,6 +1500,7 @@ func set_stage(new_stage: int) -> void:
 	_sync_mode_visibility()
 	_rebuild_left_rail()
 	_rebuild_bottom_dock()
+	_refresh_context_bar()
 	_refresh_selection_bar()
 	if stage != Stage.STYLE or viewing_bsp:
 		right_drawer.visible = false
@@ -1202,6 +1529,7 @@ func _select_tool(sid: String) -> void:
 	else: right_drawer.visible = false
 	_rebuild_left_rail()
 	_rebuild_bottom_dock()
+	_refresh_context_bar()
 
 func _clear_drawer(title: String) -> void:
 	_prop_preview_mesh = null
@@ -2004,7 +2332,11 @@ func _place_tool_at(pos: Vector3) -> void:
 		if eid >= 0: _select_entity(eid)
 		audio.play("place"); return
 	if active_tool == "place_prop":
-		var eid: int = doc.add_point_entity("prop_static", pos, {"model": active_prop_mdl, "angles": "0 0 0", "solid": "6"})
+		var yaw_val: float = randf_range(0.0, 360.0) if prop_random_yaw else prop_yaw_deg
+		var kv := {"model": active_prop_mdl, "angles": "0 %d 0" % int(round(yaw_val)), "solid": "6", "skin": str(prop_skin)}
+		if absf(prop_scale - 1.0) > 0.01:
+			kv["modelscale"] = "%.2f" % prop_scale
+		var eid: int = doc.add_point_entity("prop_static", pos, kv)
 		doc.record_undo("Place Prop"); ent_vis.sync_all()
 		if eid >= 0: _select_entity(eid)
 		audio.play("place"); return
@@ -2295,6 +2627,29 @@ func _setup_auto_shot(idx: int) -> void:
 					cap_pos = cp_node.multimesh.get_instance_transform(0).origin + Vector3(0, 1.5, 0)
 			cam_pos = cap_pos + Vector3(9.0, 6.0, 9.0)
 			editor_cam.look_at_from_position(cam_pos, cap_pos, Vector3.UP)
+			cam_yaw = editor_cam.rotation.y; cam_pitch = editor_cam.rotation.x
+		"v3_hub":
+			_load_gamemode("koth", "badlands", false); set_stage(Stage.BUILD)
+			_show_welcome_hub(true)
+		"v3_build_rail":
+			_show_welcome_hub(false); _load_gamemode("koth", "badlands", false); set_stage(Stage.BUILD)
+			_select_tool("wall"); _select_solid(2, 0); right_drawer.visible = false
+			cam_pos = Vector3(18, 13, 21); cam_yaw = 0.68; cam_pitch = -0.44; _apply_editor_cam()
+		"v3_prop_boxes":
+			_show_welcome_hub(false); _load_gamemode("koth", "alpine", false); set_stage(Stage.STYLE)
+			_prop_active_cat = ""; _prop_favorites_only = false; _prop_search_text = ""
+			_open_props_drawer()
+			cam_pos = Vector3(20, 14, 24); cam_yaw = 0.65; cam_pitch = -0.42; _apply_editor_cam()
+		"v3_prop_winter":
+			_show_welcome_hub(false); _load_gamemode("koth", "alpine", false); set_stage(Stage.STYLE)
+			_prop_active_cat = "winter"; _prop_favorites_only = false; _prop_search_text = ""
+			_open_props_drawer()
+			cam_pos = Vector3(20, 14, 24); cam_yaw = 0.65; cam_pitch = -0.42; _apply_editor_cam()
+		"v3_terrain":
+			_show_welcome_hub(false); _load_gamemode("koth", "badlands", false); set_stage(Stage.BUILD)
+			doc.make_cliff_wall(Vector3(-12, 0, -14), Vector3(12, 0, -14), 10.0, 3.0, 3, "NATURE/BLENDROCKWALLDIRT001", 1.3)
+			map_sync.sync_all(); _select_tool("terrain")
+			cam_pos = Vector3(13.5, 7.5, 3.0); editor_cam.look_at_from_position(cam_pos, Vector3(-1.5, 3.8, -13.0), Vector3.UP)
 			cam_yaw = editor_cam.rotation.y; cam_pitch = editor_cam.rotation.x
 	if not viewing_bsp and not settings_modal.visible:
 		_update_hover(get_viewport().get_visible_rect().size * Vector2(0.42, 0.52))

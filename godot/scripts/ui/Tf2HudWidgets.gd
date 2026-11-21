@@ -549,3 +549,173 @@ static func create_global_theme(fonts: Dictionary) -> Theme:
 	th.set_color("font_color", "CheckButton", COL_TX)
 	th.set_font_size("font_size", "CheckButton", 12)
 	return th
+
+## Crisp vector-drawn icons for the Left Tool Rail, Terrain Sculpt Brushes, and Terrain Presets!
+class VectorToolIcon extends Control:
+	var icon_id: String = "select"
+	var active: bool = false
+	var tint: Color = COL_ACC
+
+	func _init(p_id: String, p_active: bool = false, p_tint: Color = COL_ACC) -> void:
+		icon_id = p_id
+		active = p_active
+		tint = p_tint
+		mouse_filter = Control.MOUSE_FILTER_IGNORE
+
+	func _draw() -> void:
+		var c := size * 0.5
+		var s := minf(size.x, size.y) * 0.36
+		var col := Color(0.10, 0.07, 0.04, 1.0) if active else tint
+		var mut := Color(0.24, 0.16, 0.08, 0.7) if active else COL_TX_MUTED
+		match icon_id:
+			"select":
+				var pts := PackedVector2Array([
+					c + Vector2(-s * 0.65, -s * 0.90),
+					c + Vector2(-s * 0.65, s * 0.80),
+					c + Vector2(-s * 0.10, s * 0.35),
+					c + Vector2(s * 0.35, s * 0.95),
+					c + Vector2(s * 0.62, s * 0.78),
+					c + Vector2(s * 0.18, s * 0.18),
+					c + Vector2(s * 0.80, s * 0.18),
+				])
+				draw_colored_polygon(pts, col)
+			"floor": # 3D Box
+				draw_rect(Rect2(c + Vector2(-s * 0.85, -s * 0.45), Vector2(s * 1.35, s * 1.35)), col, false, 2.0)
+				draw_polyline(PackedVector2Array([
+					c + Vector2(-s * 0.85, -s * 0.45),
+					c + Vector2(-s * 0.30, -s * 0.95),
+					c + Vector2(s * 1.00, -s * 0.95),
+					c + Vector2(s * 0.50, -s * 0.45),
+				]), col, 2.0)
+				draw_polyline(PackedVector2Array([
+					c + Vector2(s * 1.00, -s * 0.95),
+					c + Vector2(s * 1.00, s * 0.38),
+					c + Vector2(s * 0.50, s * 0.90),
+				]), col, 2.0)
+			"wall": # Brick Wall
+				draw_rect(Rect2(c + Vector2(-s, -s * 0.72), Vector2(s * 2.0, s * 1.44)), col, false, 2.0)
+				draw_line(c + Vector2(-s, 0), c + Vector2(s, 0), col, 2.0)
+				draw_line(c + Vector2(0, -s * 0.72), c + Vector2(0, 0), col, 2.0)
+				draw_line(c + Vector2(-s * 0.45, 0), c + Vector2(-s * 0.45, s * 0.72), col, 2.0)
+				draw_line(c + Vector2(s * 0.45, 0), c + Vector2(s * 0.45, s * 0.72), col, 2.0)
+			"clip": # Diagonal Slice
+				draw_rect(Rect2(c + Vector2(-s * 0.75, -s * 0.75), Vector2(s * 1.5, s * 1.5)), mut, false, 1.5)
+				draw_line(c + Vector2(-s * 0.95, s * 0.85), c + Vector2(s * 0.95, -s * 0.85), col, 2.6)
+				draw_circle(c + Vector2(-s * 0.95, s * 0.85), 2.5, col)
+				draw_circle(c + Vector2(s * 0.95, -s * 0.85), 2.5, col)
+			"vertex": # Triangle with Vertex Handles
+				var a := c + Vector2(-s * 0.85, s * 0.72)
+				var b := c + Vector2(0, -s * 0.85)
+				var d := c + Vector2(s * 0.88, s * 0.55)
+				draw_polyline(PackedVector2Array([a, b, d, a]), col, 1.8)
+				for pt in [a, b, d]:
+					draw_circle(pt, 3.3, col)
+			"hollow": # Nested Hollow Room
+				draw_rect(Rect2(c + Vector2(-s * 0.9, -s * 0.9), Vector2(s * 1.8, s * 1.8)), col, false, 2.0)
+				draw_rect(Rect2(c + Vector2(-s * 0.42, -s * 0.42), Vector2(s * 0.84, s * 0.84)), col, false, 1.8)
+			"carve": # Doorway Arch
+				draw_arc(c + Vector2(0, -s * 0.1), s * 0.75, PI, TAU, 16, col, 2.4)
+				draw_line(c + Vector2(-s * 0.75, -s * 0.1), c + Vector2(-s * 0.75, s * 0.85), col, 2.4)
+				draw_line(c + Vector2(s * 0.75, -s * 0.1), c + Vector2(s * 0.75, s * 0.85), col, 2.4)
+				draw_line(c + Vector2(-s * 1.0, s * 0.85), c + Vector2(s * 1.0, s * 0.85), mut, 1.5)
+			"terrain": # Mountain Cliff Peaks
+				draw_polyline(PackedVector2Array([
+					c + Vector2(-s, s * 0.75),
+					c + Vector2(-s * 0.3, -s * 0.75),
+					c + Vector2(s * 0.15, s * 0.08),
+					c + Vector2(s * 0.55, -s * 0.42),
+					c + Vector2(s, s * 0.75),
+					c + Vector2(-s, s * 0.75),
+				]), col, 2.0)
+			"entities": # Map Pin
+				draw_arc(c + Vector2(0, -s * 0.28), s * 0.55, 0, TAU, 18, col, 2.0)
+				draw_colored_polygon(PackedVector2Array([
+					c + Vector2(-s * 0.42, s * 0.08),
+					c + Vector2(s * 0.42, s * 0.08),
+					c + Vector2(0, s * 0.92),
+				]), col)
+			"hide": # Visibility Eye
+				draw_arc(c + Vector2(0, s * 0.45), s * 1.05, deg_to_rad(220), deg_to_rad(320), 16, col, 2.0)
+				draw_arc(c + Vector2(0, -s * 0.45), s * 1.05, deg_to_rad(40), deg_to_rad(140), 16, col, 2.0)
+				draw_circle(c, s * 0.34, col)
+			"raise":
+				draw_line(c + Vector2(0, s * 0.85), c + Vector2(0, -s * 0.75), col, 2.4)
+				draw_polyline(PackedVector2Array([c + Vector2(-s * 0.55, -s * 0.2), c + Vector2(0, -s * 0.8), c + Vector2(s * 0.55, -s * 0.2)]), col, 2.4)
+			"lower":
+				draw_line(c + Vector2(0, -s * 0.85), c + Vector2(0, s * 0.75), col, 2.4)
+				draw_polyline(PackedVector2Array([c + Vector2(-s * 0.55, s * 0.2), c + Vector2(0, s * 0.8), c + Vector2(s * 0.55, s * 0.2)]), col, 2.4)
+			"smooth":
+				draw_arc(c + Vector2(-s * 0.45, 0), s * 0.45, PI, TAU, 12, col, 2.2)
+				draw_arc(c + Vector2(s * 0.45, 0), s * 0.45, 0, PI, 12, col, 2.2)
+			"flatten":
+				draw_line(c + Vector2(-s * 0.9, s * 0.3), c + Vector2(s * 0.9, s * 0.3), col, 2.6)
+				draw_line(c + Vector2(0, -s * 0.75), c + Vector2(0, s * 0.1), col, 2.0)
+			"noise":
+				draw_polyline(PackedVector2Array([
+					c + Vector2(-s, s * 0.4), c + Vector2(-s * 0.5, -s * 0.55),
+					c + Vector2(0, s * 0.35), c + Vector2(s * 0.5, -s * 0.7), c + Vector2(s, s * 0.4),
+				]), col, 2.2)
+			"paint":
+				draw_circle(c + Vector2(-s * 0.2, s * 0.25), s * 0.42, col)
+				draw_line(c + Vector2(s * 0.1, -s * 0.05), c + Vector2(s * 0.85, -s * 0.8), col, 2.8)
+			"preset_cliff":
+				draw_colored_polygon(PackedVector2Array([
+					Vector2(4, size.y - 4), Vector2(4, size.y * 0.22),
+					Vector2(size.x * 0.44, size.y * 0.22), Vector2(size.x * 0.62, size.y * 0.68),
+					Vector2(size.x - 4, size.y * 0.72), Vector2(size.x - 4, size.y - 4),
+				]), Color(0.68, 0.38, 0.24, 0.88))
+				draw_polyline(PackedVector2Array([
+					Vector2(4, size.y * 0.22), Vector2(size.x * 0.44, size.y * 0.22),
+					Vector2(size.x * 0.62, size.y * 0.68), Vector2(size.x - 4, size.y * 0.72),
+				]), COL_ACC, 2.0)
+			"preset_hill":
+				var pts := PackedVector2Array([Vector2(4, size.y - 4)])
+				for i in range(13):
+					var t := float(i) / 12.0
+					var y := size.y * (0.78 - 0.52 * sin(t * PI))
+					pts.append(Vector2(lerpf(4.0, size.x - 4.0, t), y))
+				pts.append(Vector2(size.x - 4, size.y - 4))
+				draw_colored_polygon(pts, Color(0.32, 0.58, 0.32, 0.85))
+			"preset_mesa":
+				draw_colored_polygon(PackedVector2Array([
+					Vector2(4, size.y - 4), Vector2(size.x * 0.22, size.y * 0.28),
+					Vector2(size.x * 0.78, size.y * 0.28), Vector2(size.x - 4, size.y - 4),
+				]), Color(0.76, 0.48, 0.26, 0.88))
+				draw_line(Vector2(size.x * 0.22, size.y * 0.28), Vector2(size.x * 0.78, size.y * 0.28), COL_ACC, 2.2)
+			"preset_crater":
+				draw_colored_polygon(PackedVector2Array([
+					Vector2(4, size.y - 4), Vector2(4, size.y * 0.36),
+					Vector2(size.x * 0.24, size.y * 0.32), Vector2(size.x * 0.5, size.y * 0.78),
+					Vector2(size.x * 0.76, size.y * 0.32), Vector2(size.x - 4, size.y * 0.36),
+					Vector2(size.x - 4, size.y - 4),
+				]), Color(0.46, 0.42, 0.38, 0.88))
+
+## Draggable 3D TF2 Prop Card (click to stamp OR drag directly into the 3D viewport!)
+class DraggablePropCard extends Button:
+	var drag_payload: Dictionary = {}
+	var drag_icon: Texture2D = null
+
+	func _get_drag_data(_at_position: Vector2) -> Variant:
+		if drag_payload.is_empty():
+			return null
+		var pv := PanelContainer.new()
+		var sb := StyleBoxFlat.new()
+		sb.bg_color = Color(0.14, 0.12, 0.10, 0.92)
+		sb.border_color = COL_ACC
+		sb.set_border_width_all(2)
+		sb.set_corner_radius_all(8)
+		sb.set_content_margin_all(6)
+		pv.add_theme_stylebox_override("panel", sb)
+		if drag_icon != null:
+			var tr := TextureRect.new()
+			tr.texture = drag_icon
+			tr.custom_minimum_size = Vector2(68, 68)
+			tr.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+			tr.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+			pv.add_child(tr)
+		else:
+			var lb := Label.new()
+			lb.text = str(drag_payload.get("name", "Prop"))
+			pv.add_child(lb)
+		set_drag_preview(pv)
+		return drag_payload
