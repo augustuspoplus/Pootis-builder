@@ -84,27 +84,41 @@ const PROP_CATEGORIES := {
 	],
 }
 
-# Organized Visual Category Boxes for ALL 16,697+ TF2 VPK Props!
+# Iconic Valve TF2 Map Props for Build Mode (familiar official-map landmarks players recognize instantly!)
+const VALVE_MAP_BUILD_PROPS := [
+	{"name": "Turbine Gen",     "sub": "ctf_turbine",  "mdl": "models/props_mining/generator01.mdl"},
+	{"name": "BLU Container",   "sub": "ctf_turbine",  "mdl": "models/props_vehicles/train_flatcar_container.mdl"},
+	{"name": "2Fort Crate",     "sub": "ctf_2fort",    "mdl": "models/props_2fort/miningcrate001.mdl"},
+	{"name": "Badlands Rock",   "sub": "cp_badlands",  "mdl": "models/props_nature/rock_worn001.mdl"},
+	{"name": "Spytech Bank",    "sub": "cp_granary",   "mdl": "models/props_spytech/computer_wall02.mdl"},
+	{"name": "Snowy Pine",      "sub": "koth_viaduct", "mdl": "models/props_foliage/tree_pine_huge_snow.mdl"},
+	{"name": "Ceiling Lamp",    "sub": "ctf_turbine",  "mdl": "models/props_mining/industrial_ceiling_lamp02.mdl"},
+	{"name": "2Fort Oil Drum",  "sub": "ctf_2fort",    "mdl": "models/props_2fort/oildrum.mdl"},
+]
+
+# Organized Visual Category Boxes for ALL 16,697+ TF2 VPK Props (strictly filtered so zero off-theme props leak in!)
 const PROP_FOLDER_BOXES := [
 	{
 		"id": "winter",
 		"name": "Winter & Snow",
-		"subtitle": "Snowy pines, ice, Smissmas",
+		"subtitle": "Snowy pines, roofs, icicles, Smissmas",
 		"icon": "pine",
 		"color": Color(0.45, 0.78, 0.96, 1.0),
-		"keywords": ["_snow", "snow", "winter", "icicle", "frost", "coldfront", "barnblitz", "smissmas", "xmas", "christmas", "snowman"],
+		"strict_file_match": true,
+		"keywords": ["snow", "icicle", "winter", "frost", "xmas", "smissmas", "christmas", "snowman"],
 		"curated": [
-			{"name": "Snowy Pine Huge",   "mdl": "models/props_foliage/tree_pine_huge_snow.mdl"},
-			{"name": "Winter Wood Fence", "mdl": "models/props_coalmines/wood_fence_short_128.mdl"},
+			{"name": "Snowy Pine Huge",  "mdl": "models/props_foliage/tree_pine_huge_snow.mdl"},
 		],
 	},
 	{
 		"id": "trees",
 		"name": "Trees & Foliage",
-		"subtitle": "Pines, shrubs, cacti, logs",
+		"subtitle": "Green pines, shrubs, cacti, logs",
 		"icon": "pine",
 		"color": Color(0.36, 0.76, 0.44, 1.0),
-		"keywords": ["tree", "pine", "foliage", "bush", "shrub", "cactus", "plant", "grass", "stump", "log", "ivy", "vine", "fern", "palm"],
+		"strict_file_match": true,
+		"exclude": ["snow", "winter", "xmas", "smissmas"],
+		"keywords": ["tree_", "pine", "bush", "shrub", "cactus", "fern", "palm", "stump", "ivy"],
 		"curated": [
 			{"name": "Alpine Pine",       "mdl": "models/props_foliage/tree_pine01.mdl"},
 			{"name": "Tall Pine Tree",    "mdl": "models/props_foliage/tree_pine_huge.mdl"},
@@ -266,19 +280,33 @@ static func get_props_for_box(core: Object, cat_id: String, search_filter: Strin
 	# 2) Live VPK search across ALL 16,697+ mounted TF2 models matching this category's keywords!
 	if core != null and core.has_method("search_models"):
 		var kws: Array = box.get("keywords", [])
+		var strict_fn: bool = bool(box.get("strict_file_match", false))
+		var excludes: Array = box.get("exclude", [])
 		for kw in kws:
 			if results.size() >= limit:
 				break
-			var found: PackedStringArray = core.search_models(str(kw), 24)
+			var kws_str := str(kw)
+			var found: PackedStringArray = core.search_models(kws_str, 28)
 			for m in found:
 				if results.size() >= limit:
 					break
 				var mp := str(m)
+				var mpl := mp.to_lower()
+				var fn := mpl.get_file()
 				if seen.has(mp):
 					continue
-				if mp.find("/player/") != -1 or mp.find("/weapons/") != -1 or mp.find("/bots/") != -1 or mp.find("skybox") != -1 or mp.find("_animations") != -1 or mp.find("_ss.") != -1 or mp.find("police") != -1 or mp.find("gib") != -1:
+				if mpl.find("/player/") != -1 or mpl.find("/weapons/") != -1 or mpl.find("/bots/") != -1 or mpl.find("skybox") != -1 or mpl.find("_animations") != -1 or mpl.find("_ss.") != -1 or mpl.find("police") != -1 or mpl.find("gib") != -1:
 					continue
-				if not fl.is_empty() and mp.to_lower().find(fl) == -1:
+				# Strict filename check prevents plain wooden fences from leaking into Winter & Snow!
+				if strict_fn and fn.find(kws_str.to_lower()) == -1:
+					continue
+				var blocked := false
+				for ex in excludes:
+					if mpl.find(str(ex).to_lower()) != -1:
+						blocked = true; break
+				if blocked:
+					continue
+				if not fl.is_empty() and mpl.find(fl) == -1:
 					continue
 				seen[mp] = true
 				var pretty := mp.get_file().get_basename().replace("_", " ").capitalize()
@@ -440,6 +468,89 @@ static func get_entity_box(cat_id: String) -> Dictionary:
 		if str(box["id"]) == cat_id:
 			return box
 	return ENTITY_FOLDER_BOXES[0]
+
+## Gamemode-Aware Highlighted Essentials & Off-Mode Hiding (e.g., MvM highlights Robots/Tank/Hatch & hides Payload!)
+static func get_gamemode_essentials(mode_id: String) -> Dictionary:
+	var m := mode_id.to_lower()
+	if m == "mvm":
+		return {
+			"title": "MvM Essentials",
+			"color": Color(0.74, 0.42, 0.96, 1.0),
+			"items": [
+				{"name": "Robot Spawn",     "cls": "info_player_teamspawn", "desc": "BLU Robot wave spawn (spawnbot)",       "icon_type": "mdl", "icon": "bot_spawn",       "preset": "bot_spawn"},
+				{"name": "MvM Bomb Hatch",  "cls": "func_capturezone",      "desc": "Base bomb hatch robots try to blow up", "icon_type": "mdl", "icon": "mvm_hatch",       "preset": "mvm_hatch"},
+				{"name": "Upgrade Station", "cls": "func_upgradestation",   "desc": "RED player weapon & stats upgrade desk","icon_type": "mdl", "icon": "upgrade_station", "preset": "upgrade_station"},
+				{"name": "Tank Track Node", "cls": "path_track",            "desc": "Waypoint path for MvM Boss Tanks",      "icon_type": "mdl", "icon": "path_node",       "preset": "path_node"},
+				{"name": "Robot Bomb",      "cls": "item_teamflag",         "desc": "Carryable MvM robot bomb",              "icon_type": "mdl", "icon": "intel",           "preset": "intel"},
+				{"name": "RED Defender",    "cls": "info_player_teamspawn", "desc": "RED human defender spawn point",        "icon_type": "mdl", "icon": "spawn_red",       "preset": "spawn_red"},
+				{"name": "Resupply Locker", "cls": "func_regenerate",       "desc": "Spawn health & ammo locker",            "icon_type": "mdl", "icon": "resupply",        "preset": "resupply"},
+				{"name": "MvM Bot Path",    "cls": "func_nav_prefer",       "desc": "Guides robot waves along preferred path","icon_type": "vec", "icon": "ai",             "preset": ""},
+			],
+		}
+	elif m in ["pl", "plr"]:
+		return {
+			"title": "Payload Essentials",
+			"color": Color(0.92, 0.58, 0.24, 1.0),
+			"items": [
+				{"name": "Payload Cart",    "cls": "mapobj_cart_dispenser", "desc": "BLU bomb cart with healing dispenser",  "icon_type": "mdl", "icon": "bomb_cart", "preset": "bomb_cart"},
+				{"name": "Track Node",      "cls": "path_track",            "desc": "Payload track waypoint spline node",    "icon_type": "mdl", "icon": "path_node", "preset": "path_node"},
+				{"name": "Checkpoint",      "cls": "team_control_point",    "desc": "Payload checkpoint A / B / C / Final",  "icon_type": "mdl", "icon": "cap_point", "preset": "cap_point"},
+				{"name": "BLU Attacker",    "cls": "info_player_teamspawn", "desc": "BLU payload pusher spawn point",        "icon_type": "mdl", "icon": "spawn_blu", "preset": "spawn_blu"},
+				{"name": "RED Defender",    "cls": "info_player_teamspawn", "desc": "RED payload defender spawn point",      "icon_type": "mdl", "icon": "spawn_red", "preset": "spawn_red"},
+				{"name": "Setup Gate Door", "cls": "func_door",             "desc": "Sliding setup gate / spawn door",       "icon_type": "vec", "icon": "door",      "preset": ""},
+				{"name": "Resupply Locker", "cls": "func_regenerate",       "desc": "Spawn health & ammo locker",            "icon_type": "mdl", "icon": "resupply",  "preset": "resupply"},
+				{"name": "Round Timer",     "cls": "team_round_timer",      "desc": "Setup + match payload countdown clock", "icon_type": "vec", "icon": "timer",     "preset": ""},
+			],
+		}
+	elif m in ["ctf", "sd"]:
+		return {
+			"title": "CTF Essentials" if m == "ctf" else "SD Essentials",
+			"color": Color(0.28, 0.72, 0.96, 1.0),
+			"items": [
+				{"name": "Intel Briefcase", "cls": "item_teamflag",         "desc": "Capturable team Intelligence briefcase","icon_type": "mdl", "icon": "intel",     "preset": "intel"},
+				{"name": "Capture Zone",    "cls": "func_capturezone",      "desc": "Bring enemy Intel here to score",       "icon_type": "vec", "icon": "trigger",   "preset": ""},
+				{"name": "RED Spawn",       "cls": "info_player_teamspawn", "desc": "RED base spawn point",                  "icon_type": "mdl", "icon": "spawn_red", "preset": "spawn_red"},
+				{"name": "BLU Spawn",       "cls": "info_player_teamspawn", "desc": "BLU base spawn point",                  "icon_type": "mdl", "icon": "spawn_blu", "preset": "spawn_blu"},
+				{"name": "Resupply Locker", "cls": "func_regenerate",       "desc": "Spawn health & ammo locker",            "icon_type": "mdl", "icon": "resupply",  "preset": "resupply"},
+				{"name": "Spawn Door",      "cls": "func_door",             "desc": "Auto-sliding team spawn door",          "icon_type": "vec", "icon": "door",      "preset": ""},
+				{"name": "Medium Health",   "cls": "item_healthkit_medium", "desc": "Restores 50% max HP",                   "icon_type": "mdl", "icon": "health_med","preset": "health_med"},
+				{"name": "Medium Ammo",     "cls": "item_ammopack_medium",  "desc": "Restores 50% ammo + 100 metal",         "icon_type": "mdl", "icon": "ammo_med",  "preset": "ammo_med"},
+			],
+		}
+	else:
+		# KOTH / 5CP / A/D / Medieval / Arena / PASS / MGE
+		return {
+			"title": "%s Essentials" % m.to_upper().replace("CP_", ""),
+			"color": Color(0.92, 0.62, 0.24, 1.0),
+			"items": [
+				{"name": "Control Point",   "cls": "team_control_point",    "desc": "Capturable TF2 control point + base",   "icon_type": "mdl", "icon": "cap_point", "preset": "cap_point"},
+				{"name": "Capture Zone",    "cls": "trigger_capture_area",  "desc": "Stand inside to capture control point", "icon_type": "vec", "icon": "trigger",   "preset": ""},
+				{"name": "RED Spawn",       "cls": "info_player_teamspawn", "desc": "RED team spawn point",                  "icon_type": "mdl", "icon": "spawn_red", "preset": "spawn_red"},
+				{"name": "BLU Spawn",       "cls": "info_player_teamspawn", "desc": "BLU team spawn point",                  "icon_type": "mdl", "icon": "spawn_blu", "preset": "spawn_blu"},
+				{"name": "Resupply Locker", "cls": "func_regenerate",       "desc": "Spawn health & ammo locker",            "icon_type": "mdl", "icon": "resupply",  "preset": "resupply"},
+				{"name": "Spawn Door",      "cls": "func_door",             "desc": "Auto-sliding team spawn door",          "icon_type": "vec", "icon": "door",      "preset": ""},
+				{"name": "KOTH Timer",      "cls": "tf_logic_koth",         "desc": "King of the Hill dual 3:00 timers",     "icon_type": "vec", "icon": "timer",     "preset": ""},
+				{"name": "Medium Health",   "cls": "item_healthkit_medium", "desc": "Restores 50% max HP",                   "icon_type": "mdl", "icon": "health_med","preset": "health_med"},
+			],
+		}
+
+static func is_entity_allowed_for_gamemode(item: Dictionary, mode_id: String) -> bool:
+	var m := mode_id.to_lower()
+	var cls := str(item.get("cls", "")).to_lower()
+	var preset := str(item.get("preset", "")).to_lower()
+	if m == "mvm":
+		if preset in ["bomb_cart", "cap_point"] or cls in ["mapobj_cart_dispenser", "team_control_point", "tf_logic_koth"]:
+			return false
+	elif m in ["pl", "plr"]:
+		if preset in ["mvm_hatch", "upgrade_station", "bot_spawn", "intel"] or cls in ["func_upgradestation", "item_teamflag", "tf_logic_koth"]:
+			return false
+	elif m in ["ctf", "sd"]:
+		if preset in ["bomb_cart", "path_node", "cap_point", "mvm_hatch", "upgrade_station", "bot_spawn"] or cls in ["mapobj_cart_dispenser", "team_control_point", "func_upgradestation", "tf_logic_koth"]:
+			return false
+	elif m in ["koth", "cp_5cp", "cp_ad", "medieval", "arena"]:
+		if preset in ["bomb_cart", "path_node", "intel", "mvm_hatch", "upgrade_station", "bot_spawn"] or cls in ["mapobj_cart_dispenser", "item_teamflag", "func_upgradestation"]:
+			return false
+	return true
 
 static func get_entity_icon_spec(cls: String) -> Dictionary:
 	var c := cls.to_lower()

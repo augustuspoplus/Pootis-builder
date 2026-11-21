@@ -184,15 +184,18 @@ func from_dict(d: Dictionary) -> void:
 	vac_safe_insecure = true
 
 func compute_effective_scale(win: Window) -> float:
-	# project.godot uses stretch/mode=canvas_items at 1600x920 (no HiDPI double-scaling!).
-	var base := clampf(ui_scale, 0.75, 1.40)
+	# Native 1:1 HiDPI scaling (window/stretch/mode="disabled") for razor-sharp text & 1px borders!
+	var user_mult := clampf(ui_scale, 0.75, 1.50)
 	if not auto_dpi or DisplayServer.get_name() == "headless":
-		return base
+		return user_mult
 	var scr := DisplayServer.window_get_current_screen(win.get_window_id())
-	var scr_size := DisplayServer.screen_get_size(scr)
-	if scr_size.x <= 1366:
-		return clampf(base * 0.88, 0.75, 1.30)
-	return base
+	var dpi: int = DisplayServer.screen_get_dpi(scr)
+	var os_scale: float = DisplayServer.screen_get_scale(scr)
+	if os_scale <= 0.01:
+		os_scale = clampf(float(dpi) / 96.0, 1.0, 2.0)
+	# Snap cleanly to crisp steps (1.0 / 1.25 / 1.5 / 2.0) so fonts never blur on fractional ratios!
+	var snapped_os := snappedf(clampf(os_scale, 1.0, 2.0), 0.25)
+	return clampf(snapped_os * user_mult, 0.75, 2.0)
 
 func apply_runtime(main_app: Node3D) -> void:
 	if DisplayServer.get_name() == "headless":

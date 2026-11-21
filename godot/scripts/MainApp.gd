@@ -68,6 +68,9 @@ var active_prop_mdl: String = "models/props_2fort/miningcrate001.mdl"
 var active_fgd_entity: String = "info_player_teamspawn"
 var active_biome: String = "badlands"
 var active_sky: String = "sky_badlands_01"
+var active_gamemode: String = "koth"
+var _show_all_mode_ents: bool = false
+var stairs_open_back: bool = false
 var symmetry: int = SymmetryMode.OFF
 var top_down_2d: bool = false
 var grid_idx: int = 2
@@ -81,6 +84,7 @@ var current_bsp_yaw: float = 0.0
 
 # Selection, Direct 3D Manipulation & Interactive Drawing State
 var selected_solid: int = -1
+var selected_solids: Array[int] = []
 var selected_face: int = -1
 var selected_entity: int = -1
 var _dragging_face: bool = false
@@ -134,7 +138,7 @@ var _prop_favorites: Array[String] = []
 var _dock_build_cat: String = "shapes"
 var _dock_prop_cat: String = "winter"
 var _dock_prop_page: int = 0
-var _dock_ent_cat: String = "objectives"
+var _dock_ent_cat: String = "_mode"
 var _dock_ent_page: int = 0
 var prop_skin: int = 0          # 0=Neutral, 1=RED, 2=BLU
 var prop_random_yaw: bool = false
@@ -558,6 +562,13 @@ func _refresh_context_bar() -> void:
 		for bh in [0.5, 1.0, 2.0, 4.5, 8.0]:
 			var bv: float = bh
 			add_chip.call("%du High" % int(round(bv * UPM)), absf(box_height_m - bv) < 0.05, func(): box_height_m = bv; _refresh_context_bar())
+		add_chip.call("Mat: " + active_material.get_file().left(14), false, func(): _open_materials_drawer())
+	elif active_tool == "stairs":
+		context_bar.visible = true
+		add_tag.call("STAIRS STYLE")
+		add_chip.call("Solid Concrete", not stairs_open_back, func(): stairs_open_back = false; _refresh_context_bar())
+		add_chip.call("Open-Back Steel (Turbine)", stairs_open_back, func(): stairs_open_back = true; _refresh_context_bar())
+		add_chip.call("Mat: " + active_material.get_file().left(14), false, func(): _open_materials_drawer())
 	elif active_tool == "terrain":
 		context_bar.visible = true
 		add_tag.call("TERRAIN STUDIO")
@@ -716,11 +727,15 @@ func _refresh_selection_bar() -> void:
 	if selected_solid >= 0:
 		var info: Dictionary = doc.get_solid_info(selected_solid)
 		var sz: Vector3 = (info.get("bounds_max", Vector3.ZERO) - info.get("bounds_min", Vector3.ZERO)) * UPM
-		tag.text = "SOLID #%d (%dx%dx%du)" % [selected_solid, int(round(sz.x)), int(round(sz.z)), int(round(sz.y))]
+		if selected_solids.size() > 1:
+			tag.text = "%d SOLIDS SELECTED (Ctrl+Click)" % selected_solids.size()
+		else:
+			tag.text = "SOLID #%d (%dx%dx%du)" % [selected_solid, int(round(sz.x)), int(round(sz.z)), int(round(sz.y))]
 		selection_hbox.add_child(tag)
 		_add_sel_btn("+Pull", func(): _push_selected_top(grid_m))
 		_add_sel_btn("-Push", func(): _push_selected_top(-grid_m))
 		_add_sel_btn("Rot 90°", _rotate_selection)
+		_add_sel_btn("Mirror BLU/RED", _mirror_selection_to_enemy, 3)
 		_add_sel_btn("Clip", _open_clip_drawer)
 		_add_sel_btn("Verts", func(): _select_tool("vertex"))
 		_add_sel_btn("Hollow", _do_hollow_selected)
@@ -942,15 +957,16 @@ func _rebuild_bottom_dock() -> void:
 		return
 
 	# ==========================================================================
-	# 1. BUILD MODE: Multi-Box Architecture, Cutouts, Prefabs & Terrain Dock!
+	# 1. BUILD MODE: Multi-Box Architecture, Cutouts, Prefabs, Terrain & Valve Map Props!
 	# ==========================================================================
 	if stage == Stage.BUILD:
 		bottom_dock.offset_top = -148
 		var b_tabs := [
-			{"id": "shapes",  "name": "1. Core Shapes",    "col": HudWidgets.COL_ACC},
-			{"id": "cutouts", "name": "2. Cutouts & Edit", "col": HudWidgets.COL_CYAN},
-			{"id": "prefabs", "name": "3. TF2 Prefabs",    "col": HudWidgets.COL_GREEN},
-			{"id": "terrain", "name": "4. Terrain & Cliffs","col": Color(0.84, 0.56, 0.34, 1.0)},
+			{"id": "shapes",      "name": "1. Core Shapes",    "col": HudWidgets.COL_ACC},
+			{"id": "cutouts",     "name": "2. Cutouts & Edit", "col": HudWidgets.COL_CYAN},
+			{"id": "prefabs",     "name": "3. TF2 Prefabs",    "col": HudWidgets.COL_GREEN},
+			{"id": "terrain",     "name": "4. Terrain & Cliffs","col": Color(0.84, 0.56, 0.34, 1.0)},
+			{"id": "valve_props", "name": "5. Valve Map Props","col": Color(0.92, 0.76, 0.32, 1.0)},
 		]
 		var b_lip := HudWidgets.COL_LIP_AMB
 		for bt in b_tabs:
@@ -972,6 +988,27 @@ func _rebuild_bottom_dock() -> void:
 
 		var hb := HBoxContainer.new(); hb.alignment = BoxContainer.ALIGNMENT_CENTER; hb.add_theme_constant_override("separation", 6)
 		bvb.add_child(hb)
+
+		if _dock_build_cat == "valve_props":
+			for vp in Tf2CatalogScript.VALVE_MAP_BUILD_PROPS:
+				var nm: String = str(vp["name"])
+				var sub: String = str(vp["sub"])
+				var mp: String = str(vp["mdl"])
+				var is_sel: bool = (active_tool == "place_prop" and active_prop_mdl == mp)
+				var tex: Texture2D = icon_cache.get_icon(mp) if icon_cache != null else null
+				var card := HudWidgets.DockCardSlot.new(nm, sub, tex, "", is_sel, b_lip, fonts["body"], {"kind": "prop", "mdl": mp, "name": nm})
+				HudWidgets.attach_spring_anim(card, 1.06)
+				card.tooltip_text = "%s (Official Valve %s prop)\nDrag into 3D or Click to stamp!" % [nm, sub]
+				if not dock_slot_map.has(mp): dock_slot_map[mp] = []
+				(dock_slot_map[mp] as Array).append(card)
+				card.pressed.connect(func():
+					audio.play("click")
+					active_prop_mdl = mp; active_tool = "place_prop"
+					_rebuild_bottom_dock(); _refresh_context_bar()
+					_toast("Click in 3D or Drag & Drop to place Valve prop: " + nm)
+				)
+				hb.add_child(card)
+			return
 
 		var slots: Array = []
 		if _dock_build_cat == "shapes":
@@ -1045,24 +1082,34 @@ func _rebuild_bottom_dock() -> void:
 		return
 
 	# ==========================================================================
-	# 2. GAMEPLAY MODE: Multi-Box Entity Category Dock (All 452 Entities + Icons!)
+	# 2. GAMEPLAY MODE: Gamemode-Aware Multi-Box Entity Dock (Highlights Mode Essentials, Hides Off-Mode!)
 	# ==========================================================================
 	if stage == Stage.GAMEPLAY:
 		bottom_dock.offset_top = -148
-		var ebox: Dictionary = Tf2CatalogScript.get_entity_box(_dock_ent_cat)
-		var lip_col: Color = ebox.get("color", HudWidgets.COL_LIP_AMB)
+		var gm_ess: Dictionary = Tf2CatalogScript.get_gamemode_essentials(active_gamemode)
+		var is_mode_tab: bool = (_dock_ent_cat == "_mode")
+		var ebox: Dictionary = {} if is_mode_tab else Tf2CatalogScript.get_entity_box(_dock_ent_cat)
+		var lip_col: Color = gm_ess["color"] if is_mode_tab else ebox.get("color", HudWidgets.COL_LIP_AMB)
 		var frame := HudWidgets.HudFrame.new(lip_col, 11.0, true)
 		bottom_dock.add_child(frame)
 		var vb := VBoxContainer.new(); vb.add_theme_constant_override("separation", 6)
 		frame.add_child(vb)
 
-		# Top Row: 8 Understandable Entity Category Box Tabs + Search 452!
-		var tabs := HBoxContainer.new(); tabs.alignment = BoxContainer.ALIGNMENT_CENTER; tabs.add_theme_constant_override("separation", 5)
+		# Top Row: Highlighted Gamemode Essentials + 8 Category Tabs + All Modes Toggle + Search!
+		var tabs := HBoxContainer.new(); tabs.alignment = BoxContainer.ALIGNMENT_CENTER; tabs.add_theme_constant_override("separation", 4)
 		vb.add_child(tabs)
+
+		var gm_tb := Button.new()
+		gm_tb.text = "* " + str(gm_ess["title"])
+		_style_dock_tab(gm_tb, gm_ess["color"], is_mode_tab)
+		gm_tb.pressed.connect(func(): audio.play("click"); _dock_ent_cat = "_mode"; _dock_ent_page = 0; _rebuild_bottom_dock())
+		tabs.add_child(gm_tb)
+
 		for box in Tf2CatalogScript.ENTITY_FOLDER_BOXES:
 			var bid: String = str(box["id"])
 			var tb := Button.new()
-			tb.text = str(box["name"])
+			tb.text = str(box["short"])
+			tb.tooltip_text = str(box["name"])
 			_style_dock_tab(tb, box["color"], _dock_ent_cat == bid)
 			tb.pressed.connect(func():
 				audio.play("click")
@@ -1072,13 +1119,27 @@ func _rebuild_bottom_dock() -> void:
 			)
 			tabs.add_child(tb)
 
+		var allm_b := Button.new(); allm_b.text = "All Modes" if not _show_all_mode_ents else "Mode Only"
+		allm_b.tooltip_text = "Show entities from all TF2 gamemodes (currently hiding off-mode entities)"
+		HudWidgets.style_tf2_button(allm_b, fonts["body"], 9, _show_all_mode_ents)
+		allm_b.pressed.connect(func(): audio.play("click"); _show_all_mode_ents = not _show_all_mode_ents; _rebuild_bottom_dock())
+		tabs.add_child(allm_b)
+
 		var search_eb := Button.new(); search_eb.text = "Search 452..."
-		HudWidgets.style_tf2_button(search_eb, fonts["body"], 10)
+		HudWidgets.style_tf2_button(search_eb, fonts["body"], 9)
 		search_eb.pressed.connect(func(): audio.play("click"); _open_fgd_entity_drawer())
 		tabs.add_child(search_eb)
 
-		# Bottom Row: < Prev | 9 Draggable Entity Cards with Icons | > Next
-		var items: Array[Dictionary] = Tf2CatalogScript.get_entities_for_box(core, _dock_ent_cat, 36)
+		# Bottom Row: < Prev | 8 Gamemode-Filtered Entity Cards with Icons | > Next
+		var items: Array[Dictionary] = []
+		if is_mode_tab:
+			for it in gm_ess["items"]:
+				items.append(it)
+		else:
+			var raw_items: Array[Dictionary] = Tf2CatalogScript.get_entities_for_box(core, _dock_ent_cat, 36)
+			for it in raw_items:
+				if _show_all_mode_ents or Tf2CatalogScript.is_entity_allowed_for_gamemode(it, active_gamemode):
+					items.append(it)
 		var per_page := 8
 		var total_pages := maxi(1, int(ceil(float(items.size()) / float(per_page))))
 		_dock_ent_page = clampi(_dock_ent_page, 0, total_pages - 1)
@@ -1616,7 +1677,7 @@ func on_viewport_drop(screen_pos: Vector2, data: Dictionary) -> void:
 		_toast("Dropped %s cleanly onto map at (%du, %du, %du)!" % [pid, int(pos.x * UPM), int(-pos.z * UPM), int(pos.y * UPM)])
 	elif kind == "fgd_entity":
 		var cls: String = str(data.get("cls", active_fgd_entity))
-		var eid: int = doc.add_point_entity(cls, pos, {"angles": "0 0 0"})
+		var eid: int = _place_smart_entity(cls, pos)
 		_record_history("Drop " + cls)
 		if eid >= 0:
 			ent_vis.sync_entity(eid, true)
@@ -1733,20 +1794,66 @@ func _show_welcome_hub(show: bool) -> void:
 		set_stage(Stage.BUILD)
 
 func _clear_selection() -> void:
-	selected_solid = -1; selected_face = -1; selected_entity = -1
+	selected_solid = -1; selected_solids.clear(); selected_face = -1; selected_entity = -1
 	map_sync.set_selection(-1, -1)
 	ent_vis.set_selection(-1)
 	_refresh_selection_bar()
 	_refresh_2d_views()
 	_update_3d_gizmo()
 
-func _select_solid(sidx: int, fidx: int = -1) -> void:
-	selected_solid = sidx; selected_face = fidx; selected_entity = -1
+func _select_solid(sidx: int, fidx: int = -1, add_to_group: bool = false) -> void:
+	if add_to_group and sidx >= 0:
+		if selected_solids.has(sidx):
+			selected_solids.erase(sidx)
+			selected_solid = selected_solids[selected_solids.size() - 1] if not selected_solids.is_empty() else -1
+		else:
+			selected_solids.append(sidx)
+			selected_solid = sidx
+	else:
+		selected_solids.clear()
+		selected_solid = sidx
+		if sidx >= 0:
+			selected_solids.append(sidx)
+	selected_face = fidx; selected_entity = -1
 	ent_vis.set_selection(-1)
-	map_sync.set_selection(sidx, fidx)
+	map_sync.set_selection(selected_solid, fidx)
 	_refresh_selection_bar()
 	_refresh_2d_views()
 	_update_3d_gizmo()
+
+func _swap_team_material(mat: String) -> String:
+	var m := mat.to_upper()
+	var swaps := {
+		"METAL/IMETAL001": "METAL/IMETAL002",
+		"METAL/IMETAL002": "METAL/IMETAL001",
+		"CONCRETE/COMPUTERWALL005C": "CONCRETE/COMPUTERWALL003C",
+		"CONCRETE/COMPUTERWALL003C": "CONCRETE/COMPUTERWALL005C",
+		"WOOD/WOOD_WALL007": "WOOD/WOOD_WALL005A",
+		"WOOD/WOOD_WALL005A": "WOOD/WOOD_WALL007",
+		"CONCRETE/CONCRETEWALL002A": "CONCRETE/CONCRETEWALL001D",
+		"CONCRETE/CONCRETEWALL001D": "CONCRETE/CONCRETEWALL002A",
+		"METAL/METALROOF004A": "METAL/METALROOF006A",
+		"METAL/METALROOF006A": "METAL/METALROOF004A",
+	}
+	return str(swaps.get(m, mat))
+
+func _mirror_selection_to_enemy() -> void:
+	var targets: Array[int] = selected_solids.duplicate() if not selected_solids.is_empty() else ([selected_solid] if selected_solid >= 0 else [])
+	if targets.is_empty():
+		_toast("Select one or more solids first (Ctrl+Click for multi-select)!"); return
+	var created: int = 0
+	for sid in targets:
+		var info: Dictionary = doc.get_solid_info(sid)
+		var nid: int = doc.mirror_solid_x(sid, true)
+		if nid >= 0:
+			var swapped := _swap_team_material(str(info.get("material", "")))
+			if swapped != str(info.get("material", "")):
+				doc.set_solid_material(nid, swapped)
+			created += 1
+	if created > 0:
+		_record_history("Mirror %d Solid(s) to Enemy Side" % created)
+		map_sync.sync_all(); _refresh_2d_views(); audio.play("place")
+		_toast("Mirrored %d solid(s) 180° to enemy side with automatic RED/BLU texture swap!" % created)
 
 func _select_entity(eidx: int) -> void:
 	selected_entity = eidx; selected_solid = -1; selected_face = -1
@@ -2171,6 +2278,8 @@ func _nudge_selection(delta: Vector3) -> void:
 # ==============================================================================
 func _load_gamemode(mode_id: String, biome_override: String = "", show_toast: bool = true) -> void:
 	_clear_official_bsp(); _clear_selection()
+	active_gamemode = mode_id
+	_dock_ent_cat = "_mode"
 	var meta: Dictionary = Tf2GamemodesScript.build_gamemode_template(doc, mode_id, biome_override)
 	active_biome = meta["biome"]; active_sky = meta["sky"]
 	_apply_environment_from_biome(active_biome)
@@ -2749,13 +2858,20 @@ func _handle_left_click(screen_pos: Vector2, shift_held: bool = false, alt_held:
 			if stage == Stage.GAMEPLAY: _open_inspector_drawer()
 		elif pick["kind"] == "solid":
 			var sidx: int = pick["idx"]; var fidx: int = pick["face"]
+			if alt_held:
+				var sinfo: Dictionary = doc.get_solid_info(sidx)
+				var pm: String = str(sinfo.get("material", ""))
+				if not pm.is_empty():
+					active_material = pm; audio.play("click"); _refresh_context_bar()
+					_toast("Build Eyedropper picked material: " + active_material.get_file())
+				return
 			if shift_held:
 				var nid: int = doc.duplicate_solid(sidx, Vector3.ZERO)
 				if nid >= 0:
 					map_sync.sync_all(); _select_solid(nid, -1); _dragging_move = true
 					_move_last_pos = _ray_plane_point(screen_pos, (pick["hit_pos"] as Vector3).y); audio.play("place")
 					_toast("Shift+Drag Cloned Solid #%d!" % nid); return
-			_select_solid(sidx, fidx); audio.play("click")
+			_select_solid(sidx, fidx, Input.is_key_pressed(KEY_CTRL)); audio.play("click")
 			if stage == Stage.STYLE and right_drawer.visible: _open_materials_drawer()
 		else: _clear_selection()
 		return
@@ -2797,10 +2913,24 @@ func _handle_left_click(screen_pos: Vector2, shift_held: bool = false, alt_held:
 	if hover_valid:
 		_place_tool_at(hover_pos)
 
+## Smart entity placement: brush entities (func_door, trigger_*, func_respawnroom, func_nobuild, etc.)
+## automatically create real 3D solid/trigger brush volumes instead of 0-size point entities!
+func _place_smart_entity(cls: String, pos: Vector3) -> int:
+	if cls == "func_door":
+		return doc.add_brush_entity("func_door", pos + Vector3(-2.0, 0.0, -0.25), pos + Vector3(2.0, 4.0, 0.25),
+			"METAL/METALDOOR001", {"movedir": "-90 0 0", "speed": "380"})
+	if cls.begins_with("trigger_") or cls in ["func_respawnroom", "func_capturezone", "func_nobuild", "func_upgradestation", "func_nav_blocker", "func_nav_prefer", "func_clip_vphysics"]:
+		var kv := {}
+		if cls == "trigger_hurt": kv = {"damage": "50", "damagetype": "0"}
+		elif cls == "trigger_push": kv = {"pushdir": "-90 0 0", "speed": "650"}
+		elif cls == "func_respawnroom" or cls == "func_capturezone": kv = {"TeamNum": "2"}
+		return doc.add_brush_entity(cls, pos + Vector3(-2.5, 0.0, -2.5), pos + Vector3(2.5, 3.5, 2.5), "TOOLS/TOOLSTRIGGER", kv)
+	return doc.add_point_entity(cls, pos, {"angles": "0 0 0"})
+
 func _place_tool_at(pos: Vector3) -> void:
 	var b: Dictionary = Tf2GamemodesScript.get_biome(active_biome)
 	if active_tool == "place_fgd_entity":
-		var eid: int = doc.add_point_entity(active_fgd_entity, pos, {"angles": "0 0 0"})
+		var eid: int = _place_smart_entity(active_fgd_entity, pos)
 		_record_history("Place " + active_fgd_entity)
 		if eid >= 0:
 			ent_vis.sync_entity(eid, true)
@@ -2834,7 +2964,16 @@ func _place_tool_at(pos: Vector3) -> void:
 				created_solids.append(doc.add_box(pos + Vector3(-1, 0, -1), pos + Vector3(1, wall_height_m, 1), b["accent"]))
 			"ramp": created_solids.append(doc.add_ramp(pos + Vector3(-2, 0, -2), pos + Vector3(2, 2.5, 2), 0, b["accent"]))
 			"stairs":
-				for i in doc.add_stairs(pos + Vector3(-2, 0, -2), pos + Vector3(2, 2.5, 2), 0, 6, b["accent"]): created_solids.append(i)
+				if stairs_open_back:
+					for s in range(8):
+						var t0 := float(s) / 8.0
+						var t1 := float(s + 1) / 8.0
+						var sy := lerpf(0.0, 2.5, t0)
+						var sx0 := lerpf(-2.0, 2.0, t0)
+						var sx1 := lerpf(-2.0, 2.0, t1) + 0.08
+						created_solids.append(doc.add_box(pos + Vector3(sx0, sy, -1.5), pos + Vector3(sx1, sy + 0.22, 1.5), "METAL/IBEAM001B"))
+				else:
+					for i in doc.add_stairs(pos + Vector3(-2, 0, -2), pos + Vector3(2, 2.5, 2), 0, 6, b["accent"]): created_solids.append(i)
 			"arch":
 				for i in doc.add_arch(pos, 6.0, 1.5, 5.0, 5, b["wall"]): created_solids.append(i)
 			"carve":
@@ -3211,6 +3350,18 @@ func _setup_auto_shot(idx: int) -> void:
 			_show_welcome_hub(false); _dock_build_cat = "prefabs"; set_stage(Stage.BUILD); _select_solid(4, 0)
 			cam_pos = Vector3(-13.5, 5.2, 11.5); editor_cam.look_at_from_position(cam_pos, Vector3(5.0, 1.5, -2.5), Vector3.UP)
 			cam_yaw = editor_cam.rotation.y; cam_pitch = editor_cam.rotation.x
+		"v7_mvm_dock":
+			_show_welcome_hub(false); _load_gamemode("mvm", "mvm", false); set_stage(Stage.GAMEPLAY)
+			right_drawer.visible = false; _dock_ent_cat = "_mode"; _rebuild_bottom_dock()
+			cam_pos = Vector3(20, 14, 24); cam_yaw = 0.65; cam_pitch = -0.42; _apply_editor_cam()
+		"v7_valve_props":
+			_show_welcome_hub(false); _load_gamemode("ctf", "spytech", false); set_stage(Stage.BUILD)
+			right_drawer.visible = false; _dock_build_cat = "valve_props"; _rebuild_bottom_dock()
+			cam_pos = Vector3(20, 14, 24); cam_yaw = 0.65; cam_pitch = -0.42; _apply_editor_cam()
+		"v7_clean_winter":
+			_show_welcome_hub(false); _load_gamemode("koth", "winter", false); set_stage(Stage.STYLE)
+			right_drawer.visible = false; _dock_prop_cat = "winter"; _dock_prop_page = 0; _rebuild_bottom_dock()
+			cam_pos = Vector3(20, 14, 24); cam_yaw = 0.65; cam_pitch = -0.42; _apply_editor_cam()
 	if not viewing_bsp and not settings_modal.visible:
 		_update_hover(get_viewport().get_visible_rect().size * Vector2(0.42, 0.52))
 

@@ -34,10 +34,16 @@ static func load_fonts(tf2_dir: String = "") -> Dictionary:
 		if FileAccess.file_exists(f_build):
 			var ff := FontFile.new()
 			if ff.load_dynamic_font(f_build) == OK:
+				ff.antialiasing = TextServer.FONT_ANTIALIASING_GRAY
+				ff.hinting = TextServer.HINTING_LIGHT
+				ff.subpixel_positioning = TextServer.SUBPIXEL_POSITIONING_AUTO
 				heading_font = ff
 		if FileAccess.file_exists(f_sec):
 			var ff2 := FontFile.new()
 			if ff2.load_dynamic_font(f_sec) == OK:
+				ff2.antialiasing = TextServer.FONT_ANTIALIASING_GRAY
+				ff2.hinting = TextServer.HINTING_LIGHT
+				ff2.subpixel_positioning = TextServer.SUBPIXEL_POSITIONING_AUTO
 				body_font = ff2
 
 	var load_ttf := func(res_path: String) -> Font:
@@ -45,6 +51,9 @@ static func load_fonts(tf2_dir: String = "") -> Dictionary:
 		if FileAccess.file_exists(abs_p):
 			var ff := FontFile.new()
 			if ff.load_dynamic_font(abs_p) == OK:
+				ff.antialiasing = TextServer.FONT_ANTIALIASING_GRAY
+				ff.hinting = TextServer.HINTING_LIGHT
+				ff.subpixel_positioning = TextServer.SUBPIXEL_POSITIONING_AUTO
 				return ff
 		return null
 

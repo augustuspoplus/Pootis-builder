@@ -10,12 +10,17 @@ config/features=PackedStringArray("4.7", "Forward Plus")
 
 [display]
 
-window/size/viewport_width=1600
-window/size/viewport_height=920
+window/size/viewport_width=1920
+window/size/viewport_height=1080
 window/size/mode=2
 window/dpi/allow_hidpi=true
-window/stretch/mode="canvas_items"
-window/stretch/aspect="expand"
+window/stretch/mode="disabled"
+window/stretch/aspect="ignore"
+
+[gui]
+
+common/snap_controls_to_pixels=true
+fonts/dynamic_fonts/use_oversampling=true
 
 [rendering]
 
