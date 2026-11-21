@@ -17,6 +17,8 @@ var active_tab: int = 0
 
 var nav_vbox: VBoxContainer
 var content_vbox: VBoxContainer
+var card_frame: PanelContainer
+var nav_col_box: VBoxContainer
 var nav_btns: Array[Button] = []
 var _snapshot: Dictionary = {}
 
@@ -39,8 +41,22 @@ func setup(p_settings: RefCounted, p_fonts: Dictionary, p_core: Object) -> void:
 	visible = false
 	_build_modal()
 
+func fit_to_viewport() -> void:
+	if card_frame == null or get_window() == null:
+		return
+	var sf := maxf(get_window().content_scale_factor, 0.5)
+	var eff_w := float(get_window().size.x) / sf
+	var eff_h := float(get_window().size.y) / sf
+	card_frame.custom_minimum_size = Vector2(
+		minf(960.0, maxf(620.0, eff_w - 28.0)),
+		minf(620.0, maxf(380.0, eff_h - 28.0))
+	)
+	if nav_col_box != null:
+		nav_col_box.custom_minimum_size.x = 170.0 if eff_w < 960.0 else 225.0
+
 func open_modal() -> void:
 	_snapshot = settings.to_dict()
+	fit_to_viewport()
 	visible = true
 	_rebuild_tab()
 
@@ -58,13 +74,13 @@ func _build_modal() -> void:
 	center.set_anchors_preset(Control.PRESET_FULL_RECT)
 	add_child(center)
 
-	var card := HudWidgets.HudFrame.new(HudWidgets.COL_LIP_AMB, 12.0, true)
-	card.custom_minimum_size = Vector2(960, 620)
-	center.add_child(card)
+	card_frame = HudWidgets.HudFrame.new(HudWidgets.COL_LIP_AMB, 12.0, true)
+	card_frame.custom_minimum_size = Vector2(960, 620)
+	center.add_child(card_frame)
 
 	var root_vb := VBoxContainer.new()
 	root_vb.add_theme_constant_override("separation", 10)
-	card.add_child(root_vb)
+	card_frame.add_child(root_vb)
 
 	# Header
 	var hdr := HBoxContainer.new()
@@ -89,10 +105,11 @@ func _build_modal() -> void:
 	body.add_theme_constant_override("separation", 14)
 	root_vb.add_child(body)
 
-	var nav_col := VBoxContainer.new()
-	nav_col.custom_minimum_size = Vector2(225, 0)
-	nav_col.add_theme_constant_override("separation", 5)
-	body.add_child(nav_col)
+	nav_col_box = VBoxContainer.new()
+	nav_col_box.custom_minimum_size = Vector2(225, 0)
+	nav_col_box.add_theme_constant_override("separation", 5)
+	body.add_child(nav_col_box)
+	var nav_col := nav_col_box
 
 	nav_vbox = VBoxContainer.new()
 	nav_vbox.add_theme_constant_override("separation", 5)

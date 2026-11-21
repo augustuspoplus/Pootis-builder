@@ -1326,3 +1326,117 @@ static func build_history_drawer(app: Node3D, vbox: VBoxContainer) -> void:
 		var target_i := rev
 		btn.pressed.connect(func(): app._jump_to_history(target_i))
 		vbox.add_child(btn)
+
+# ==============================================================================
+# 8. MANN VS. MACHINE (MvM) STUDIO — ROBOT SPAWNS, TANK TRACKS & .POP EXPORTER!
+# ==============================================================================
+static func build_mvm_studio(app: Node3D, vbox: VBoxContainer) -> void:
+	var fonts: Dictionary = app.fonts
+	_sec(vbox, "1. STAMP MVM ROBOTS & BASE OBJECTIVES", fonts)
+	vbox.add_child(_lbl("Click any MvM piece below to stamp it at your cursor (or spawn directly onto the map).", fonts["body"], 11, HudWidgets.COL_TX_MUTED))
+
+	var r1 := GridContainer.new(); r1.columns = 2
+	r1.add_theme_constant_override("h_separation", 6); r1.add_theme_constant_override("v_separation", 6)
+	vbox.add_child(r1)
+
+	var mvm_tools := [
+		{"t": "Robot Spawn",     "cls": "info_player_teamspawn", "kv": {"TeamNum": "3", "targetname": "spawnbot"}},
+		{"t": "Giant Bot Spawn", "cls": "info_player_teamspawn", "kv": {"TeamNum": "3", "targetname": "spawnbot_giant"}},
+		{"t": "Sniper Bot Hint", "cls": "info_player_teamspawn", "kv": {"TeamNum": "3", "targetname": "spawnbot_mission_sniper"}},
+		{"t": "Robot Bomb",      "cls": "item_teamflag",         "kv": {"TeamNum": "3", "GameType": "1", "targetname": "intel"}},
+		{"t": "MvM Bomb Hatch",  "preset": "mvm_hatch"},
+		{"t": "Upgrade Station", "preset": "upgrade_station"},
+		{"t": "RED Defender",    "preset": "spawn_red"},
+		{"t": "Tank Track Node", "tool": "payload_track"},
+	]
+	for mt in mvm_tools:
+		var b := Button.new(); b.text = str(mt["t"]); b.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		HudWidgets.style_tf2_button(b, fonts["heading"], 10)
+		b.pressed.connect(func():
+			app.audio.play("click")
+			var p: Vector3 = app.hover_pos if app.hover_valid else Vector3(0, 0.2, 0)
+			if mt.has("tool"):
+				app._select_tool(str(mt["tool"]))
+			elif mt.has("preset"):
+				app._select_tool(str(mt["preset"]))
+			else:
+				var eid: int = app.doc.add_point_entity(str(mt["cls"]), p, mt["kv"])
+				app._record_history("Place " + str(mt["t"]))
+				if eid >= 0:
+					app.ent_vis.sync_entity(eid, true); app._select_entity(eid)
+				app._spawn_place_fx(p, Color(0.74, 0.42, 0.96))
+				app._toast("Stamped MvM %s!" % str(mt["t"]))
+		)
+		r1.add_child(b)
+
+	_sec(vbox, "2. WAVE MISSION BUILDER (.POP FILE EXPORTER)", fonts)
+	vbox.add_child(_lbl("Generate a real Valve TF2 Mann vs. Machine .pop wave mission file for your map!", fonts["body"], 11, HudWidgets.COL_TX_MUTED))
+
+	var wg := GridContainer.new(); wg.columns = 2; wg.add_theme_constant_override("h_separation", 6); vbox.add_child(wg)
+	var cash_sb := SpinBox.new(); cash_sb.min_value = 200; cash_sb.max_value = 5000; cash_sb.step = 100; cash_sb.value = app.mvm_start_cash; cash_sb.prefix = "Start $: "
+	var w1_sb := SpinBox.new(); w1_sb.min_value = 4; w1_sb.max_value = 60; w1_sb.step = 2; w1_sb.value = app.mvm_w1_scouts; w1_sb.prefix = "W1 Scouts: "
+	var w2_sb := SpinBox.new(); w2_sb.min_value = 4; w2_sb.max_value = 60; w2_sb.step = 2; w2_sb.value = app.mvm_w2_soldiers; w2_sb.prefix = "W2 Soldiers: "
+	var w3_sb := SpinBox.new(); w3_sb.min_value = 1; w3_sb.max_value = 12; w3_sb.step = 1; w3_sb.value = app.mvm_w3_giants; w3_sb.prefix = "W3 Giants: "
+	for sb: SpinBox in [cash_sb, w1_sb, w2_sb, w3_sb]:
+		sb.size_flags_horizontal = Control.SIZE_EXPAND_FILL; wg.add_child(sb)
+	cash_sb.value_changed.connect(func(v): app.mvm_start_cash = int(v))
+	w1_sb.value_changed.connect(func(v): app.mvm_w1_scouts = int(v))
+	w2_sb.value_changed.connect(func(v): app.mvm_w2_soldiers = int(v))
+	w3_sb.value_changed.connect(func(v): app.mvm_w3_giants = int(v))
+
+	var tank_cb := CheckButton.new(); tank_cb.text = "Include Boss Tank in Wave 3"; tank_cb.button_pressed = app.mvm_has_tank
+	tank_cb.toggled.connect(func(on: bool): app.mvm_has_tank = on)
+	vbox.add_child(tank_cb)
+
+	var exp_b := Button.new(); exp_b.text = "Export Valve MvM .POP Mission File"
+	exp_b.custom_minimum_size = Vector2(0, 40)
+	HudWidgets.style_tf2_button(exp_b, fonts["heading"], 11, true)
+	exp_b.pressed.connect(func():
+		var out_p: String = app.export_mvm_pop_mission()
+		app.audio.play("save")
+		app._toast("Exported MvM Wave Mission: " + out_p.get_file())
+	)
+	vbox.add_child(exp_b)
+
+# ==============================================================================
+# 9. PAYLOAD TRACK SPLINE STUDIO — CLICK-TO-CHAIN TRACK NODES & CHECKPOINTS!
+# ==============================================================================
+static func build_payload_studio(app: Node3D, vbox: VBoxContainer) -> void:
+	var fonts: Dictionary = app.fonts
+	_sec(vbox, "1. CLICK-TO-CHAIN PAYLOAD TRACK SPLINE", fonts)
+	vbox.add_child(_lbl("Click points along your map to automatically build & link Payload track nodes (pb_track_01 -> 02 -> 03...) with live 3D yellow rails!", fonts["body"], 11, HudWidgets.COL_TX_MUTED))
+
+	var chain_b := Button.new()
+	chain_b.text = "ACTIVE: Click 3D to Add Track Node" if app.active_tool == "payload_track" else "Start Clicking Payload Track Spline"
+	chain_b.custom_minimum_size = Vector2(0, 40)
+	HudWidgets.style_tf2_button(chain_b, fonts["heading"], 11, true)
+	chain_b.pressed.connect(func(): app.audio.play("click"); app._select_tool("payload_track"))
+	vbox.add_child(chain_b)
+
+	var reset_b := Button.new(); reset_b.text = "Reset Track Chain Counter (Current: %d nodes)" % app._payload_track_idx
+	HudWidgets.style_tf2_button(reset_b, fonts["body"], 10)
+	reset_b.pressed.connect(func(): app.audio.play("click"); app._payload_track_idx = 0; app._open_payload_studio())
+	vbox.add_child(reset_b)
+
+	_sec(vbox, "2. STAMP PAYLOAD LANDMARKS", fonts)
+	var pg := GridContainer.new(); pg.columns = 2; pg.add_theme_constant_override("h_separation", 6); pg.add_theme_constant_override("v_separation", 6)
+	vbox.add_child(pg)
+	for item in [
+		{"t": "Payload Cart",  "preset": "bomb_cart"},
+		{"t": "Checkpoint",    "preset": "cap_point"},
+		{"t": "Setup Gate",    "cls": "func_door"},
+		{"t": "BLU Spawn",     "preset": "spawn_blu"},
+		{"t": "RED Spawn",     "preset": "spawn_red"},
+		{"t": "Resupply",      "preset": "resupply"},
+	]:
+		var b := Button.new(); b.text = str(item["t"]); b.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		HudWidgets.style_tf2_button(b, fonts["heading"], 10)
+		b.pressed.connect(func():
+			app.audio.play("click")
+			if item.has("preset"):
+				app._select_tool(str(item["preset"]))
+			else:
+				app.active_fgd_entity = str(item["cls"]); app.active_tool = "place_fgd_entity"
+				app._toast("Click in 3D to place " + str(item["t"]))
+		)
+		pg.add_child(b)

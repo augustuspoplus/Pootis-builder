@@ -24,6 +24,7 @@ const ModelImporterScript    = preload("res://scripts/editor/ModelImporter.gd")
 const SandboxPlayerScript    = preload("res://scripts/playtest/Tf2SandboxPlayer.gd")
 const HudWidgets             = preload("res://scripts/ui/Tf2HudWidgets.gd")
 const SettingsModalScript    = preload("res://scripts/ui/SettingsModal.gd")
+const WorkshopHubScript      = preload("res://scripts/ui/WorkshopHubModal.gd")
 const Blueprint2DScript      = preload("res://scripts/ui/Blueprint2DView.gd")
 const EditorDrawersScript    = preload("res://scripts/ui/EditorDrawers.gd")
 
@@ -112,6 +113,16 @@ var _wall_chain_start: Vector3 = Vector3.ZERO
 var wall_height_m: float = 4.5  # 144u standard TF2 story height
 var wall_thick_m: float = 0.75  # 24u wall thickness
 var _clip_keep_mode: int = 0
+var _clip_3d_active: bool = false
+var _clip_3d_pt_a: Vector3 = Vector3.ZERO
+var _clip_plane_mesh: MeshInstance3D = null
+var _payload_track_idx: int = 0
+var _payload_prev_ent: int = -1
+var mvm_start_cash: int = 800
+var mvm_w1_scouts: int = 16
+var mvm_w2_soldiers: int = 12
+var mvm_w3_giants: int = 3
+var mvm_has_tank: bool = true
 
 # Building Wizard, Terrain Brush, Cliff Controls & Browser Search State
 var bld_floors: int = 2
@@ -197,6 +208,12 @@ var toast_panel: PanelContainer
 var status_toast: Label
 var _toast_ttl: float = 0.0
 var map_title_lbl: Label
+var brand_lbl: Label
+var comp_btn: Button
+var top_bar_hb: HBoxContainer
+var top_row2_wrap: CenterContainer
+var top_center_frame: PanelContainer
+var top_sp2: Control
 var undo_btn: Button
 var redo_btn: Button
 var history_btn: Button
@@ -454,6 +471,8 @@ func _init_ui() -> void:
 	file_dialog.size = Vector2i(760, 500)
 	file_dialog.file_selected.connect(_on_file_selected)
 	hud_layer.add_child(file_dialog)
+	get_viewport().size_changed.connect(func(): _update_top_bar_compact(); _rebuild_bottom_dock())
+	call_deferred("_update_top_bar_compact")
 
 func _build_toast_pill() -> void:
 	toast_wrap = CenterContainer.new()
@@ -762,19 +781,37 @@ func _add_sel_btn(label: String, fn: Callable, team: int = 0) -> void:
 	b.pressed.connect(func(): audio.play("click"); fn.call())
 	selection_hbox.add_child(b)
 
+func _get_logical_size() -> Vector2:
+	var win := get_window()
+	if win == null:
+		return Vector2(1600.0, 920.0)
+	var sf := maxf(win.content_scale_factor, 0.5)
+	return Vector2(float(win.size.x) / sf, float(win.size.y) / sf)
+
 func _build_top_bar() -> void:
 	top_bar = MarginContainer.new()
 	top_bar.set_anchors_preset(Control.PRESET_TOP_WIDE)
-	top_bar.add_theme_constant_override("margin_left", 10)
-	top_bar.add_theme_constant_override("margin_right", 10)
-	top_bar.add_theme_constant_override("margin_top", 8)
+	top_bar.add_theme_constant_override("margin_left", 8)
+	top_bar.add_theme_constant_override("margin_right", 8)
+	top_bar.add_theme_constant_override("margin_top", 6)
 	top_bar.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	hud_layer.add_child(top_bar)
 
+	var top_vb := VBoxContainer.new()
+	top_vb.add_theme_constant_override("separation", 4)
+	top_vb.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	top_bar.add_child(top_vb)
+
 	var bar_hb := HBoxContainer.new()
-	bar_hb.add_theme_constant_override("separation", 8)
+	bar_hb.add_theme_constant_override("separation", 6)
 	bar_hb.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	top_bar.add_child(bar_hb)
+	top_vb.add_child(bar_hb)
+	top_bar_hb = bar_hb
+
+	top_row2_wrap = CenterContainer.new()
+	top_row2_wrap.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	top_row2_wrap.visible = false
+	top_vb.add_child(top_row2_wrap)
 
 	# TOP-LEFT PILL
 	var left_frame := HudWidgets.HudFrame.new(HudWidgets.COL_LIP_AMB, 9.0, true)
@@ -783,12 +820,12 @@ func _build_top_bar() -> void:
 	lhb.add_theme_constant_override("separation", 5)
 	left_frame.add_child(lhb)
 
-	var brand := Label.new()
-	brand.text = "POOTIS BUILDER 2.0"
-	brand.add_theme_font_override("font", fonts["heading"])
-	brand.add_theme_font_size_override("font_size", 13)
-	brand.add_theme_color_override("font_color", HudWidgets.COL_ACC)
-	lhb.add_child(brand)
+	brand_lbl = Label.new()
+	brand_lbl.text = "POOTIS BUILDER 2.0"
+	brand_lbl.add_theme_font_override("font", fonts["heading"])
+	brand_lbl.add_theme_font_size_override("font_size", 13)
+	brand_lbl.add_theme_color_override("font_color", HudWidgets.COL_ACC)
+	lhb.add_child(brand_lbl)
 
 	map_title_lbl = Label.new()
 	map_title_lbl.text = "| koth"
@@ -830,6 +867,7 @@ func _build_top_bar() -> void:
 	# TOP-CENTER: 4-Stage Stepper Pill
 	var center_frame := HudWidgets.HudFrame.new(HudWidgets.COL_LIP_AMB, 9.0, true)
 	bar_hb.add_child(center_frame)
+	top_center_frame = center_frame
 	var chb := HBoxContainer.new(); chb.alignment = BoxContainer.ALIGNMENT_CENTER; chb.add_theme_constant_override("separation", 5)
 	center_frame.add_child(chb)
 
@@ -851,6 +889,7 @@ func _build_top_bar() -> void:
 
 	var sp2 := Control.new(); sp2.size_flags_horizontal = Control.SIZE_EXPAND_FILL; sp2.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	bar_hb.add_child(sp2)
+	top_sp2 = sp2
 
 	# TOP-RIGHT PILL
 	var right_frame := HudWidgets.HudFrame.new(HudWidgets.COL_LIP_AMB, 9.0, true)
@@ -873,27 +912,98 @@ func _build_top_bar() -> void:
 	vis_b.pressed.connect(func(): audio.play("click"); _open_visgroups_drawer())
 	rhb.add_child(vis_b); edit_only_top_nodes.append(vis_b)
 
-	var split_b := Button.new(); split_b.text = "2D Split"
-	HudWidgets.style_tf2_button(split_b, fonts["body"], 11)
+	var split_b := Button.new(); split_b.text = "2D"
+	split_b.tooltip_text = "Toggle Split 2D Blueprint Views (Top X/Y & Side X/Z)"
+	HudWidgets.style_tf2_button(split_b, fonts["body"], 10)
 	split_b.pressed.connect(func(): audio.play("click"); _toggle_split_2d())
 	rhb.add_child(split_b); edit_only_top_nodes.append(split_b)
 
 	coach_btn = Button.new(); coach_btn.text = "Check"
 	coach_btn.tooltip_text = "Check Map for Problems (Alt+P) & TF2 Map Coach"
-	HudWidgets.style_tf2_button(coach_btn, fonts["body"], 11)
+	HudWidgets.style_tf2_button(coach_btn, fonts["body"], 10)
 	coach_btn.pressed.connect(func(): audio.play("click"); _open_check_problems_drawer())
 	rhb.add_child(coach_btn); edit_only_top_nodes.append(coach_btn)
 
 	var set_b := Button.new(); set_b.text = "Settings"
 	set_b.tooltip_text = "Settings & Hammer Configuration (Ctrl+,)"
-	HudWidgets.style_tf2_button(set_b, fonts["body"], 11)
+	HudWidgets.style_tf2_button(set_b, fonts["body"], 10)
 	set_b.pressed.connect(func(): audio.play("click"); settings_modal.open_modal())
 	rhb.add_child(set_b)
 
-	var comp_btn := Button.new(); comp_btn.text = "COMPILE (F9)"
-	HudWidgets.style_tf2_button(comp_btn, fonts["heading"], 11, true)
+	comp_btn = Button.new(); comp_btn.text = "COMPILE F9"
+	comp_btn.tooltip_text = "Compile & Launch in Real TF2 (F9)"
+	HudWidgets.style_tf2_button(comp_btn, fonts["heading"], 10, true)
 	comp_btn.pressed.connect(func(): audio.play("click"); _open_compile_drawer())
 	rhb.add_child(comp_btn); edit_only_top_nodes.append(comp_btn)
+	_update_top_bar_compact()
+
+func _update_top_bar_compact() -> void:
+	if brand_lbl == null or comp_btn == null:
+		return
+	var eff := _get_logical_size()
+	var eff_w := eff.x
+	var eff_h := eff.y
+	var two_row := eff_w < 1160.0
+	var compact := eff_w < 1340.0
+
+	# Move the 4-Stage Stepper cleanly to Row 2 on narrow/high-scale displays so Settings & COMPILE F9 NEVER clip!
+	if top_center_frame != null and top_row2_wrap != null and top_bar_hb != null:
+		if two_row:
+			if top_center_frame.get_parent() != top_row2_wrap:
+				top_center_frame.get_parent().remove_child(top_center_frame)
+				top_row2_wrap.add_child(top_center_frame)
+			top_row2_wrap.visible = true
+			if top_sp2 != null:
+				top_sp2.visible = false
+		else:
+			if top_center_frame.get_parent() != top_bar_hb:
+				top_center_frame.get_parent().remove_child(top_center_frame)
+				top_bar_hb.add_child(top_center_frame)
+				top_bar_hb.move_child(top_center_frame, 2)
+			top_row2_wrap.visible = false
+			if top_sp2 != null:
+				top_sp2.visible = true
+
+	var extra_y := 42.0 if two_row else 0.0
+	if left_rail_panel != null:
+		left_rail_panel.offset_top = 66.0 + extra_y
+	if tool_hover_card != null:
+		tool_hover_card.offset_top = 66.0 + extra_y
+	if context_bar_wrap != null:
+		context_bar_wrap.offset_top = 56.0 + extra_y
+		context_bar_wrap.offset_bottom = 94.0 + extra_y
+	if toast_wrap != null:
+		toast_wrap.offset_top = 98.0 + extra_y
+		toast_wrap.offset_bottom = 134.0 + extra_y
+	if right_drawer != null:
+		right_drawer.offset_top = 64.0 + extra_y
+		var dr_w := minf(344.0, maxf(260.0, eff_w * 0.36))
+		right_drawer.offset_left = -(dr_w + 12.0)
+		right_drawer.offset_bottom = -168.0 if eff_h < 680.0 else -160.0
+	if split_2d_panel != null:
+		split_2d_panel.offset_top = 64.0 + extra_y
+		split_2d_panel.offset_left = -minf(410.0, eff_w * 0.42)
+
+	if top_bar_hb != null:
+		top_bar_hb.add_theme_constant_override("separation", 4 if compact else 8)
+	brand_lbl.text = "POOTIS 2.0" if compact else "POOTIS BUILDER 2.0"
+	if map_title_lbl != null:
+		map_title_lbl.visible = not compact
+	if stage_btns.size() >= 4:
+		var lbls := ["1. BUILD", "2. GAMEPLAY", "3. STYLE", "4. PLAY (F5)"] if (two_row or not compact) else ["1. BUILD", "2. GAME", "3. STYLE", "4. F5"]
+		for i in range(4):
+			stage_btns[i].text = lbls[i]
+	comp_btn.text = "F9" if eff_w < 880.0 else ("COMPILE F9" if (two_row or not compact) else "COMPILE")
+	if grid_btn != null:
+		grid_btn.text = ("%du" if compact else "Grid: %du") % GRID_STEPS[grid_idx]
+	if sym_btn != null:
+		var snames := ["Sym: Off", "Sym: Mirror", "Sym: 180°"]
+		var cnames := ["Off", "Mir", "180°"]
+		sym_btn.text = cnames[symmetry] if compact else snames[symmetry]
+	if history_btn != null:
+		history_btn.text = ("Hist(%d)" if compact else "History (%d)") % maxi(1, _history_entries.size())
+	if settings_modal != null and settings_modal.visible:
+		settings_modal.fit_to_viewport()
 
 func _build_bottom_dock() -> void:
 	bottom_dock = CenterContainer.new()
@@ -990,7 +1100,20 @@ func _rebuild_bottom_dock() -> void:
 		bvb.add_child(hb)
 
 		if _dock_build_cat == "valve_props":
-			for vp in Tf2CatalogScript.VALVE_MAP_BUILD_PROPS:
+			var vprops: Array = Tf2CatalogScript.VALVE_MAP_BUILD_PROPS
+			var eff_bw: float = _get_logical_size().x
+			var v_per: int = clampi(int((eff_bw - 400.0) / 112.0), 3, 8)
+			var v_pages := maxi(1, int(ceil(float(vprops.size()) / float(v_per))))
+			_dock_prop_page = clampi(_dock_prop_page, 0, v_pages - 1)
+			var v_s := _dock_prop_page * v_per
+			var v_e := mini(vprops.size(), v_s + v_per)
+			if v_pages > 1:
+				var pb := Button.new(); pb.text = "<"; pb.custom_minimum_size = Vector2(26, 82); pb.disabled = (_dock_prop_page <= 0)
+				HudWidgets.style_tf2_button(pb, fonts["heading"], 14)
+				pb.pressed.connect(func(): audio.play("click"); _dock_prop_page = maxi(0, _dock_prop_page - 1); _rebuild_bottom_dock())
+				hb.add_child(pb)
+			for idx in range(v_s, v_e):
+				var vp: Dictionary = vprops[idx]
 				var nm: String = str(vp["name"])
 				var sub: String = str(vp["sub"])
 				var mp: String = str(vp["mdl"])
@@ -1008,6 +1131,11 @@ func _rebuild_bottom_dock() -> void:
 					_toast("Click in 3D or Drag & Drop to place Valve prop: " + nm)
 				)
 				hb.add_child(card)
+			if v_pages > 1:
+				var nb := Button.new(); nb.text = ">"; nb.custom_minimum_size = Vector2(26, 82); nb.disabled = (_dock_prop_page >= v_pages - 1)
+				HudWidgets.style_tf2_button(nb, fonts["heading"], 14)
+				nb.pressed.connect(func(): audio.play("click"); _dock_prop_page = mini(v_pages - 1, _dock_prop_page + 1); _rebuild_bottom_dock())
+				hb.add_child(nb)
 			return
 
 		var slots: Array = []
@@ -1096,7 +1224,21 @@ func _rebuild_bottom_dock() -> void:
 		frame.add_child(vb)
 
 		# Top Row: Highlighted Gamemode Essentials + 8 Category Tabs + All Modes Toggle + Search!
-		var tabs := HBoxContainer.new(); tabs.alignment = BoxContainer.ALIGNMENT_CENTER; tabs.add_theme_constant_override("separation", 4)
+		var eff_w: float = _get_logical_size().x
+		var tabs: Container
+		if eff_w < 1180.0:
+			var tf := HFlowContainer.new()
+			tf.alignment = FlowContainer.ALIGNMENT_CENTER
+			tf.add_theme_constant_override("h_separation", 4)
+			tf.add_theme_constant_override("v_separation", 4)
+			tf.custom_minimum_size = Vector2(minf(eff_w - 48.0, 820.0), 0)
+			tabs = tf
+			bottom_dock.offset_top = -176
+		else:
+			var th := HBoxContainer.new()
+			th.alignment = BoxContainer.ALIGNMENT_CENTER
+			th.add_theme_constant_override("separation", 4)
+			tabs = th
 		vb.add_child(tabs)
 
 		var gm_tb := Button.new()
@@ -1130,6 +1272,17 @@ func _rebuild_bottom_dock() -> void:
 		search_eb.pressed.connect(func(): audio.play("click"); _open_fgd_entity_drawer())
 		tabs.add_child(search_eb)
 
+		if active_gamemode == "mvm":
+			var mvm_b := Button.new(); mvm_b.text = "MvM Studio"
+			HudWidgets.style_tf2_button(mvm_b, fonts["heading"], 9, true)
+			mvm_b.pressed.connect(func(): audio.play("click"); _open_mvm_studio())
+			tabs.add_child(mvm_b)
+		elif active_gamemode in ["pl", "plr"]:
+			var pl_b := Button.new(); pl_b.text = "Track Studio"
+			HudWidgets.style_tf2_button(pl_b, fonts["heading"], 9, true)
+			pl_b.pressed.connect(func(): audio.play("click"); _open_payload_studio())
+			tabs.add_child(pl_b)
+
 		# Bottom Row: < Prev | 8 Gamemode-Filtered Entity Cards with Icons | > Next
 		var items: Array[Dictionary] = []
 		if is_mode_tab:
@@ -1140,7 +1293,7 @@ func _rebuild_bottom_dock() -> void:
 			for it in raw_items:
 				if _show_all_mode_ents or Tf2CatalogScript.is_entity_allowed_for_gamemode(it, active_gamemode):
 					items.append(it)
-		var per_page := 8
+		var per_page: int = clampi(int((eff_w - 420.0) / 112.0), 3, 8)
 		var total_pages := maxi(1, int(ceil(float(items.size()) / float(per_page))))
 		_dock_ent_page = clampi(_dock_ent_page, 0, total_pages - 1)
 		var start_i := _dock_ent_page * per_page
@@ -1205,7 +1358,21 @@ func _rebuild_bottom_dock() -> void:
 	pframe.add_child(pvb)
 
 	# Top Row: Style Tools + All 9 Prop Category Box Tabs + Saved + Search All!
-	var ptabs := HBoxContainer.new(); ptabs.alignment = BoxContainer.ALIGNMENT_CENTER; ptabs.add_theme_constant_override("separation", 4)
+	var eff_pw: float = _get_logical_size().x
+	var ptabs: Container
+	if eff_pw < 1180.0:
+		var ptf := HFlowContainer.new()
+		ptf.alignment = FlowContainer.ALIGNMENT_CENTER
+		ptf.add_theme_constant_override("h_separation", 4)
+		ptf.add_theme_constant_override("v_separation", 4)
+		ptf.custom_minimum_size = Vector2(minf(eff_pw - 48.0, 820.0), 0)
+		ptabs = ptf
+		bottom_dock.offset_top = -176
+	else:
+		var pth := HBoxContainer.new()
+		pth.alignment = BoxContainer.ALIGNMENT_CENTER
+		pth.add_theme_constant_override("separation", 4)
+		ptabs = pth
 	pvb.add_child(ptabs)
 
 	var tools_tb := Button.new(); tools_tb.text = "Paint / Sky"
@@ -1273,7 +1440,7 @@ func _rebuild_bottom_dock() -> void:
 	else:
 		pitems = Tf2CatalogScript.get_props_for_box(core, _dock_prop_cat, "", 45)
 
-	var p_per := 8
+	var p_per: int = clampi(int((eff_pw - 410.0) / 112.0), 3, 8)
 	var p_pages := maxi(1, int(ceil(float(pitems.size()) / float(p_per))))
 	_dock_prop_page = clampi(_dock_prop_page, 0, p_pages - 1)
 	var p_start := _dock_prop_page * p_per
@@ -1425,218 +1592,9 @@ func _build_playtest_hud() -> void:
 		class_row.add_child(cb)
 
 func _build_welcome_hub() -> void:
-	welcome_panel = ColorRect.new()
-	welcome_panel.set_anchors_preset(Control.PRESET_FULL_RECT)
-	welcome_panel.color = Color(0.06, 0.05, 0.04, 0.78)
+	welcome_panel = WorkshopHubScript.new()
+	welcome_panel.setup(self)
 	hud_layer.add_child(welcome_panel)
-
-	var center := CenterContainer.new()
-	center.set_anchors_preset(Control.PRESET_FULL_RECT)
-	welcome_panel.add_child(center)
-
-	var card := HudWidgets.HudFrame.new(HudWidgets.COL_LIP_AMB, 14.0, true)
-	card.custom_minimum_size = Vector2(1040, 620)
-	center.add_child(card)
-
-	var vb := VBoxContainer.new(); vb.add_theme_constant_override("separation", 10)
-	card.add_child(vb)
-
-	var hdr := HBoxContainer.new(); hdr.add_theme_constant_override("separation", 8); vb.add_child(hdr)
-	var title_vb := VBoxContainer.new(); title_vb.size_flags_horizontal = Control.SIZE_EXPAND_FILL; hdr.add_child(title_vb)
-	var title := Label.new()
-	title.text = "MANN CO. WORKSHOP HUB"
-	title.add_theme_font_override("font", fonts["heading"]); title.add_theme_font_size_override("font_size", 24)
-	title.add_theme_color_override("font_color", HudWidgets.COL_ACC)
-	title_vb.add_child(title)
-
-	var sub := Label.new()
-	sub.text = "POOTIS BUILDER 2.0  â€”  All 12 TF2 Gamemodes, %d FGD Entities & %d Official Valve TF2 Maps" % [
-		core.get_fgd_class_count(), core.list_maps().size()
-	]
-	sub.add_theme_font_override("font", fonts["body"]); sub.add_theme_font_size_override("font_size", 12)
-	sub.add_theme_color_override("font_color", HudWidgets.COL_TX_MUTED)
-	title_vb.add_child(sub)
-
-	var open_vmf_h := Button.new(); open_vmf_h.text = "Open .VMF"
-	HudWidgets.style_tf2_button(open_vmf_h, fonts["body"], 12)
-	open_vmf_h.pressed.connect(func(): audio.play("click"); _open_file_dialog("vmf"))
-	hdr.add_child(open_vmf_h)
-
-	var set_hb := Button.new(); set_hb.text = "Settings"
-	HudWidgets.style_tf2_button(set_hb, fonts["body"], 12)
-	set_hb.pressed.connect(func(): audio.play("click"); settings_modal.open_modal())
-	hdr.add_child(set_hb)
-
-	var resume_b := Button.new(); resume_b.text = "Continue Editing"
-	HudWidgets.style_tf2_button(resume_b, fonts["heading"], 13, true)
-	resume_b.pressed.connect(func(): audio.play("click"); _show_welcome_hub(false))
-	hdr.add_child(resume_b)
-
-	var cols := HBoxContainer.new(); cols.size_flags_vertical = Control.SIZE_EXPAND_FILL; cols.add_theme_constant_override("separation", 16)
-	vb.add_child(cols)
-
-	# LEFT COLUMN: VISUAL GAMEMODE STARTER CARDS
-	var left_col := VBoxContainer.new(); left_col.size_flags_horizontal = Control.SIZE_EXPAND_FILL; left_col.size_flags_stretch_ratio = 1.45
-	left_col.add_theme_constant_override("separation", 8); cols.add_child(left_col)
-
-	var gm_hdr := Label.new(); gm_hdr.text = "START A NEW TF2 MAP (ALL 12 GAMEMODES)"
-	gm_hdr.add_theme_font_override("font", fonts["heading"]); gm_hdr.add_theme_font_size_override("font_size", 13)
-	gm_hdr.add_theme_color_override("font_color", HudWidgets.COL_ACC)
-	left_col.add_child(gm_hdr)
-
-	var gm_scroll := ScrollContainer.new(); gm_scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL; left_col.add_child(gm_scroll)
-	var grid := GridContainer.new(); grid.columns = 2; grid.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	grid.add_theme_constant_override("h_separation", 8); grid.add_theme_constant_override("v_separation", 8)
-	gm_scroll.add_child(grid)
-
-	var gm_icons := {
-		"koth": "cap_point", "pl": "bomb_cart", "plr": "bomb_cart", "ctf": "intel",
-		"cp_5cp": "spawn_red", "cp_ad": "cap_point", "mvm": "upgrade_station", "arena": "spawn_blu",
-		"medieval": "barrel", "sd": "intel", "pass": "sentry", "mge_jump": "dispenser",
-	}
-	for gm in Tf2GamemodesScript.GAMEMODES:
-		var mid: String = gm["id"]
-		var gb := Button.new()
-		gb.custom_minimum_size = Vector2(0, 68); gb.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		gb.focus_mode = Control.FOCUS_NONE
-		var gsb := StyleBoxFlat.new()
-		gsb.bg_color = HudWidgets.COL_BG_CARD; gsb.border_color = HudWidgets.COL_SLOT_BD
-		gsb.set_border_width_all(1); gsb.set_corner_radius_all(9)
-		var gsbh := gsb.duplicate(); gsbh.bg_color = HudWidgets.COL_SLOT_HOV; gsbh.border_color = HudWidgets.COL_ACC
-		gb.add_theme_stylebox_override("normal", gsb); gb.add_theme_stylebox_override("hover", gsbh); gb.add_theme_stylebox_override("pressed", gsbh)
-
-		var ghb := HBoxContainer.new()
-		ghb.set_anchors_preset(Control.PRESET_FULL_RECT)
-		ghb.offset_left = 8; ghb.offset_right = -8; ghb.offset_top = 6; ghb.offset_bottom = -6
-		ghb.add_theme_constant_override("separation", 10)
-		ghb.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		gb.add_child(ghb)
-
-		var ic_box := PanelContainer.new()
-		ic_box.custom_minimum_size = Vector2(52, 52)
-		ic_box.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		var isb := StyleBoxFlat.new()
-		isb.bg_color = Color(0.10, 0.09, 0.08, 0.96); isb.border_color = HudWidgets.COL_ACC
-		isb.set_border_width_all(1); isb.set_corner_radius_all(7)
-		ic_box.add_theme_stylebox_override("panel", isb)
-		ghb.add_child(ic_box)
-
-		var itr := TextureRect.new()
-		itr.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
-		itr.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
-		itr.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		var ikey: String = str(gm_icons.get(mid, "crate"))
-		if icon_cache != null:
-			var itex: Texture2D = icon_cache.get_icon(ikey)
-			if itex != null:
-				itr.texture = itex
-			else:
-				var w_itr: WeakRef = weakref(itr)
-				icon_cache.icon_ready.connect(func(k: String, tx: Texture2D):
-					if k == ikey:
-						var o = w_itr.get_ref()
-						if o != null: o.texture = tx
-				)
-		ic_box.add_child(itr)
-
-		var gtvb := VBoxContainer.new()
-		gtvb.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		gtvb.alignment = BoxContainer.ALIGNMENT_CENTER
-		gtvb.add_theme_constant_override("separation", 2)
-		gtvb.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		ghb.add_child(gtvb)
-		var g1 := Label.new(); g1.text = str(gm["name"])
-		g1.add_theme_font_override("font", fonts["heading"]); g1.add_theme_font_size_override("font_size", 12)
-		g1.add_theme_color_override("font_color", HudWidgets.COL_TX); g1.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		gtvb.add_child(g1)
-		var g2 := Label.new(); g2.text = "%s  â€¢  Starter Arena" % str(gm["short"])
-		g2.add_theme_font_override("font", fonts["body"]); g2.add_theme_font_size_override("font_size", 10)
-		g2.add_theme_color_override("font_color", HudWidgets.COL_TX_MUTED); g2.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		gtvb.add_child(g2)
-
-		gb.pressed.connect(func(): audio.play("click"); _load_gamemode(mid); _show_welcome_hub(false))
-		grid.add_child(gb)
-
-	var foot_l := HBoxContainer.new(); foot_l.add_theme_constant_override("separation", 8); left_col.add_child(foot_l)
-	var open_imp := Button.new(); open_imp.text = "Import 3D Model (.OBJ / .GLB)..."
-	HudWidgets.style_tf2_button(open_imp, fonts["body"], 11)
-	open_imp.pressed.connect(func(): audio.play("click"); _show_welcome_hub(false); _open_file_dialog("model"))
-	foot_l.add_child(open_imp)
-
-	# RIGHT COLUMN: OFFICIAL TF2 MAPS GALLERY WITH GAMEMODE TAGS
-	var right_col := VBoxContainer.new(); right_col.size_flags_horizontal = Control.SIZE_EXPAND_FILL; right_col.size_flags_stretch_ratio = 1.1
-	right_col.add_theme_constant_override("separation", 8); cols.add_child(right_col)
-
-	var bsp_hdr := Label.new(); bsp_hdr.text = "EXPLORE OFFICIAL TF2 MAPS (%d INSTALLED)" % core.list_maps().size()
-	bsp_hdr.add_theme_font_override("font", fonts["heading"]); bsp_hdr.add_theme_font_size_override("font_size", 13)
-	bsp_hdr.add_theme_color_override("font_color", HudWidgets.COL_ACC)
-	right_col.add_child(bsp_hdr)
-
-	var search := LineEdit.new(); search.placeholder_text = "Filter 150+ official TF2 maps (upward, turbine, degroot...)"
-	right_col.add_child(search)
-
-	var map_scroll := ScrollContainer.new(); map_scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL; right_col.add_child(map_scroll)
-	var map_list := VBoxContainer.new(); map_list.size_flags_horizontal = Control.SIZE_EXPAND_FILL; map_list.add_theme_constant_override("separation", 5)
-	map_scroll.add_child(map_list)
-
-	var all_maps: PackedStringArray = core.list_maps()
-	var populate_maps := func(filter: String) -> void:
-		for ch in map_list.get_children():
-			ch.queue_free()
-		var fl := filter.to_lower().strip_edges()
-		var shown := 0
-		var featured := ["pl_upward.bsp", "ctf_turbine.bsp", "ctf_2fort.bsp", "koth_viaduct.bsp", "cp_degrootkeep_rats.bsp", "cp_ambush_event.bsp", "mvm_decoy.bsp", "cp_process_final.bsp", "sd_doomsday.bsp"]
-		var ordered: Array[String] = []
-		if fl.is_empty():
-			for fm in featured:
-				if all_maps.has(fm): ordered.append(fm)
-		for m in all_maps:
-			if fl.is_empty() or m.to_lower().find(fl) != -1:
-				if not ordered.has(m): ordered.append(m)
-		for m in ordered:
-			if shown >= 45: break
-			var mcopy := m
-			var prefix := m.get_slice("_", 0).to_upper()
-			var mb := Button.new()
-			mb.custom_minimum_size = Vector2(0, 38)
-			mb.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-			HudWidgets.style_tf2_button(mb, fonts["body"], 11)
-			var mhb := HBoxContainer.new()
-			mhb.set_anchors_preset(Control.PRESET_FULL_RECT)
-			mhb.offset_left = 10; mhb.offset_right = -10
-			mhb.alignment = BoxContainer.ALIGNMENT_CENTER
-			mhb.mouse_filter = Control.MOUSE_FILTER_IGNORE
-			mb.add_child(mhb)
-			var ml := Label.new(); ml.text = m.get_basename()
-			ml.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-			ml.add_theme_font_override("font", fonts["body"]); ml.add_theme_font_size_override("font_size", 12)
-			ml.add_theme_color_override("font_color", HudWidgets.COL_TX); ml.mouse_filter = Control.MOUSE_FILTER_IGNORE
-			mhb.add_child(ml)
-			var mtag := Label.new(); mtag.text = " " + prefix + " "
-			mtag.add_theme_font_override("font", fonts["heading"]); mtag.add_theme_font_size_override("font_size", 10)
-			mtag.add_theme_color_override("font_color", HudWidgets.COL_CYAN if prefix in ["PL", "PLR", "CTF"] else HudWidgets.COL_ACC)
-			mtag.mouse_filter = Control.MOUSE_FILTER_IGNORE
-			mhb.add_child(mtag)
-			mb.pressed.connect(func(): audio.play("click"); _load_official_bsp(mcopy); _show_welcome_hub(false))
-			map_list.add_child(mb)
-			shown += 1
-
-	populate_maps.call("")
-	search.text_changed.connect(populate_maps)
-
-	# FOOTER: VPK & VAC-Safe Status Pill
-	var foot := HBoxContainer.new(); foot.add_theme_constant_override("separation", 10); vb.add_child(foot)
-	var rec := Label.new()
-	rec.text = "Tip: Press F5 anytime to playtest with Scout / Soldier / Heavy / Pyro / Demo!"
-	rec.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	rec.add_theme_font_override("font", fonts["body"]); rec.add_theme_font_size_override("font_size", 11)
-	rec.add_theme_color_override("font_color", HudWidgets.COL_TX_MUTED)
-	foot.add_child(rec)
-	var vpk_badge := Label.new()
-	vpk_badge.text = "  TF2 VPKs Mounted  â€¢  16,697 Models  â€¢  VAC-Safe  "
-	vpk_badge.add_theme_font_override("font", fonts["heading"]); vpk_badge.add_theme_font_size_override("font_size", 11)
-	vpk_badge.add_theme_color_override("font_color", HudWidgets.COL_GREEN)
-	foot.add_child(vpk_badge)
 
 # ==============================================================================
 # DRAG-AND-DROP FROM REAL 3D TF2 ASSET TRAY INTO 3D VIEWPORT!
@@ -1725,6 +1683,10 @@ func _on_settings_applied() -> void:
 	settings.apply_runtime(self)
 	_sync_grid_from_settings()
 	split_2d_panel.visible = settings.show_2d_split and not viewing_bsp and stage != Stage.PLAYTEST
+	_update_top_bar_compact()
+	_rebuild_bottom_dock()
+	if welcome_panel != null and welcome_panel.visible:
+		welcome_panel.open_hub()
 	if split_2d_panel.visible:
 		right_drawer.visible = false
 		_refresh_2d_views()
@@ -1789,9 +1751,15 @@ func _update_3d_gizmo() -> void:
 		_gizmo_root.visible = false
 
 func _show_welcome_hub(show: bool) -> void:
-	welcome_panel.visible = show
-	if show and stage == Stage.PLAYTEST:
-		set_stage(Stage.BUILD)
+	if show:
+		if stage == Stage.PLAYTEST:
+			set_stage(Stage.BUILD)
+		if welcome_panel != null and welcome_panel.has_method("open_hub"):
+			welcome_panel.open_hub()
+		else:
+			welcome_panel.visible = true
+	else:
+		welcome_panel.visible = false
 
 func _clear_selection() -> void:
 	selected_solid = -1; selected_solids.clear(); selected_face = -1; selected_entity = -1
@@ -2016,6 +1984,105 @@ func _open_check_problems_drawer() -> void:
 	_clear_drawer("CHECK MAP FOR PROBLEMS (ALT+P)")
 	EditorDrawersScript.build_check_problems_drawer(self, right_drawer_vbox)
 
+func _open_mvm_studio() -> void:
+	_clear_drawer("MANN VS. MACHINE (MVM) STUDIO")
+	EditorDrawersScript.build_mvm_studio(self, right_drawer_vbox)
+
+func _open_payload_studio() -> void:
+	_clear_drawer("PAYLOAD TRACK SPLINE STUDIO")
+	EditorDrawersScript.build_payload_studio(self, right_drawer_vbox)
+
+func export_mvm_pop_mission(custom_out_path: String = "") -> String:
+	var mname: String = doc.get_map_name()
+	if mname.is_empty(): mname = "mvm_custom"
+	var out_dir := repo_root.path_join("godot/maps")
+	DirAccess.make_dir_recursive_absolute(out_dir)
+	var pop_path := custom_out_path if not custom_out_path.is_empty() else out_dir.path_join(mname + "_normal.pop")
+	var tank_block := ""
+	if mvm_has_tank:
+		tank_block = """
+		WaveSpawn
+		{
+			Name "wave3_tank"
+			TotalCount 1
+			SpawnCount 1
+			WaitBeforeStarting 6
+			TotalCurrency 300
+			Tank
+			{
+				Health 18000
+				Speed 75
+				Name "boss_tank"
+				StartingPathTrackNode "pb_track_01"
+				OnBombDroppedOutput { Target boss_deploy_relay Action Trigger }
+			}
+		}"""
+	var pop_txt := """#base robot_giant.pop
+#base robot_standard.pop
+
+WaveSchedule
+{
+	StartingCurrency %d
+	RespawnWaveTime 4
+	CanBotsAttackWhileInSpawnRoom no
+
+	Wave
+	{
+		StartWaveOutput { Target wave_start_relay Action Trigger }
+		DoneOutput { Target wave_finished_relay Action Trigger }
+		WaveSpawn
+		{
+			Name "wave1_scouts"
+			Where spawnbot
+			TotalCount %d
+			MaxActive 6
+			SpawnCount 2
+			WaitBetweenSpawns 4
+			TotalCurrency 400
+			TFBot { Class Scout Skill Easy }
+		}
+	}
+
+	Wave
+	{
+		StartWaveOutput { Target wave_start_relay Action Trigger }
+		DoneOutput { Target wave_finished_relay Action Trigger }
+		WaveSpawn
+		{
+			Name "wave2_soldiers"
+			Where spawnbot
+			TotalCount %d
+			MaxActive 6
+			SpawnCount 2
+			WaitBetweenSpawns 5
+			TotalCurrency 500
+			TFBot { Class Soldier Skill Normal }
+		}
+	}
+
+	Wave
+	{
+		StartWaveOutput { Target wave_start_relay Action Trigger }
+		DoneOutput { Target wave_finished_relay Action Trigger }
+		WaveSpawn
+		{
+			Name "wave3_giants"
+			Where spawnbot_giant
+			TotalCount %d
+			MaxActive 2
+			SpawnCount 1
+			WaitBetweenSpawns 12
+			TotalCurrency 600
+			TFBot { Template T_TFBot_Giant_Heavyweapons }
+		}%s
+	}
+}
+""" % [mvm_start_cash, mvm_w1_scouts, mvm_w2_soldiers, mvm_w3_giants, tank_block]
+	var f := FileAccess.open(pop_path, FileAccess.WRITE)
+	if f != null:
+		f.store_string(pop_txt)
+	return pop_path
+
 func _open_visgroups_drawer() -> void:
 	_clear_drawer("VISGROUPS (LAYER VISIBILITY)")
 	var toggles := [
@@ -2044,6 +2111,17 @@ func _open_clip_drawer() -> void:
 		_toast("Select a brush solid first to slice with Shift+X Clip!")
 		return
 	_clear_drawer("CLIPPING TOOL (SHIFT+X)")
+	var draw_clip_b := Button.new()
+	draw_clip_b.text = "ACTIVE: Click Point A -> Point B in 3D" if active_tool == "clip_3d" else "Interactive 3D Clip (Click A -> B)"
+	draw_clip_b.custom_minimum_size = Vector2(0, 38)
+	HudWidgets.style_tf2_button(draw_clip_b, fonts["heading"], 11, true)
+	draw_clip_b.pressed.connect(func():
+		audio.play("click")
+		active_tool = "clip_3d"; _clip_3d_active = false
+		_toast("3D Clip Mode: Click Point A then Point B across your brush to slice cleanly!")
+		_open_clip_drawer()
+	)
+	right_drawer_vbox.add_child(draw_clip_b)
 	var modes := ["Keep Both Halves (Split)", "Keep Front Half Only", "Keep Back Half Only"]
 	for i in range(3):
 		var b := Button.new(); b.text = modes[i]
@@ -2244,7 +2322,19 @@ func _rotate_selection() -> void:
 			_record_history("Rotate Entity"); ent_vis.sync_all(); audio.play("click")
 
 func _duplicate_selection() -> void:
-	if selected_solid >= 0:
+	if selected_solids.size() > 1:
+		var new_ids: Array[int] = []
+		for sid in selected_solids:
+			var nid: int = doc.duplicate_solid(sid, Vector3(grid_m, 0, 0))
+			if nid >= 0: new_ids.append(nid)
+		if not new_ids.is_empty():
+			_record_history("Duplicate %d Solids" % new_ids.size())
+			map_sync.sync_all()
+			selected_solids = new_ids
+			selected_solid = new_ids[0]
+			_refresh_selection_bar(); _update_3d_gizmo(); audio.play("place")
+			_toast("Cloned %d selected solids!" % new_ids.size())
+	elif selected_solid >= 0:
 		var nid: int = doc.duplicate_solid(selected_solid, Vector3(grid_m, 0, 0))
 		if nid >= 0: _record_history("Duplicate Solid"); map_sync.sync_all(); _select_solid(nid, -1); audio.play("place")
 	elif selected_entity >= 0:
@@ -2252,7 +2342,17 @@ func _duplicate_selection() -> void:
 		if nid >= 0: _record_history("Duplicate Entity"); ent_vis.sync_all(); _select_entity(nid); audio.play("place")
 
 func _delete_selection() -> void:
-	if selected_solid >= 0:
+	if selected_solids.size() > 1:
+		var sorted := selected_solids.duplicate()
+		sorted.sort()
+		sorted.reverse()
+		var cnt := 0
+		for sid in sorted:
+			if doc.delete_solid(sid): cnt += 1
+		if cnt > 0:
+			_record_history("Delete %d Solids" % cnt); _clear_selection(); map_sync.sync_all(); audio.play("delete")
+			_toast("Deleted %d solids (Ctrl+Z to Undo)" % cnt)
+	elif selected_solid >= 0:
 		var idx := selected_solid
 		if doc.delete_solid(idx):
 			_record_history("Delete Solid"); _clear_selection(); map_sync.sync_all(); audio.play("delete")
@@ -2265,7 +2365,12 @@ func _delete_selection() -> void:
 
 func _nudge_selection(delta: Vector3) -> void:
 	if not settings.arrow_key_nudge: return
-	if selected_solid >= 0 and doc.translate_solid(selected_solid, delta):
+	if selected_solids.size() > 1:
+		var moved := false
+		for sid in selected_solids:
+			if doc.translate_solid(sid, delta): moved = true
+		if moved: _commit_solid_edit("Nudge %d Solids" % selected_solids.size())
+	elif selected_solid >= 0 and doc.translate_solid(selected_solid, delta):
 		_commit_solid_edit("Nudge Solid")
 	elif selected_entity >= 0:
 		var ents: Array = doc.get_entities()
@@ -2381,7 +2486,9 @@ func _update_history_buttons() -> void:
 		redo_btn.disabled = not can_r
 		redo_btn.tooltip_text = "Redo: %s (Ctrl+Y)" % str(_history_entries[_history_idx + 1]["label"]) if can_r else "Nothing to Redo"
 	if history_btn != null:
-		history_btn.text = "History (%d)" % maxi(1, _history_entries.size())
+		var sf := maxf(get_window().content_scale_factor, 0.5)
+		var eff_w := float(get_window().size.x) / sf
+		history_btn.text = ("Hist(%d)" if eff_w < 1260.0 else "History (%d)") % maxi(1, _history_entries.size())
 
 func _open_history_drawer() -> void:
 	_clear_drawer("MAP HISTORY TIMELINE")
@@ -2468,20 +2575,41 @@ func _open_file_dialog(kind: String) -> void:
 	file_dialog.filters = PackedStringArray(["*.vmf ; Valve Map Files"] if kind == "vmf" else ["*.obj, *.glb, *.gltf ; 3D Models"])
 	file_dialog.popup_centered()
 
+func _detect_gamemode_from_name(mname: String) -> String:
+	var ml := mname.to_lower()
+	if ml.begins_with("mvm_"): return "mvm"
+	if ml.begins_with("plr_"): return "plr"
+	if ml.begins_with("pl_"): return "pl"
+	if ml.begins_with("ctf_"): return "ctf"
+	if ml.begins_with("sd_"): return "sd"
+	if ml.begins_with("arena_"): return "arena"
+	if ml.begins_with("pass_"): return "pass"
+	if ml.begins_with("jump_") or ml.begins_with("mge_"): return "mge_jump"
+	if ml.begins_with("cp_"): return "cp_5cp"
+	return "koth"
+
+func _load_vmf_file(path: String) -> void:
+	var r: Dictionary = doc.load_vmf(path)
+	if not r.get("ok", false):
+		audio.play("warn")
+		_toast("Failed to open %s: %s" % [path.get_file(), str(r.get("error", "invalid VMF"))])
+		return
+	_clear_official_bsp(); _clear_selection()
+	doc.clear_dirty()
+	active_gamemode = _detect_gamemode_from_name(doc.get_map_name())
+	_dock_ent_cat = "_mode"
+	active_sky = doc.get_skyname(); we.environment.sky = assets.get_sky(active_sky)
+	grid_floor.visible = settings.show_grid_floor
+	map_sync.clear_all(); map_sync.sync_all(); ent_vis.sync_all()
+	map_title_lbl.text = "| " + doc.get_map_name()
+	_reset_history("Opened " + path.get_file())
+	_sync_mode_visibility(); _rebuild_bottom_dock(); _show_welcome_hub(false)
+	audio.play("save")
+	_toast("Opened %s (%s mode)" % [path.get_file(), active_gamemode.to_upper()])
+
 func _on_file_selected(path: String) -> void:
 	if str(file_dialog.get_meta("kind", "model")) == "vmf":
-		var r: Dictionary = doc.load_vmf(path)
-		if not r.get("ok", false):
-			_toast("Failed to open %s: %s" % [path.get_file(), str(r.get("error", "invalid VMF"))])
-			return
-		_clear_official_bsp(); _clear_selection()
-		doc.clear_dirty()
-		active_sky = doc.get_skyname(); we.environment.sky = assets.get_sky(active_sky)
-		grid_floor.visible = settings.show_grid_floor
-		map_sync.clear_all(); map_sync.sync_all(); ent_vis.sync_all()
-		map_title_lbl.text = "| " + doc.get_map_name()
-		_sync_mode_visibility(); _rebuild_bottom_dock(); _show_welcome_hub(false)
-		_toast("Opened " + path.get_file())
+		_load_vmf_file(path)
 	else:
 		_import_3d_model_file(path)
 
@@ -2772,7 +2900,12 @@ func _update_gizmo_drag(screen_pos: Vector2) -> void:
 	if absf(step) < grid_m * 0.5:
 		return
 	var delta := _gizmo_axis * step
-	if selected_solid >= 0:
+	if not selected_solids.is_empty():
+		for sid in selected_solids:
+			doc.translate_solid(sid, delta)
+			map_sync.sync_solid(sid)
+		_refresh_2d_views()
+	elif selected_solid >= 0:
 		doc.translate_solid(selected_solid, delta)
 		map_sync.sync_solid(selected_solid)
 		_refresh_2d_views()
@@ -2905,6 +3038,26 @@ func _handle_left_click(screen_pos: Vector2, shift_held: bool = false, alt_held:
 			if right_drawer.visible: _open_materials_drawer()
 		return
 
+	if active_tool == "clip_3d" and hover_valid:
+		if selected_solid < 0:
+			_toast("Select a brush solid first to slice!"); return
+		if not _clip_3d_active:
+			_clip_3d_active = true; _clip_3d_pt_a = hover_pos
+			_spawn_place_fx(hover_pos, HudWidgets.COL_CYAN); audio.play("click")
+			_toast("3D Clip Point A set — click Point B to slice brush!")
+		else:
+			var edge := hover_pos - _clip_3d_pt_a
+			edge.y = 0.0
+			if edge.length() > 0.25:
+				var nrm := Vector3(-edge.z, 0.0, edge.x).normalized()
+				var res: int = doc.clip_solid(selected_solid, _clip_3d_pt_a, nrm, _clip_keep_mode)
+				if res >= 0:
+					_record_history("3D Clip Solid"); map_sync.sync_all(); _select_solid(res, -1)
+					_spawn_place_fx(hover_pos, HudWidgets.COL_CYAN); audio.play("carve")
+					_toast("Sliced solid along your custom 3D cut plane!")
+			_clip_3d_active = false
+		return
+
 	if active_tool == "floor" and hover_valid:
 		_drawing_box = true; _box_start = hover_pos; return
 
@@ -2941,6 +3094,20 @@ func _place_smart_entity(cls: String, pos: Vector3) -> int:
 
 func _place_tool_at(pos: Vector3) -> void:
 	var b: Dictionary = Tf2GamemodesScript.get_biome(active_biome)
+	if active_tool == "payload_track":
+		_payload_track_idx += 1
+		var tname := "pb_track_%02d" % _payload_track_idx
+		var eid: int = doc.add_point_entity("path_track", pos + Vector3(0, 0.35, 0), {"targetname": tname})
+		if _payload_prev_ent >= 0 and _payload_track_idx > 1:
+			doc.set_entity_kv(_payload_prev_ent, "target", tname)
+		_payload_prev_ent = eid
+		_record_history("Add Track Node " + tname)
+		ent_vis.sync_all()
+		if eid >= 0: _select_entity(eid)
+		_spawn_place_fx(pos, Color(0.98, 0.80, 0.20))
+		audio.play("place")
+		_toast("Linked Payload/Tank Track Node %s! Click next point to extend rail." % tname)
+		return
 	if active_tool == "place_fgd_entity":
 		var eid: int = _place_smart_entity(active_fgd_entity, pos)
 		_record_history("Place " + active_fgd_entity)
@@ -3152,7 +3319,10 @@ func _process(delta: float) -> void:
 			DirAccess.make_dir_recursive_absolute(as_dir)
 			var max_b: int = maxi(1, int(settings.backup_count))
 			_autosave_slot = (_autosave_slot % max_b) + 1
-			doc.save_vmf(as_dir.path_join("%s_autosave_%02d.vmf" % [doc.get_map_name(), _autosave_slot]))
+			var orig_nm: String = doc.get_map_name()
+			var base_nm: String = orig_nm.get_slice("_autosave_", 0)
+			doc.save_vmf(as_dir.path_join("%s_autosave_%02d.vmf" % [base_nm, _autosave_slot]))
+			doc.set_map_name(base_nm)
 
 	# Gate 3D WASD/E/C fly on RMB-held (and zero Ctrl/Alt modifiers) so Ctrl+S/Ctrl+D/Shift+A/Shift+E NEVER move the camera!
 	var no_mod := not Input.is_key_pressed(KEY_CTRL) and not Input.is_key_pressed(KEY_ALT)
@@ -3180,7 +3350,8 @@ func _process(delta: float) -> void:
 	if status_pill.visible:
 		status_lbl_top.text = "XYZ: %du, %du, %du" % [int(hover_pos.x * UPM), int(-hover_pos.z * UPM), int(hover_pos.y * UPM)]
 		var sealed_s := "SEALED" if doc.is_map_sealed() else "UNSEALED"
-		status_lbl_bot.text = "%s | %d FPS | UI %d%%" % [sealed_s, Engine.get_frames_per_second(), int(round(settings.ui_scale * 100.0))]
+		var eff_pct := int(round(get_window().content_scale_factor * 100.0)) if get_window() != null else int(round(settings.ui_scale * 100.0))
+		status_lbl_bot.text = "%s | %d FPS | UI %d%%" % [sealed_s, Engine.get_frames_per_second(), eff_pct]
 		status_lbl_bot.add_theme_color_override("font_color", HudWidgets.COL_GREEN if doc.is_map_sealed() else HudWidgets.COL_RED)
 
 	if stage == Stage.PLAYTEST:
@@ -3373,6 +3544,23 @@ func _setup_auto_shot(idx: int) -> void:
 		"v7_clean_winter":
 			_show_welcome_hub(false); _load_gamemode("koth", "winter", false); set_stage(Stage.STYLE)
 			right_drawer.visible = false; _dock_prop_cat = "winter"; _dock_prop_page = 0; _rebuild_bottom_dock()
+			cam_pos = Vector3(20, 14, 24); cam_yaw = 0.65; cam_pitch = -0.42; _apply_editor_cam()
+		"v8_hub_create":
+			_load_gamemode("koth", "badlands", false); set_stage(Stage.BUILD)
+			welcome_panel.open_hub(0)
+		"v8_hub_saved":
+			_load_gamemode("koth", "badlands", false); set_stage(Stage.BUILD)
+			welcome_panel.open_hub(1)
+		"v8_hub_official":
+			_load_gamemode("koth", "badlands", false); set_stage(Stage.BUILD)
+			welcome_panel.open_hub(2)
+		"v8_mvm_studio":
+			_show_welcome_hub(false); _load_gamemode("mvm", "mvm", false); set_stage(Stage.GAMEPLAY)
+			_dock_ent_cat = "_mode"; _rebuild_bottom_dock(); _open_mvm_studio()
+			cam_pos = Vector3(20, 14, 24); cam_yaw = 0.65; cam_pitch = -0.42; _apply_editor_cam()
+		"v8_payload_studio":
+			_show_welcome_hub(false); _load_gamemode("pl", "badlands", false); set_stage(Stage.GAMEPLAY)
+			_dock_ent_cat = "_mode"; _rebuild_bottom_dock(); _open_payload_studio()
 			cam_pos = Vector3(20, 14, 24); cam_yaw = 0.65; cam_pitch = -0.42; _apply_editor_cam()
 	if not viewing_bsp and not settings_modal.visible:
 		_update_hover(get_viewport().get_visible_rect().size * Vector2(0.42, 0.52))

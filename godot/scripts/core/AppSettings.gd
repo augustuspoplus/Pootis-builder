@@ -186,16 +186,22 @@ func from_dict(d: Dictionary) -> void:
 func compute_effective_scale(win: Window) -> float:
 	# Native 1:1 HiDPI scaling (window/stretch/mode="disabled") for razor-sharp text & 1px borders!
 	var user_mult := clampf(ui_scale, 0.75, 2.25)
-	if not auto_dpi or DisplayServer.get_name() == "headless":
-		return user_mult
-	var scr := DisplayServer.window_get_current_screen(win.get_window_id())
-	var dpi: int = DisplayServer.screen_get_dpi(scr)
-	var os_scale: float = DisplayServer.screen_get_scale(scr)
-	if os_scale <= 0.01:
-		os_scale = clampf(float(dpi) / 96.0, 1.0, 2.0)
-	# Snap cleanly to crisp steps (1.0 / 1.25 / 1.5 / 2.0) so fonts never blur on fractional ratios!
-	var snapped_os := snappedf(clampf(os_scale, 1.0, 2.0), 0.25)
-	return clampf(snapped_os * user_mult, 0.75, 2.50)
+	var eff := user_mult
+	if auto_dpi and DisplayServer.get_name() != "headless":
+		var scr := DisplayServer.window_get_current_screen(win.get_window_id())
+		var dpi: int = DisplayServer.screen_get_dpi(scr)
+		var os_scale: float = DisplayServer.screen_get_scale(scr)
+		if os_scale <= 0.01:
+			os_scale = clampf(float(dpi) / 96.0, 1.0, 2.0)
+		var snapped_os := snappedf(clampf(os_scale, 1.0, 2.0), 0.25)
+		# Only boost by OS scale when user is near 100%-135%; at explicit high zoom (150%+) honor exact user scale
+		eff = maxf(snapped_os * user_mult if user_mult <= 1.35 else user_mult, user_mult)
+	# Safety cap: always keep at least ~760 logical px width & ~420 logical px height so UI NEVER overflows!
+	var win_sz: Vector2i = win.size
+	if win_sz.x > 400 and win_sz.y > 300:
+		var max_safe := minf(float(win_sz.x) / 760.0, float(win_sz.y) / 420.0)
+		eff = minf(eff, clampf(max_safe, 1.0, 2.25))
+	return clampf(snappedf(eff, 0.05), 0.75, 2.25)
 
 func apply_runtime(main_app: Node3D) -> void:
 	if DisplayServer.get_name() == "headless":

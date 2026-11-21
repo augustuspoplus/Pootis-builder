@@ -1,0 +1,8 @@
+#base robot_giant.pop
+#base robot_standard.pop
+WaveSchedule
+{
+	StartingCurrency 800
+	RespawnWaveTime 4
+	Wave { WaveSpawn { Where spawnbot TotalCount 16 MaxActive 6 SpawnCount 2 TotalCurrency 400 TFBot { Class Scout Skill Easy } } }
+}
