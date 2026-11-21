@@ -2613,6 +2613,18 @@ func _unhandled_input(event: InputEvent) -> void:
 			elif event.keycode == KEY_Z and event.ctrl_pressed: _do_undo()
 			elif event.keycode == KEY_Y and event.ctrl_pressed: _do_redo()
 			elif event.keycode == KEY_S and event.ctrl_pressed: _save_current_vmf()
+			elif (event.keycode == KEY_EQUAL or event.keycode == KEY_KP_ADD) and event.ctrl_pressed:
+				settings.ui_scale = clampf(snappedf(settings.ui_scale + 0.15, 0.05), 0.75, 2.25)
+				settings.save_to_disk(); _on_settings_applied(); audio.play("click")
+				_toast("UI Scale: %d%%  (Ctrl+= / Ctrl+- to zoom)" % int(round(settings.ui_scale * 100.0)))
+			elif (event.keycode == KEY_MINUS or event.keycode == KEY_KP_SUBTRACT) and event.ctrl_pressed:
+				settings.ui_scale = clampf(snappedf(settings.ui_scale - 0.15, 0.05), 0.75, 2.25)
+				settings.save_to_disk(); _on_settings_applied(); audio.play("click")
+				_toast("UI Scale: %d%%  (Ctrl+= / Ctrl+- to zoom)" % int(round(settings.ui_scale * 100.0)))
+			elif event.keycode == KEY_0 and event.ctrl_pressed:
+				settings.ui_scale = 1.15
+				settings.save_to_disk(); _on_settings_applied(); audio.play("click")
+				_toast("UI Scale reset to 115%")
 			elif event.keycode == KEY_D and event.ctrl_pressed: _duplicate_selection()
 			elif event.keycode == KEY_W and event.ctrl_pressed and event.shift_pressed: _untie_selected_entity()
 			elif event.keycode == KEY_T and event.ctrl_pressed: _open_tie_entity_drawer()

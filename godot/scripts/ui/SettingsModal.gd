@@ -255,13 +255,13 @@ func _rebuild_tab() -> void:
 			_toggle_row("Automatic Monitor DPI Scaling",
 				"Adapts gently on narrow displays while keeping 1080p/1440p/4K crisp with zero double-scaling.",
 				settings.auto_dpi, func(v): settings.auto_dpi = v)
-			_slider_row("UI Scale Multiplier", "Applies cleanly on mouse release so the slider never jitters under your cursor.",
-				75.0, 140.0, 5.0, settings.ui_scale * 100.0, "%",
+			_slider_row("UI Scale Multiplier", "Applies cleanly on mouse release (or use Ctrl+= / Ctrl+- anytime for instant zoom!).",
+				75.0, 225.0, 5.0, settings.ui_scale * 100.0, "%",
 				func(v): settings.ui_scale = v / 100.0, true)
 			var pr_row := HBoxContainer.new()
 			pr_row.add_theme_constant_override("separation", 6)
 			content_vbox.add_child(pr_row)
-			for pct: int in [85, 100, 115, 125, 140]:
+			for pct: int in [100, 125, 150, 175, 200, 225]:
 				var pb := Button.new()
 				pb.text = "%d%%" % pct
 				HudWidgets.style_tf2_button(pb, fonts["body"], 12, absf(settings.ui_scale * 100.0 - float(pct)) < 2.5)

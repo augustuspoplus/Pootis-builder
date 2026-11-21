@@ -8,7 +8,7 @@ const CFG_PATH := "user://pootis_settings.cfg"
 
 # Tab 1: Display & UI Scale
 var auto_dpi: bool = true
-var ui_scale: float = 1.0          # 0.75 .. 1.50
+var ui_scale: float = 1.15         # 0.75 .. 2.25 (75% .. 225%)
 var window_mode: int = 1           # 0=Windowed, 1=Maximized, 2=Borderless Fullscreen
 var vsync: bool = true
 var icon_resolution: int = 160     # 128 / 160 / 192
@@ -61,7 +61,7 @@ func load_from_disk() -> void:
 	if cf.load(CFG_PATH) != OK:
 		return
 	auto_dpi = bool(cf.get_value("display", "auto_dpi", auto_dpi))
-	ui_scale = clampf(float(cf.get_value("display", "ui_scale", ui_scale)), 0.75, 1.50)
+	ui_scale = clampf(float(cf.get_value("display", "ui_scale", ui_scale)), 0.75, 2.25)
 	window_mode = clampi(int(cf.get_value("display", "window_mode", window_mode)), 0, 2)
 	vsync = bool(cf.get_value("display", "vsync", vsync))
 	icon_resolution = int(cf.get_value("display", "icon_resolution", icon_resolution))
@@ -150,7 +150,7 @@ func save_to_disk() -> void:
 	cf.save(CFG_PATH)
 
 func reset_defaults() -> void:
-	auto_dpi = true; ui_scale = 1.0; window_mode = 1; vsync = true
+	auto_dpi = true; ui_scale = 1.15; window_mode = 1; vsync = true
 	icon_resolution = 160; show_2d_split = false
 	msaa_level = 2; shadow_quality = 2; ssao_enabled = true
 	camera_fov = 75.0; back_clip_m = 650.0; prop_ambient_boost = 0.28; show_skybox_bg = true
@@ -185,7 +185,7 @@ func from_dict(d: Dictionary) -> void:
 
 func compute_effective_scale(win: Window) -> float:
 	# Native 1:1 HiDPI scaling (window/stretch/mode="disabled") for razor-sharp text & 1px borders!
-	var user_mult := clampf(ui_scale, 0.75, 1.50)
+	var user_mult := clampf(ui_scale, 0.75, 2.25)
 	if not auto_dpi or DisplayServer.get_name() == "headless":
 		return user_mult
 	var scr := DisplayServer.window_get_current_screen(win.get_window_id())
@@ -195,7 +195,7 @@ func compute_effective_scale(win: Window) -> float:
 		os_scale = clampf(float(dpi) / 96.0, 1.0, 2.0)
 	# Snap cleanly to crisp steps (1.0 / 1.25 / 1.5 / 2.0) so fonts never blur on fractional ratios!
 	var snapped_os := snappedf(clampf(os_scale, 1.0, 2.0), 0.25)
-	return clampf(snapped_os * user_mult, 0.75, 2.0)
+	return clampf(snapped_os * user_mult, 0.75, 2.50)
 
 func apply_runtime(main_app: Node3D) -> void:
 	if DisplayServer.get_name() == "headless":
