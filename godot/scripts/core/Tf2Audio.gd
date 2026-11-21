@@ -6,6 +6,7 @@ extends Node
 
 var core: Object
 var muted: bool = false
+var master_db: float = -8.0
 var _streams: Dictionary = {} # key -> AudioStreamWAV
 var _player: AudioStreamPlayer
 
@@ -28,13 +29,19 @@ func setup(p_core: Object) -> void:
 		_player.volume_db = -8.0
 		add_child(_player)
 
+func set_volume(db: float, is_muted: bool) -> void:
+	master_db = clampf(db, -36.0, 0.0)
+	muted = is_muted
+	if _player != null:
+		_player.volume_db = master_db
+
 func play(sfx_key: String, volume_db: float = -8.0) -> void:
 	if muted or core == null or _player == null:
 		return
 	var stream: AudioStreamWAV = _get_stream(sfx_key)
 	if stream == null:
 		return
-	_player.volume_db = volume_db
+	_player.volume_db = minf(volume_db, master_db)
 	_player.stream = stream
 	_player.play()
 

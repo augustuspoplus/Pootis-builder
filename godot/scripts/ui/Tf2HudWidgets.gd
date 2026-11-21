@@ -389,6 +389,7 @@ class RadialPieWheel extends Control:
 	func _init(p_font: Font) -> void:
 		font = p_font
 		set_anchors_preset(Control.PRESET_FULL_RECT)
+		mouse_filter = Control.MOUSE_FILTER_IGNORE
 		visible = false
 
 	func open_at(screen_pos: Vector2) -> void:
@@ -471,3 +472,80 @@ class ViewportOverlay extends Control:
 		if owner_ed == null:
 			return
 		owner_ed.draw_viewport_2d_overlay(self)
+
+static func _make_toggle_icon(on: bool) -> ImageTexture:
+	var w := 42
+	var h := 22
+	var img := Image.create(w, h, false, Image.FORMAT_RGBA8)
+	img.fill(Color(0, 0, 0, 0))
+	var track_col := COL_ACC if on else Color(0.28, 0.25, 0.22, 1.0)
+	var border_col := Color(0.96, 0.72, 0.42, 1.0) if on else Color(0.55, 0.49, 0.43, 1.0)
+	var knob_col := Color(0.98, 0.96, 0.92, 1.0) if on else Color(0.78, 0.73, 0.67, 1.0)
+	var r := float(h) * 0.5 - 1.0
+	var cy := float(h) * 0.5
+	for y in range(h):
+		for x in range(w):
+			var cx := clampf(float(x), r + 1.0, float(w) - r - 2.0)
+			var d := Vector2(float(x) - cx, float(y) - cy).length()
+			if d <= r:
+				img.set_pixel(x, y, border_col if d >= r - 1.5 else track_col)
+	var kx := float(w) - r - 1.0 if on else r + 1.0
+	var kr := r - 3.0
+	for y in range(h):
+		for x in range(w):
+			var d := Vector2(float(x) - kx, float(y) - cy).length()
+			if d <= kr:
+				img.set_pixel(x, y, knob_col)
+	return ImageTexture.create_from_image(img)
+
+static func create_global_theme(fonts: Dictionary) -> Theme:
+	var th := Theme.new()
+	var body_f: Font = fonts.get("body", null)
+	if body_f != null:
+		th.default_font = body_f
+	th.default_font_size = 12
+
+	var inp_sb := StyleBoxFlat.new()
+	inp_sb.bg_color = Color(0.08, 0.07, 0.06, 0.96)
+	inp_sb.border_color = Color(0.38, 0.33, 0.28, 0.90)
+	inp_sb.set_border_width_all(1)
+	inp_sb.set_corner_radius_all(5)
+	inp_sb.set_content_margin_all(5)
+	inp_sb.content_margin_left = 8; inp_sb.content_margin_right = 8
+
+	var inp_focus := inp_sb.duplicate()
+	inp_focus.border_color = COL_ACC
+	inp_focus.set_border_width_all(2)
+
+	for cls in ["LineEdit", "TextEdit"]:
+		th.set_stylebox("normal", cls, inp_sb)
+		th.set_stylebox("focus", cls, inp_focus)
+		th.set_color("font_color", cls, COL_TX)
+		th.set_color("font_placeholder_color", cls, COL_TX_MUTED)
+		th.set_font_size("font_size", cls, 12)
+
+	th.set_stylebox("normal", "OptionButton", inp_sb)
+	th.set_stylebox("hover", "OptionButton", inp_focus)
+	th.set_stylebox("pressed", "OptionButton", inp_focus)
+	th.set_color("font_color", "OptionButton", COL_TX)
+	th.set_font_size("font_size", "OptionButton", 12)
+
+	var pop_sb := StyleBoxFlat.new()
+	pop_sb.bg_color = Color(0.11, 0.10, 0.09, 0.98)
+	pop_sb.border_color = COL_ACC
+	pop_sb.set_border_width_all(1)
+	pop_sb.set_corner_radius_all(6)
+	pop_sb.set_content_margin_all(4)
+	th.set_stylebox("panel", "PopupMenu", pop_sb)
+	th.set_color("font_color", "PopupMenu", COL_TX)
+	th.set_font_size("font_size", "PopupMenu", 12)
+
+	var on_ic := _make_toggle_icon(true)
+	var off_ic := _make_toggle_icon(false)
+	th.set_icon("checked", "CheckButton", on_ic)
+	th.set_icon("unchecked", "CheckButton", off_ic)
+	th.set_icon("checked_disabled", "CheckButton", on_ic)
+	th.set_icon("unchecked_disabled", "CheckButton", off_ic)
+	th.set_color("font_color", "CheckButton", COL_TX)
+	th.set_font_size("font_size", "CheckButton", 12)
+	return th

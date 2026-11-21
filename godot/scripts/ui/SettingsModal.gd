@@ -18,6 +18,7 @@ var active_tab: int = 0
 var nav_vbox: VBoxContainer
 var content_vbox: VBoxContainer
 var nav_btns: Array[Button] = []
+var _snapshot: Dictionary = {}
 
 const TABS := [
 	"1. Display & UI Scale",
@@ -39,8 +40,15 @@ func setup(p_settings: RefCounted, p_fonts: Dictionary, p_core: Object) -> void:
 	_build_modal()
 
 func open_modal() -> void:
+	_snapshot = settings.to_dict()
 	visible = true
 	_rebuild_tab()
+
+func cancel_modal() -> void:
+	if not _snapshot.is_empty():
+		settings.from_dict(_snapshot)
+		settings_applied.emit()
+	visible = false
 
 func _build_modal() -> void:
 	for ch in get_children():
@@ -72,7 +80,7 @@ func _build_modal() -> void:
 	var close_b := Button.new()
 	close_b.text = "ESC / Close"
 	HudWidgets.style_tf2_button(close_b, fonts["body"], 12)
-	close_b.pressed.connect(func(): visible = false)
+	close_b.pressed.connect(func(): cancel_modal())
 	hdr.add_child(close_b)
 
 	# Body split: Left 7-tab nav | Right content scroll
@@ -122,7 +130,9 @@ func _build_modal() -> void:
 
 	var vac_lbl := Label.new()
 	var fgd_cnt: int = core.get_fgd_class_count() if core != null else 0
-	vac_lbl.text = "VAC-SAFE MODE LOCKED\nFlags: -insecure +sv_lan 1\nFGD Classes: %d (tf + abs)\nTools: vbsp/vvis/vrad ready" % fgd_cnt
+	var tf2_dir: String = core.get_tf2_dir() if core != null else ""
+	var has_vbsp := not tf2_dir.is_empty() and (FileAccess.file_exists(tf2_dir.path_join("bin/x64/vbsp.exe")) or FileAccess.file_exists(tf2_dir.path_join("bin/vbsp.exe")))
+	vac_lbl.text = "VAC-SAFE MODE LOCKED\nFlags: -insecure +sv_lan 1\nFGD Classes: %d (tf + abs)\nCompilers: %s" % [fgd_cnt, "vbsp/vvis/vrad detected" if has_vbsp else "TF2 SDK not found"]
 	vac_lbl.add_theme_font_override("font", fonts["body"])
 	vac_lbl.add_theme_font_size_override("font_size", 11)
 	vac_lbl.add_theme_color_override("font_color", Color(0.76, 0.96, 0.80))
@@ -161,13 +171,14 @@ func _build_modal() -> void:
 	var cancel_b := Button.new()
 	cancel_b.text = "Cancel"
 	HudWidgets.style_tf2_button(cancel_b, fonts["body"], 12)
-	cancel_b.pressed.connect(func(): visible = false)
+	cancel_b.pressed.connect(func(): cancel_modal())
 	foot.add_child(cancel_b)
 
 	var apply_b := Button.new()
 	apply_b.text = "APPLY & SAVE SETTINGS"
 	HudWidgets.style_tf2_button(apply_b, fonts["heading"], 13, true)
 	apply_b.pressed.connect(func():
+		_snapshot = settings.to_dict()
 		settings.save_to_disk()
 		settings_applied.emit()
 		visible = false
@@ -199,7 +210,7 @@ func _toggle_row(label: String, desc: String, val: bool, fn: Callable) -> void:
 	cb.toggled.connect(func(v: bool): fn.call(v); settings_applied.emit())
 	hb.add_child(cb)
 
-func _slider_row(label: String, desc: String, min_v: float, max_v: float, step_v: float, cur_v: float, suffix: String, fn: Callable) -> void:
+func _slider_row(label: String, desc: String, min_v: float, max_v: float, step_v: float, cur_v: float, suffix: String, fn: Callable, apply_on_drag_end: bool = false) -> void:
 	var hb := HBoxContainer.new()
 	hb.add_theme_constant_override("separation", 10)
 	content_vbox.add_child(hb)
@@ -225,12 +236,16 @@ func _slider_row(label: String, desc: String, min_v: float, max_v: float, step_v
 	sl.value_changed.connect(func(v: float):
 		vl.text = "%.0f%s" % [v, suffix] if step_v >= 1.0 else "%.2f%s" % [v, suffix]
 		fn.call(v)
-		settings_applied.emit()
+		if not apply_on_drag_end:
+			settings_applied.emit()
 	)
+	if apply_on_drag_end:
+		sl.drag_ended.connect(func(_changed: bool): settings_applied.emit())
 
 func _rebuild_tab() -> void:
+	# Consistent Title Case typography across ALL 7 nav buttons (never jumps to ALL-CAPS on active tab!)
 	for i in range(nav_btns.size()):
-		HudWidgets.style_tf2_button(nav_btns[i], fonts["heading" if i == active_tab else "body"], 12, i == active_tab)
+		HudWidgets.style_tf2_button(nav_btns[i], fonts["body"], 13, i == active_tab)
 	for ch in content_vbox.get_children():
 		ch.queue_free()
 
@@ -238,28 +253,51 @@ func _rebuild_tab() -> void:
 		0: # Display & UI Scale
 			_sec("DISPLAY, DPI & LIVE INTERFACE SCALING")
 			_toggle_row("Automatic Monitor DPI Scaling",
-				"Matches your Windows display scaling (100%, 125%, 150%, 4K) so HUD never clips or shrinks.",
+				"Adapts gently on narrow displays while keeping 1080p/1440p/4K crisp with zero double-scaling.",
 				settings.auto_dpi, func(v): settings.auto_dpi = v)
-			_slider_row("UI Scale Multiplier", "Live preview across 1080p, 1440p, 4K & ultrawide displays.",
-				75.0, 150.0, 5.0, settings.ui_scale * 100.0, "%",
-				func(v): settings.ui_scale = v / 100.0)
+			_slider_row("UI Scale Multiplier", "Applies cleanly on mouse release so the slider never jitters under your cursor.",
+				75.0, 140.0, 5.0, settings.ui_scale * 100.0, "%",
+				func(v): settings.ui_scale = v / 100.0, true)
 			var pr_row := HBoxContainer.new()
 			pr_row.add_theme_constant_override("separation", 6)
 			content_vbox.add_child(pr_row)
-			for pct: int in [85, 100, 115, 125, 150]:
+			for pct: int in [85, 100, 115, 125, 140]:
 				var pb := Button.new()
 				pb.text = "%d%%" % pct
-				HudWidgets.style_tf2_button(pb, fonts["body"], 11, absf(settings.ui_scale * 100.0 - float(pct)) < 2.5)
+				HudWidgets.style_tf2_button(pb, fonts["body"], 12, absf(settings.ui_scale * 100.0 - float(pct)) < 2.5)
 				var pv := float(pct) / 100.0
 				pb.pressed.connect(func(): settings.ui_scale = pv; settings_applied.emit(); _rebuild_tab())
 				pr_row.add_child(pb)
 
+			var wm_row := HBoxContainer.new()
+			wm_row.add_theme_constant_override("separation", 6)
+			content_vbox.add_child(wm_row)
+			var wl := Label.new(); wl.text = "Window Mode: "; wl.custom_minimum_size = Vector2(140, 0); wm_row.add_child(wl)
+			var wmodes: Array[String] = ["Windowed", "Maximized", "Fullscreen"]
+			for wi in range(wmodes.size()):
+				var wb := Button.new(); wb.text = wmodes[wi]
+				HudWidgets.style_tf2_button(wb, fonts["body"], 12, settings.window_mode == wi)
+				var wv := wi
+				wb.pressed.connect(func(): settings.window_mode = wv; settings_applied.emit(); _rebuild_tab())
+				wm_row.add_child(wb)
+
 			_toggle_row("VSync Enabled", "Prevents screen tearing in the 3D viewport.",
 				settings.vsync, func(v): settings.vsync = v)
-			_toggle_row("Show Split 2D Blueprint Pane", "Shows synced Hammer 2D Top X/Y & Side X/Z elevation views beside 3D.",
+			_toggle_row("Show Split 2D Blueprint Pane", "Shows interactive Hammer 2D Top X/Y & Side X/Z elevation views beside 3D.",
 				settings.show_2d_split, func(v): settings.show_2d_split = v)
 
 			_sec("REAL 3D TF2 GAME-ASSET ICON CACHE")
+			var ir_row := HBoxContainer.new()
+			ir_row.add_theme_constant_override("separation", 6)
+			content_vbox.add_child(ir_row)
+			var irl := Label.new(); irl.text = "3D Icon Resolution: "; irl.custom_minimum_size = Vector2(140, 0); ir_row.add_child(irl)
+			for rpx: int in [128, 160, 224]:
+				var rb_sz := Button.new(); rb_sz.text = "%dpx" % rpx
+				HudWidgets.style_tf2_button(rb_sz, fonts["body"], 12, settings.icon_resolution == rpx)
+				var rv := rpx
+				rb_sz.pressed.connect(func(): settings.icon_resolution = rv; rebuild_icons_requested.emit(); _rebuild_tab())
+				ir_row.add_child(rb_sz)
+
 			var ib_row := HBoxContainer.new()
 			content_vbox.add_child(ib_row)
 			var il := Label.new()

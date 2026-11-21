@@ -23,6 +23,7 @@ struct ResolvedMaterial {
     bool noCull = false;
     bool selfIllum = false;
     bool isTool = false;        // tools/ material (nodraw, clip, ...)
+    float colorTint[3] = {1.0f, 1.0f, 1.0f}; // VMT $color / $color2 RGB tint
 };
 
 // Read-only mount stack over the installed game's VPKs + loose files + the ABS

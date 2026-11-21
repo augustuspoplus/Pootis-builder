@@ -62,7 +62,8 @@ static func build_materials_drawer(app: Node3D, vbox: VBoxContainer) -> void:
 	)
 	act_row.add_child(ap_b)
 
-	var rep_b := Button.new(); rep_b.text = "Replace All…"
+	var rep_b := Button.new(); rep_b.text = "Replace"
+	rep_b.tooltip_text = "Replace selected solid's material map-wide with active material"
 	HudWidgets.style_tf2_button(rep_b, fonts["body"], 10)
 	rep_b.pressed.connect(func():
 		if app.selected_solid >= 0:
@@ -125,13 +126,13 @@ static func build_materials_drawer(app: Node3D, vbox: VBoxContainer) -> void:
 	HudWidgets.style_tf2_button(b_cur, fonts["heading"], 10, not app._mat_browse_all)
 	b_cur.pressed.connect(func(): app._mat_browse_all = false; app._open_materials_drawer())
 	mode_row.add_child(b_cur)
-	var b_all := Button.new(); b_all.text = "ALL 29k+ VPK Textures"; b_all.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	var b_all := Button.new(); b_all.text = "ALL 29k+ VPK"; b_all.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	HudWidgets.style_tf2_button(b_all, fonts["heading"], 10, app._mat_browse_all)
 	b_all.pressed.connect(func(): app._mat_browse_all = true; app._open_materials_drawer())
 	mode_row.add_child(b_all)
 
 	var search := LineEdit.new()
-	search.placeholder_text = "Search all TF2 textures (wood, brick, blend, snow, metal…)"
+	search.placeholder_text = "Search 29k+ TF2 textures (wood, brick, blend…)"
 	search.text = app._mat_search_text
 	vbox.add_child(search)
 
@@ -419,15 +420,26 @@ static func build_inspector_drawer(app: Node3D, vbox: VBoxContainer) -> void:
 		if fgd.get("found", false) and not str(fgd.get("description", "")).is_empty():
 			vbox.add_child(_lbl(str(fgd["description"]), fonts["body"], 10, HudWidgets.COL_TX_MUTED))
 
+		if bool(e.get("is_brush", false)):
+			var untie_b := Button.new(); untie_b.text = "Move to World (Ctrl+Shift+W)"
+			HudWidgets.style_tf2_button(untie_b, fonts["heading"], 11, false, 3)
+			untie_b.pressed.connect(func(): app._untie_selected_entity())
+			vbox.add_child(untie_b)
+
 		if app._insp_tab == 0:
-			# Full FGD SmartEdit KeyValues (Dropdown Choices + Editable Fields!)
+			# Full FGD SmartEdit KeyValues (Dropdown Choices + Focus-Exit Auto-Commit!)
 			var vars: Array = fgd.get("vars", []) if fgd.get("found", false) else []
 			var shown_keys := {}
+			var pretty_key := func(k: String) -> String:
+				var cleaned := k.trim_prefix("_").replace("_", " ")
+				return cleaned.capitalize()
 			var add_field := func(key: String, disp: String, choices: Array) -> void:
 				shown_keys[key] = true
-				var row := HBoxContainer.new(); vbox.add_child(row)
-				var kl := Label.new(); kl.text = disp; kl.custom_minimum_size = Vector2(105, 0)
-				kl.clip_text = true; kl.add_theme_font_size_override("font_size", 11); row.add_child(kl)
+				var row := HBoxContainer.new(); row.add_theme_constant_override("separation", 6); vbox.add_child(row)
+				var kl := Label.new(); kl.text = disp if not disp.is_empty() else pretty_key.call(key)
+				kl.custom_minimum_size = Vector2(128, 0)
+				kl.clip_text = true; kl.tooltip_text = "%s (%s)" % [kl.text, key]
+				kl.add_theme_font_size_override("font_size", 11); row.add_child(kl)
 				var cur_v: String = str(kv.get(key, ""))
 				if not choices.is_empty():
 					var ob := OptionButton.new(); ob.size_flags_horizontal = Control.SIZE_EXPAND_FILL
@@ -449,15 +461,20 @@ static func build_inspector_drawer(app: Node3D, vbox: VBoxContainer) -> void:
 					row.add_child(ob)
 				else:
 					var le := LineEdit.new(); le.text = cur_v; le.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-					le.text_submitted.connect(func(nv: String):
+					var last_saved := [cur_v]
+					var commit_kv := func(nv: String) -> void:
+						if nv == last_saved[0]:
+							return
+						last_saved[0] = nv
 						app.doc.set_entity_kv(app.selected_entity, key, nv)
 						app.doc.record_undo("Set " + key)
 						app.ent_vis.sync_all()
 						app._toast("Set %s = %s" % [key, nv])
-					)
+					le.text_submitted.connect(commit_kv)
+					le.focus_exited.connect(func(): commit_kv.call(le.text))
 					row.add_child(le)
 
-			# Always prioritize key gameplay fields first, then FGD vars!
+			# Always prioritize key gameplay fields first, then ALL FGD vars + raw entity KVs!
 			for prio in ["targetname", "TeamNum", "angles", "model", "skin", "_light", "movedir", "speed"]:
 				var matched_v := {}
 				for v in vars:
@@ -466,16 +483,17 @@ static func build_inspector_drawer(app: Node3D, vbox: VBoxContainer) -> void:
 				if not matched_v.is_empty():
 					add_field.call(prio, str(matched_v["display_name"]), matched_v.get("choices", []))
 				elif kv.has(prio) or prio in ["targetname", "angles"]:
-					add_field.call(prio, prio, [])
-			var extra_cnt := 0
+					add_field.call(prio, pretty_key.call(prio), [])
 			for v in vars:
 				var vk: String = str(v["key"])
 				if shown_keys.has(vk) or vk == "spawnflags":
 					continue
-				if extra_cnt >= 10:
-					break
 				add_field.call(vk, str(v["display_name"]), v.get("choices", []))
-				extra_cnt += 1
+			for rk in kv.keys():
+				var rks := str(rk)
+				if shown_keys.has(rks) or rks in ["id", "classname", "origin", "spawnflags"]:
+					continue
+				add_field.call(rks, pretty_key.call(rks), [])
 
 		elif app._insp_tab == 1:
 			# Spawnflags Checkboxes from FGD!
@@ -500,20 +518,41 @@ static func build_inspector_drawer(app: Node3D, vbox: VBoxContainer) -> void:
 				vbox.add_child(_lbl("No FGD spawnflags defined for this entity class.", fonts["body"], 11, HudWidgets.COL_TX_MUTED))
 
 		elif app._insp_tab == 2:
-			# Outputs I/O List + Add Output Builder!
+			# Outputs I/O List with Delete buttons + Full Add Output Builder (Param, Delay, Once Only!)
 			var conns: Array = e.get("connections", [])
-			for c in conns:
-				vbox.add_child(_lbl("• %s  ->  %s" % [str(c["output"]), str(c["args"])], fonts["mono"], 10, HudWidgets.COL_CYAN))
+			for ci in range(conns.size()):
+				var c: Dictionary = conns[ci]
+				var crow := HBoxContainer.new(); crow.add_theme_constant_override("separation", 4); vbox.add_child(crow)
+				var cl := _lbl("• %s -> %s" % [str(c["output"]), str(c["args"])], fonts["mono"], 10, HudWidgets.COL_CYAN)
+				cl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+				crow.add_child(cl)
+				var del_c := Button.new(); del_c.text = "X"
+				HudWidgets.style_tf2_button(del_c, fonts["body"], 9, false, 2)
+				var cidx := ci
+				del_c.pressed.connect(func():
+					app.doc.remove_connection(app.selected_entity, cidx)
+					app.doc.record_undo("Remove Output")
+					app.ent_vis.sync_all()
+					app._open_inspector_drawer()
+				)
+				crow.add_child(del_c)
 			_sec(vbox, "ADD ENTITY I/O OUTPUT", fonts)
 			var out_le := LineEdit.new(); out_le.placeholder_text = "Output (e.g. OnCapTeam1 / OnStartTouch)"
 			var tgt_le := LineEdit.new(); tgt_le.placeholder_text = "Target Entity Name (e.g. red_door)"
 			var inp_le := LineEdit.new(); inp_le.placeholder_text = "Input (e.g. Open / Enable / Trigger)"
-			vbox.add_child(out_le); vbox.add_child(tgt_le); vbox.add_child(inp_le)
+			var par_le := LineEdit.new(); par_le.placeholder_text = "Parameter Override (optional)"
+			vbox.add_child(out_le); vbox.add_child(tgt_le); vbox.add_child(inp_le); vbox.add_child(par_le)
+			var opt_row := HBoxContainer.new(); opt_row.add_theme_constant_override("separation", 8); vbox.add_child(opt_row)
+			var del_sb := SpinBox.new(); del_sb.min_value = 0.0; del_sb.max_value = 60.0; del_sb.step = 0.25; del_sb.prefix = "Delay: "; del_sb.suffix = "s"
+			del_sb.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+			opt_row.add_child(del_sb)
+			var once_cb := CheckBox.new(); once_cb.text = "Once"; opt_row.add_child(once_cb)
 			var add_io := Button.new(); add_io.text = "+ Wire 3D Output Connection"
 			HudWidgets.style_tf2_button(add_io, fonts["heading"], 11, true)
 			add_io.pressed.connect(func():
 				if not out_le.text.is_empty() and not tgt_le.text.is_empty() and not inp_le.text.is_empty():
-					app.doc.add_connection(app.selected_entity, out_le.text.strip_edges(), tgt_le.text.strip_edges(), inp_le.text.strip_edges(), "", 0.0)
+					app.doc.add_connection(app.selected_entity, out_le.text.strip_edges(), tgt_le.text.strip_edges(),
+						inp_le.text.strip_edges(), par_le.text.strip_edges(), float(del_sb.value), once_cb.button_pressed)
 					app.doc.record_undo("Add I/O Output")
 					app.ent_vis.sync_all()
 					app._toast("Wired %s -> %s :: %s!" % [out_le.text, tgt_le.text, inp_le.text])
@@ -554,16 +593,36 @@ static func build_terrain_drawer(app: Node3D, vbox: VBoxContainer) -> void:
 	)
 	vbox.add_child(b_floor)
 
-	var b_cliff := Button.new(); b_cliff.text = "+ Vertical Rocky Cliff Wall (512×256u!)"
+	# Cliff Facing Direction + Height controls!
+	var cf_row := HBoxContainer.new(); cf_row.add_theme_constant_override("separation", 4); vbox.add_child(cf_row)
+	var dir_names: Array[String] = ["South", "North", "East", "West"]
+	for di in range(4):
+		var db := Button.new(); db.text = dir_names[di]; db.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		HudWidgets.style_tf2_button(db, fonts["body"], 10, app.cliff_facing == di)
+		var dv := di
+		db.pressed.connect(func(): app.cliff_facing = dv; app._open_terrain_studio())
+		cf_row.add_child(db)
+
+	var ch_lbl := Label.new(); ch_lbl.text = "Cliff Height: %du  |  Power: %d" % [int(round(app.cliff_height_m * 32.0)), app.cliff_power]
+	vbox.add_child(ch_lbl)
+	var ch_sl := HSlider.new(); ch_sl.min_value = 6.0; ch_sl.max_value = 16.0; ch_sl.step = 1.0; ch_sl.value = app.cliff_height_m
+	ch_sl.value_changed.connect(func(v): app.cliff_height_m = v; ch_lbl.text = "Cliff Height: %du  |  Power: %d" % [int(round(v * 32.0)), app.cliff_power])
+	vbox.add_child(ch_sl)
+
+	var b_cliff := Button.new(); b_cliff.text = "+ Vertical Rocky Cliff Wall (512×%du!)" % int(round(app.cliff_height_m * 32.0))
 	HudWidgets.style_tf2_button(b_cliff, fonts["heading"], 11, false, 3)
 	b_cliff.pressed.connect(func():
 		var p: Vector3 = app.hover_pos if app.hover_valid else Vector3(0, 0, -10)
 		var mat := "NATURE/BLENDROCKWALLDIRT001"
-		var cid: int = app.doc.make_cliff_wall(p + Vector3(-8, 0, 0), p + Vector3(8, 0, 0), 8.0, 2.5, 3, mat, 1.1)
+		var a := p + Vector3(-8, 0, 0); var b := p + Vector3(8, 0, 0)
+		if app.cliff_facing == 1: a = p + Vector3(8, 0, 0); b = p + Vector3(-8, 0, 0)
+		elif app.cliff_facing == 2: a = p + Vector3(0, 0, 8); b = p + Vector3(0, 0, -8)
+		elif app.cliff_facing == 3: a = p + Vector3(0, 0, -8); b = p + Vector3(0, 0, 8)
+		var cid: int = app.doc.make_cliff_wall(a, b, app.cliff_height_m, 2.5, app.cliff_power, mat, 1.2)
 		if cid >= 0:
 			app.doc.record_undo("Add Rocky Cliff Wall")
 			app.map_sync.sync_all(); app._select_solid(cid, -1); app.audio.play("place")
-			app._toast("Built stratified vertical TF2 Cliff Wall! Sculpt with Axis = Face Normal.")
+			app._toast("Built stratified TF2 Canyon Cliff Wall! Sculpt with Axis = Face Nrm.")
 	)
 	vbox.add_child(b_cliff)
 
@@ -577,9 +636,9 @@ static func build_terrain_drawer(app: Node3D, vbox: VBoxContainer) -> void:
 		b.pressed.connect(func(): app.terrain_mode = mv; app._open_terrain_studio())
 		g.add_child(b)
 
-	_sec(vbox, "SCULPT AXIS (USE FACE NORMAL FOR CLIFFS!)", fonts)
+	_sec(vbox, "SCULPT AXIS (HAMMER Z-UP AXES)", fonts)
 	var ax_row := HBoxContainer.new(); ax_row.add_theme_constant_override("separation", 3); vbox.add_child(ax_row)
-	var anames := ["Face Nrm", "World Y", "World X", "World Z"]
+	var anames := ["Face Nrm", "Up (Z)", "East (X)", "North (Y)"]
 	for i in range(4):
 		var b := Button.new(); b.text = anames[i]; b.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 		HudWidgets.style_tf2_button(b, fonts["body"], 10, app.terrain_axis_mode == i)
@@ -587,14 +646,14 @@ static func build_terrain_drawer(app: Node3D, vbox: VBoxContainer) -> void:
 		b.pressed.connect(func(): app.terrain_axis_mode = av; app._open_terrain_studio())
 		ax_row.add_child(b)
 
-	var r_lbl := Label.new(); r_lbl.text = "Brush Radius: %du" % int(app.terrain_radius_m * 32.0); vbox.add_child(r_lbl)
+	var r_lbl := Label.new(); r_lbl.text = "Brush Radius: %du" % int(round(app.terrain_radius_m * 32.0)); vbox.add_child(r_lbl)
 	var r_sl := HSlider.new(); r_sl.min_value = 1.5; r_sl.max_value = 12.0; r_sl.step = 0.5; r_sl.value = app.terrain_radius_m
-	r_sl.value_changed.connect(func(v): app.terrain_radius_m = v; r_lbl.text = "Brush Radius: %du" % int(v * 32.0))
+	r_sl.value_changed.connect(func(v): app.terrain_radius_m = v; r_lbl.text = "Brush Radius: %du" % int(round(v * 32.0)))
 	vbox.add_child(r_sl)
 
-	var s_lbl := Label.new(); s_lbl.text = "Strength: %.1fm" % app.terrain_strength_m; vbox.add_child(s_lbl)
-	var s_sl := HSlider.new(); s_sl.min_value = 0.2; s_sl.max_value = 3.5; s_sl.step = 0.1; s_sl.value = app.terrain_strength_m
-	s_sl.value_changed.connect(func(v): app.terrain_strength_m = v; s_lbl.text = "Strength: %.1fm" % v)
+	var s_lbl := Label.new(); s_lbl.text = "Brush Strength: %du" % int(round(app.terrain_strength_m * 32.0)); vbox.add_child(s_lbl)
+	var s_sl := HSlider.new(); s_sl.min_value = 0.25; s_sl.max_value = 3.5; s_sl.step = 0.25; s_sl.value = app.terrain_strength_m
+	s_sl.value_changed.connect(func(v): app.terrain_strength_m = v; s_lbl.text = "Brush Strength: %du" % int(round(v * 32.0)))
 	vbox.add_child(s_sl)
 
 	_sec(vbox, "HAMMER SEW & SUBDIVIDE", fonts)
@@ -618,7 +677,39 @@ static func build_terrain_drawer(app: Node3D, vbox: VBoxContainer) -> void:
 	t_row.add_child(b_sub)
 
 # ==============================================================================
-# 6. HAMMER ALT+P CHECK MAP FOR PROBLEMS (Go To Error + 1-Click Fix!)
+# 5B. WALL CHAIN & DRAG-BOX DIMENSIONS DRAWER (Hammer Architecture Controls!)
+# ==============================================================================
+static func build_wall_box_drawer(app: Node3D, vbox: VBoxContainer) -> void:
+	var fonts: Dictionary = app.fonts
+	_sec(vbox, "WALL CHAIN & DRAG-BOX DIMENSIONS", fonts)
+	vbox.add_child(_lbl("Wall Chain: Click start -> click corners to chain angled walls (ESC to stop).\nDrag Box: Click & drag flat footprint using active material.", fonts["body"], 11, HudWidgets.COL_TX_MUTED))
+
+	var wh_lbl := Label.new(); wh_lbl.text = "Wall Height: %du (%.1fm)" % [int(round(app.wall_height_m * 32.0)), app.wall_height_m]; vbox.add_child(wh_lbl)
+	var wh_sl := HSlider.new(); wh_sl.min_value = 2.0; wh_sl.max_value = 12.0; wh_sl.step = 0.5; wh_sl.value = app.wall_height_m
+	wh_sl.value_changed.connect(func(v): app.wall_height_m = v; wh_lbl.text = "Wall Height: %du (%.1fm)" % [int(round(v * 32.0)), v])
+	vbox.add_child(wh_sl)
+
+	var wt_lbl := Label.new(); wt_lbl.text = "Wall Thickness: %du" % int(round(app.wall_thick_m * 32.0)); vbox.add_child(wt_lbl)
+	var wt_sl := HSlider.new(); wt_sl.min_value = 0.25; wt_sl.max_value = 2.0; wt_sl.step = 0.25; wt_sl.value = app.wall_thick_m
+	wt_sl.value_changed.connect(func(v): app.wall_thick_m = v; wt_lbl.text = "Wall Thickness: %du" % int(round(v * 32.0)))
+	vbox.add_child(wt_sl)
+
+	var bh_lbl := Label.new(); bh_lbl.text = "Drag-Box Height: %du" % int(round(app.box_height_m * 32.0)); vbox.add_child(bh_lbl)
+	var bh_sl := HSlider.new(); bh_sl.min_value = 0.5; bh_sl.max_value = 8.0; bh_sl.step = 0.5; bh_sl.value = app.box_height_m
+	bh_sl.value_changed.connect(func(v): app.box_height_m = v; bh_lbl.text = "Drag-Box Height: %du" % int(round(v * 32.0)))
+	vbox.add_child(bh_sl)
+
+	_sec(vbox, "QUICK TF2 HEIGHT PRESETS", fonts)
+	var pr := HBoxContainer.new(); pr.add_theme_constant_override("separation", 4); vbox.add_child(pr)
+	for preset in [{"t": "48u Cover", "h": 1.5}, {"t": "144u Story", "h": 4.5}, {"t": "256u Barn", "h": 8.0}]:
+		var pb := Button.new(); pb.text = preset["t"]; pb.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		HudWidgets.style_tf2_button(pb, fonts["body"], 10)
+		var hv: float = preset["h"]
+		pb.pressed.connect(func(): app.wall_height_m = hv; app.box_height_m = hv; app._open_wall_box_drawer())
+		pr.add_child(pb)
+
+# ==============================================================================
+# 6. HAMMER ALT+P CHECK MAP FOR PROBLEMS (Go To Error + 1-Click Fix + Fix All!)
 # ==============================================================================
 static func build_check_problems_drawer(app: Node3D, vbox: VBoxContainer) -> void:
 	var fonts: Dictionary = app.fonts
@@ -631,6 +722,21 @@ static func build_check_problems_drawer(app: Node3D, vbox: VBoxContainer) -> voi
 	if probs.is_empty():
 		vbox.add_child(_lbl("✓ Zero map errors detected — ready to compile cleanly in Valve vbsp!", fonts["heading"], 12, HudWidgets.COL_GREEN))
 		return
+
+	var fix_all_b := Button.new(); fix_all_b.text = "Fix All Auto-Fixable Problems"
+	HudWidgets.style_tf2_button(fix_all_b, fonts["heading"], 11, true)
+	fix_all_b.pressed.connect(func():
+		for p in probs:
+			var fk: String = str(p.get("fix_kind", ""))
+			if fk == "auto_seal": app._do_auto_seal()
+			elif fk == "add_red_spawn": Tf2GamemodesScript.stamp_preset(app.doc, "spawn", Vector3(-12, 0.5, 0), 2)
+			elif fk == "add_blu_spawn": Tf2GamemodesScript.stamp_preset(app.doc, "spawn", Vector3(12, 0.5, 0), 3)
+			elif fk == "add_sun": app.doc.add_point_entity("light_environment", Vector3(0, 10, 0), {"_light": "255 245 220 400", "pitch": "-45"})
+		app.doc.record_undo("Fix All Problems")
+		app.map_sync.sync_all(); app.ent_vis.sync_all()
+		app._open_check_problems_drawer()
+	)
+	vbox.add_child(fix_all_b)
 
 	for p in probs:
 		var card := PanelContainer.new()

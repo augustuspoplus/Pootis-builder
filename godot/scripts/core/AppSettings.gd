@@ -161,25 +161,38 @@ func reset_defaults() -> void:
 	default_playtest_class = 1; playtest_fov = 90.0; noclip_speed = 14.0; sfx_volume_db = -6.0; sfx_muted = false
 	autosave_enabled = true; autosave_minutes = 5; backup_count = 8
 
+func to_dict() -> Dictionary:
+	return {
+		"auto_dpi": auto_dpi, "ui_scale": ui_scale, "window_mode": window_mode,
+		"vsync": vsync, "icon_resolution": icon_resolution, "show_2d_split": show_2d_split,
+		"msaa_level": msaa_level, "shadow_quality": shadow_quality, "ssao_enabled": ssao_enabled,
+		"camera_fov": camera_fov, "back_clip_m": back_clip_m, "prop_ambient_boost": prop_ambient_boost,
+		"show_skybox_bg": show_skybox_bg, "default_grid_u": default_grid_u, "show_grid_floor": show_grid_floor,
+		"grid_opacity": grid_opacity, "show_jump_callouts": show_jump_callouts, "arrow_key_nudge": arrow_key_nudge,
+		"rotate_step_deg": rotate_step_deg, "keybind_preset": keybind_preset, "fly_speed": fly_speed,
+		"mouse_sens": mouse_sens, "invert_y": invert_y, "tf2_dir_override": tf2_dir_override,
+		"compile_preset": compile_preset, "compile_threads": compile_threads, "auto_seal_on_compile": auto_seal_on_compile,
+		"default_playtest_class": default_playtest_class, "playtest_fov": playtest_fov, "noclip_speed": noclip_speed,
+		"sfx_volume_db": sfx_volume_db, "sfx_muted": sfx_muted, "autosave_enabled": autosave_enabled,
+		"autosave_minutes": autosave_minutes, "backup_count": backup_count,
+	}
+
+func from_dict(d: Dictionary) -> void:
+	for k in d.keys():
+		if k in self:
+			set(k, d[k])
+	vac_safe_insecure = true
+
 func compute_effective_scale(win: Window) -> float:
-	if not auto_dpi:
-		return clampf(ui_scale, 0.75, 1.50)
-	if DisplayServer.get_name() == "headless":
-		return clampf(ui_scale, 0.75, 1.50)
+	# project.godot uses stretch/mode=canvas_items at 1600x920 (no HiDPI double-scaling!).
+	var base := clampf(ui_scale, 0.75, 1.40)
+	if not auto_dpi or DisplayServer.get_name() == "headless":
+		return base
 	var scr := DisplayServer.window_get_current_screen(win.get_window_id())
 	var scr_size := DisplayServer.screen_get_size(scr)
-	var dpi := DisplayServer.screen_get_dpi(scr)
-	# Normalize cleanly so 1080p laptop @ 125% or 1440p/4K monitor ALWAYS fits comfortably!
-	var dpi_factor := 1.0
-	if dpi >= 168:
-		dpi_factor = 1.25
-	elif dpi >= 132:
-		dpi_factor = 1.10
-	elif scr_size.x <= 1366:
-		dpi_factor = 0.85
-	elif scr_size.x >= 2560 and dpi < 130:
-		dpi_factor = 1.15
-	return clampf(dpi_factor * ui_scale, 0.75, 1.50)
+	if scr_size.x <= 1366:
+		return clampf(base * 0.88, 0.75, 1.30)
+	return base
 
 func apply_runtime(main_app: Node3D) -> void:
 	if DisplayServer.get_name() == "headless":
@@ -187,16 +200,20 @@ func apply_runtime(main_app: Node3D) -> void:
 	var win := main_app.get_window()
 	if win == null:
 		return
-	# Responsive DPI-aware UI scale factor (instantly rescales ALL fonts, pills, and docks cleanly!)
 	var eff := compute_effective_scale(win)
 	win.content_scale_factor = eff
 
-	# VSync
+	if main_app.get("_auto_shots") is Array and (main_app._auto_shots as Array).is_empty():
+		var want_mode := DisplayServer.WINDOW_MODE_WINDOWED
+		if window_mode == 1: want_mode = DisplayServer.WINDOW_MODE_MAXIMIZED
+		elif window_mode == 2: want_mode = DisplayServer.WINDOW_MODE_FULLSCREEN
+		if DisplayServer.window_get_mode() != want_mode:
+			DisplayServer.window_set_mode(want_mode)
+
 	DisplayServer.window_set_vsync_mode(
 		DisplayServer.VSYNC_ENABLED if vsync else DisplayServer.VSYNC_DISABLED
 	)
 
-	# Viewport MSAA + Camera + Environment
 	var vp := main_app.get_viewport()
 	if vp != null:
 		var mvals := [Viewport.MSAA_DISABLED, Viewport.MSAA_2X, Viewport.MSAA_4X]
@@ -213,5 +230,17 @@ func apply_runtime(main_app: Node3D) -> void:
 			env.background_color = Color(0.11, 0.10, 0.09)
 	if main_app.get("sun") != null:
 		main_app.sun.shadow_enabled = (shadow_quality > 0)
-	if main_app.get("grid_floor") != null and not bool(main_app.get("viewing_bsp")):
-		main_app.grid_floor.visible = show_grid_floor
+	if main_app.get("grid_floor") != null:
+		main_app.grid_floor.visible = show_grid_floor and not bool(main_app.get("viewing_bsp"))
+		var gmat: Material = main_app.grid_floor.material_override
+		if gmat is StandardMaterial3D:
+			(gmat as StandardMaterial3D).albedo_color.a = clampf(grid_opacity, 0.05, 0.85)
+	if main_app.get("assets") != null:
+		main_app.assets.prop_ambient_boost = prop_ambient_boost
+	if main_app.get("player") != null:
+		main_app.player.base_fov = playtest_fov
+		main_app.player.noclip_speed_u = noclip_speed * 32.0
+		if main_app.player.cam != null and not main_app.player.scoped:
+			main_app.player.cam.fov = playtest_fov
+	if main_app.get("audio") != null:
+		main_app.audio.set_volume(sfx_volume_db, sfx_muted)

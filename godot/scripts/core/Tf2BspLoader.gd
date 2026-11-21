@@ -128,7 +128,9 @@ func build_bsp_scene(bsp_path: String, door_ctrl: Node = null) -> Dictionary:
 	var world_mi := MeshInstance3D.new()
 	world_mi.name = "WorldGeometry"
 	world_mi.mesh = world_mesh
-	world_mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	# WorldGeometry already carries baked Valve VRAD lightmaps; turning off real-time shadow casting
+	# prevents unaligned directional light shadows from turning static props pitch black!
+	world_mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	root.add_child(world_mi)
 
 	# 3. Build Real Physics Collision (ConcavePolygonShape3D) for instant F5 walk!
@@ -185,21 +187,9 @@ func build_bsp_scene(bsp_path: String, door_ctrl: Node = null) -> Dictionary:
 	for di in range(doors_arr.size()):
 		var dd: Dictionary = doors_arr[di]
 		var dsurfs: Array = dd.get("surfaces", [])
-		if dsurfs.is_empty():
+		var att_props: Array = dd.get("attached_props", [])
+		if dsurfs.is_empty() and att_props.is_empty():
 			continue
-		var dmesh := ArrayMesh.new()
-		for s in dsurfs:
-			var arr := []
-			arr.resize(Mesh.ARRAY_MAX)
-			arr[Mesh.ARRAY_VERTEX] = s["vertices"]
-			arr[Mesh.ARRAY_NORMAL] = s["normals"]
-			arr[Mesh.ARRAY_TEX_UV] = s["uvs"]
-			arr[Mesh.ARRAY_TEX_UV2] = s["uv2s"]
-			arr[Mesh.ARRAY_COLOR] = s["colors"]
-			arr[Mesh.ARRAY_INDEX] = s["indices"]
-			dmesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arr)
-			var si := dmesh.get_surface_count() - 1
-			dmesh.surface_set_material(si, _make_bsp_material(str(s["material"]), lm_tex, bool(s["translucent"])))
 
 		var body := AnimatableBody3D.new()
 		body.name = "Door_%d_%s" % [di, str(dd.get("targetname", ""))]
@@ -207,9 +197,35 @@ func build_bsp_scene(bsp_path: String, door_ctrl: Node = null) -> Dictionary:
 		body.sync_to_physics = false
 		body.collision_layer = 1
 		body.collision_mask = 0
-		var dmi := MeshInstance3D.new()
-		dmi.mesh = dmesh
-		body.add_child(dmi)
+
+		if not dsurfs.is_empty():
+			var dmesh := ArrayMesh.new()
+			for s in dsurfs:
+				var arr := []
+				arr.resize(Mesh.ARRAY_MAX)
+				arr[Mesh.ARRAY_VERTEX] = s["vertices"]
+				arr[Mesh.ARRAY_NORMAL] = s["normals"]
+				arr[Mesh.ARRAY_TEX_UV] = s["uvs"]
+				arr[Mesh.ARRAY_TEX_UV2] = s["uv2s"]
+				arr[Mesh.ARRAY_COLOR] = s["colors"]
+				arr[Mesh.ARRAY_INDEX] = s["indices"]
+				dmesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arr)
+				var si := dmesh.get_surface_count() - 1
+				dmesh.surface_set_material(si, _make_bsp_material(str(s["material"]), lm_tex, bool(s["translucent"])))
+			var dmi := MeshInstance3D.new()
+			dmi.mesh = dmesh
+			body.add_child(dmi)
+
+		# Parent visual prop_dynamic door models directly onto this sliding AnimatableBody3D!
+		for ap in att_props:
+			var pmesh: ArrayMesh = assets.get_model_mesh(str(ap["model"]))
+			if pmesh != null and pmesh.get_surface_count() > 0:
+				var pmi := MeshInstance3D.new()
+				pmi.mesh = pmesh
+				pmi.transform = ap["local_transform"]
+				pmi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+				body.add_child(pmi)
+
 		var dcol: PackedVector3Array = dd.get("collision_faces", PackedVector3Array())
 		if dcol.size() >= 3:
 			var cs := CollisionShape3D.new()
@@ -218,10 +234,18 @@ func build_bsp_scene(bsp_path: String, door_ctrl: Node = null) -> Dictionary:
 			poly.set_faces(dcol)
 			cs.shape = poly
 			body.add_child(cs)
+		else:
+			# toolsnodraw door carrier: provide solid box collision from its BSP model bounds!
+			var bsz_c: Vector3 = ((dd["bounds_max"] as Vector3) - (dd["bounds_min"] as Vector3)).max(Vector3(0.2, 0.2, 0.2))
+			var cs := CollisionShape3D.new()
+			var bsh := BoxShape3D.new()
+			bsh.size = bsz_c
+			cs.shape = bsh
+			body.add_child(cs)
 		doors_node.add_child(body)
-		if door_ctrl != null:
+		if door_ctrl != null and not bool(dd.get("start_locked", false)):
 			var bsz: Vector3 = (dd["bounds_max"] as Vector3) - (dd["bounds_min"] as Vector3)
-			var trig_r := maxf(4.6, bsz.length() * 0.75 + 2.2)
+			var trig_r := clampf(maxf(3.8, bsz.length() * 0.55 + 1.6), 3.8, 7.5)
 			door_ctrl.register_door(
 				body, dd["center"], dd["movedir"],
 				float(dd.get("travel_m", 3.5)), float(dd.get("speed_m", 10.0)),
@@ -234,6 +258,10 @@ func build_bsp_scene(bsp_path: String, door_ctrl: Node = null) -> Dictionary:
 		"node": root,
 		"name": str(data["name"]),
 		"skyname": str(data["skyname"]),
+		"has_sun": bool(data.get("has_sun", false)),
+		"sun_pitch": float(data.get("sun_pitch", -45.0)),
+		"sun_yaw": float(data.get("sun_yaw", 45.0)),
+		"sun_color": data.get("sun_color", Color(1.0, 0.96, 0.90)),
 		"pak_entries": int(data["pak_entries"]),
 		"surfaces": surfaces.size(),
 		"collision_tris": col_faces.size() / 3,

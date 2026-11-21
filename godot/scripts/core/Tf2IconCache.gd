@@ -45,6 +45,7 @@ const ICON_SPECS := {
 var assets: RefCounted
 var icon_size: int = 160
 var _cache: Dictionary = {}      # key -> Texture2D
+var _failed: Dictionary = {}     # key -> true (negative cache so missing models are never re-queued!)
 var _queue: Array = []           # [{key, mdl, rot, pitch}]
 var _queued_keys: Dictionary = {}
 var _studio: Dictionary = {}
@@ -67,6 +68,7 @@ func is_busy() -> bool:
 
 func clear_disk_cache() -> void:
 	_cache.clear()
+	_failed.clear()
 	_queue.clear()
 	_queued_keys.clear()
 	_active_job.clear()
@@ -84,11 +86,13 @@ func clear_disk_cache() -> void:
 
 func _disk_path(key: String) -> String:
 	var safe := key.replace("/", "_").replace("\\", "_").replace(":", "_").replace(".", "_")
-	return CACHE_DIR.path_join(safe + ".png")
+	return CACHE_DIR.path_join("%s_%d.png" % [safe, icon_size])
 
 func get_icon(key: String) -> Texture2D:
 	if _cache.has(key):
 		return _cache[key]
+	if _failed.has(key):
+		return null
 	var dp := _disk_path(key)
 	if FileAccess.file_exists(dp):
 		var img := Image.new()
@@ -104,7 +108,7 @@ func get_icon(key: String) -> Texture2D:
 	return null
 
 func queue_model_icon(key: String, mdl_path: String, rot_deg: Vector3 = Vector3(0, -38, 0), pitch_deg: float = 22.0) -> void:
-	if _cache.has(key) or _queued_keys.has(key):
+	if _cache.has(key) or _failed.has(key) or _queued_keys.has(key):
 		return
 	if DisplayServer.get_name() == "headless":
 		return
@@ -120,6 +124,7 @@ func _process(_delta: float) -> void:
 		_active_job = _queue.pop_front()
 		var mesh: ArrayMesh = assets.get_model_mesh(str(_active_job["mdl"]))
 		if mesh == null:
+			_failed[str(_active_job["key"])] = true
 			_queued_keys.erase(_active_job["key"])
 			_active_job.clear()
 			return

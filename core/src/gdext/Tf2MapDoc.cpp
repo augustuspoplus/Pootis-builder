@@ -164,7 +164,10 @@ bool meshSolidToDict(const pb::map::Solid& s, Dictionary& out) {
                         grid[i] = base + nv * dst[i];
                     }
                 }
-                // Compute smooth normals across the displacement grid + alpha blend in COLOR.a
+                // Compute smooth normals across the displacement grid with ONE consistent quad winding sign
+                // (never hard-flips individual overhang vertices past 90° -> eliminates dark cliff crease bands!)
+                const glm::vec3 baseCross = glm::cross(B - A, D - A);
+                const float gridSign = (glm::dot(baseCross, f.planeN) < 0.0f) ? -1.0f : 1.0f;
                 const int32_t baseV = static_cast<int32_t>(bk.verts.size());
                 for (int r = 0; r < gn; ++r) {
                     for (int c = 0; c < gn; ++c) {
@@ -174,10 +177,9 @@ bool meshSolidToDict(const pb::map::Solid& s, Dictionary& out) {
                                              grid[r * gn + std::max(c - 1, 0)];
                         const glm::vec3 dv = grid[std::min(r + 1, gn - 1) * gn + c] -
                                              grid[std::max(r - 1, 0) * gn + c];
-                        glm::vec3 gnrm = glm::cross(du, dv);
+                        glm::vec3 gnrm = glm::cross(du, dv) * gridSign;
                         if (glm::length(gnrm) < 1e-4f) gnrm = f.planeN;
                         else gnrm = glm::normalize(gnrm);
-                        if (glm::dot(gnrm, f.planeN) < 0.0f) gnrm = -gnrm;
                         bk.verts.push_back(toGodotPos(p));
                         bk.norms.push_back(toGodotDir(gnrm));
                         const glm::vec2 uv = f.texUV(p, 512.0f, 512.0f);
@@ -270,6 +272,8 @@ void Tf2MapDoc::_bind_methods() {
     ClassDB::bind_method(D_METHOD("get_map_name"), &Tf2MapDoc::get_map_name);
     ClassDB::bind_method(D_METHOD("get_skyname"), &Tf2MapDoc::get_skyname);
     ClassDB::bind_method(D_METHOD("set_skyname", "sky"), &Tf2MapDoc::set_skyname);
+    ClassDB::bind_method(D_METHOD("is_dirty"), &Tf2MapDoc::is_dirty);
+    ClassDB::bind_method(D_METHOD("clear_dirty"), &Tf2MapDoc::clear_dirty);
     ClassDB::bind_method(D_METHOD("set_grid_units", "units"), &Tf2MapDoc::set_grid_units);
     ClassDB::bind_method(D_METHOD("get_grid_units"), &Tf2MapDoc::get_grid_units);
 
@@ -293,6 +297,7 @@ void Tf2MapDoc::_bind_methods() {
     ClassDB::bind_method(D_METHOD("make_hollow", "solid_idx", "wall_thick_m"), &Tf2MapDoc::make_hollow);
     ClassDB::bind_method(D_METHOD("get_solid_vertices", "solid_idx"), &Tf2MapDoc::get_solid_vertices);
     ClassDB::bind_method(D_METHOD("move_solid_vertex", "solid_idx", "vert_idx", "delta_g"), &Tf2MapDoc::move_solid_vertex);
+    ClassDB::bind_method(D_METHOD("move_solid_vertex_at", "solid_idx", "old_pos_g", "delta_g"), &Tf2MapDoc::move_solid_vertex_at);
     ClassDB::bind_method(D_METHOD("get_face_uv", "solid_idx", "face_idx"), &Tf2MapDoc::get_face_uv);
     ClassDB::bind_method(D_METHOD("set_face_uv", "solid_idx", "face_idx", "u_scale", "v_scale", "u_shift", "v_shift", "rot_deg", "lightmap_scale"),
                          &Tf2MapDoc::set_face_uv);
@@ -322,6 +327,8 @@ void Tf2MapDoc::_bind_methods() {
     ClassDB::bind_method(D_METHOD("clip_solid", "solid_idx", "plane_pt_g", "plane_normal_g", "keep_mode"),
                          &Tf2MapDoc::clip_solid, DEFVAL(0));
     ClassDB::bind_method(D_METHOD("tie_solid_to_entity", "solid_idx", "classname", "kv"), &Tf2MapDoc::tie_solid_to_entity);
+    ClassDB::bind_method(D_METHOD("untie_brush_entity", "ent_idx"), &Tf2MapDoc::untie_brush_entity);
+    ClassDB::bind_method(D_METHOD("get_entity_mesh_data", "ent_idx"), &Tf2MapDoc::get_entity_mesh_data);
     ClassDB::bind_method(D_METHOD("duplicate_entity", "ent_idx", "offset_g"), &Tf2MapDoc::duplicate_entity);
     ClassDB::bind_method(D_METHOD("raycast_entity", "ray_origin_g", "ray_dir_g"), &Tf2MapDoc::raycast_entity);
 
@@ -344,8 +351,9 @@ void Tf2MapDoc::_bind_methods() {
     ClassDB::bind_method(D_METHOD("add_brush_entity", "classname", "min_g", "max_g", "material", "kv"), &Tf2MapDoc::add_brush_entity);
     ClassDB::bind_method(D_METHOD("set_entity_kv", "ent_idx", "key", "val"), &Tf2MapDoc::set_entity_kv);
     ClassDB::bind_method(D_METHOD("set_entity_pos", "ent_idx", "pos_g"), &Tf2MapDoc::set_entity_pos);
-    ClassDB::bind_method(D_METHOD("add_connection", "src_ent_idx", "output_name", "target_name", "input_name", "param", "delay"),
-                         &Tf2MapDoc::add_connection, DEFVAL(String()), DEFVAL(0.0f));
+    ClassDB::bind_method(D_METHOD("add_connection", "src_ent_idx", "output_name", "target_name", "input_name", "param", "delay", "once_only"),
+                         &Tf2MapDoc::add_connection, DEFVAL(String()), DEFVAL(0.0f), DEFVAL(false));
+    ClassDB::bind_method(D_METHOD("remove_connection", "ent_idx", "conn_idx"), &Tf2MapDoc::remove_connection);
     ClassDB::bind_method(D_METHOD("delete_entity", "ent_idx"), &Tf2MapDoc::delete_entity);
     ClassDB::bind_method(D_METHOD("get_entity_count"), &Tf2MapDoc::get_entity_count);
     ClassDB::bind_method(D_METHOD("get_entities"), &Tf2MapDoc::get_entities);
@@ -397,6 +405,9 @@ void Tf2MapDoc::set_skyname(const String& sky) {
     doc_.worldExtra().set("skyname", toStd(sky));
     doc_.markDirty();
 }
+
+bool Tf2MapDoc::is_dirty() const { return doc_.dirty(); }
+void Tf2MapDoc::clear_dirty() { doc_.clearDirty(); }
 
 void Tf2MapDoc::set_grid_units(int units) { grid_units_ = std::clamp(units, 1, 256); }
 int Tf2MapDoc::get_grid_units() const { return grid_units_; }
@@ -910,10 +921,25 @@ bool Tf2MapDoc::auto_seal_skybox() {
 
 bool Tf2MapDoc::is_map_sealed() const {
     int skyCount = 0;
+    glm::vec3 skyMin(1e30f), skyMax(-1e30f);
     for (const auto& s : doc_.worldSolids()) {
-        if (s.valid && isSkyboxSolid(s)) ++skyCount;
+        if (s.valid && isSkyboxSolid(s)) {
+            ++skyCount;
+            skyMin = glm::min(skyMin, s.boundsMin);
+            skyMax = glm::max(skyMax, s.boundsMax);
+        }
     }
-    return skyCount >= 6;
+    if (skyCount < 6) return false;
+    // Verify every active non-skybox solid actually sits inside the skybox shell!
+    for (const auto& s : doc_.worldSolids()) {
+        if (!s.valid || isSkyboxSolid(s)) continue;
+        if (s.boundsMin.x < skyMin.x - 1.0f || s.boundsMax.x > skyMax.x + 1.0f ||
+            s.boundsMin.y < skyMin.y - 1.0f || s.boundsMax.y > skyMax.y + 1.0f ||
+            s.boundsMin.z < skyMin.z - 1.0f || s.boundsMax.z > skyMax.z + 1.0f) {
+            return false;
+        }
+    }
+    return true;
 }
 
 int Tf2MapDoc::add_point_entity(const String& classname, const Vector3& pos_g, const Dictionary& kv) {
@@ -990,13 +1016,23 @@ bool Tf2MapDoc::set_entity_pos(int ent_idx, const Vector3& pos_g) {
 }
 
 bool Tf2MapDoc::add_connection(int src_ent_idx, const String& output_name, const String& target_name,
-                               const String& input_name, const String& param, float delay) {
+                               const String& input_name, const String& param, float delay,
+                               bool once_only) {
     if (src_ent_idx < 0 || src_ent_idx >= static_cast<int>(doc_.entities().size())) return false;
     char arg[256];
-    std::snprintf(arg, sizeof(arg), "%s,%s,%s,%g,-1",
+    std::snprintf(arg, sizeof(arg), "%s,%s,%s,%g,%d",
                   toStd(target_name).c_str(), toStd(input_name).c_str(),
-                  toStd(param).c_str(), delay);
+                  toStd(param).c_str(), delay, once_only ? 1 : -1);
     doc_.entities()[src_ent_idx].connections.push_back({toStd(output_name), arg});
+    doc_.markDirty();
+    return true;
+}
+
+bool Tf2MapDoc::remove_connection(int ent_idx, int conn_idx) {
+    if (ent_idx < 0 || ent_idx >= static_cast<int>(doc_.entities().size())) return false;
+    auto& conns = doc_.entities()[ent_idx].connections;
+    if (conn_idx < 0 || conn_idx >= static_cast<int>(conns.size())) return false;
+    conns.erase(conns.begin() + conn_idx);
     doc_.markDirty();
     return true;
 }
@@ -1086,6 +1122,26 @@ Dictionary Tf2MapDoc::get_solid_mesh_data(int solid_idx) const {
     return out;
 }
 
+static bool rayTriangleMT(const glm::vec3& ro, const glm::vec3& rd,
+                          const glm::vec3& v0, const glm::vec3& v1, const glm::vec3& v2,
+                          float& outT) {
+    const glm::vec3 e1 = v1 - v0;
+    const glm::vec3 e2 = v2 - v0;
+    const glm::vec3 h = glm::cross(rd, e2);
+    const float a = glm::dot(e1, h);
+    if (std::fabs(a) < 1e-6f) return false;
+    const float f = 1.0f / a;
+    const glm::vec3 s = ro - v0;
+    const float u = f * glm::dot(s, h);
+    if (u < 0.0f || u > 1.0f) return false;
+    const glm::vec3 q = glm::cross(s, e1);
+    const float v = f * glm::dot(rd, q);
+    if (v < 0.0f || u + v > 1.0f) return false;
+    const float t = f * glm::dot(e2, q);
+    if (t > 0.01f) { outT = t; return true; }
+    return false;
+}
+
 Dictionary Tf2MapDoc::raycast_face(const Vector3& ray_origin_g, const Vector3& ray_dir_g) const {
     Dictionary out;
     out["hit"] = false;
@@ -1093,16 +1149,74 @@ Dictionary Tf2MapDoc::raycast_face(const Vector3& ray_origin_g, const Vector3& r
     const glm::vec3 rd = glm::normalize(toSourceDir(ray_dir_g));
     float bestT = 1e30f;
     int bestSolid = -1, bestFace = -1;
+    glm::vec3 bestNormal(0, 0, 1);
 
     for (int i = 0; i < static_cast<int>(doc_.worldSolids().size()); ++i) {
         const auto& s = doc_.worldSolids()[i];
         if (!s.valid || s.hidden || isSkyboxSolid(s)) continue;
+        bool hasDisp = false;
+        for (const auto& f : s.faces) if (f.hasDisp) { hasDisp = true; break; }
+        if (hasDisp) {
+            // Raycast directly against actual displaced cliff/terrain surface triangles!
+            for (int fi = 0; fi < static_cast<int>(s.faces.size()); ++fi) {
+                const auto& f = s.faces[fi];
+                if (!f.hasDisp || f.verts.size() != 4) continue;
+                const int power = f.dispInfo.getInt("power");
+                if (power < 2 || power > 4) continue;
+                const int gn = (1 << power) + 1;
+                std::vector<float> nrm, dst;
+                if (!readDispRows(f.dispInfo.child("normals"), gn, 3, nrm) ||
+                    !readDispRows(f.dispInfo.child("distances"), gn, 1, dst))
+                    continue;
+                glm::vec3 start(0.0f);
+                std::sscanf(f.dispInfo.get("startposition").c_str(), " [ %f %f %f ]",
+                            &start.x, &start.y, &start.z);
+                glm::vec3 A, B, C, D;
+                dispCornersLocal(f, start, A, B, C, D);
+                std::vector<glm::vec3> grid(static_cast<size_t>(gn) * gn);
+                for (int r = 0; r < gn; ++r) {
+                    const float tb = static_cast<float>(r) / (gn - 1);
+                    const glm::vec3 e0 = A + (D - A) * tb;
+                    const glm::vec3 e1 = B + (C - B) * tb;
+                    for (int c = 0; c < gn; ++c) {
+                        const int idx = r * gn + c;
+                        const float ta = static_cast<float>(c) / (gn - 1);
+                        const glm::vec3 base = e0 + (e1 - e0) * ta;
+                        const glm::vec3 nv(nrm[idx * 3], nrm[idx * 3 + 1], nrm[idx * 3 + 2]);
+                        grid[idx] = base + nv * dst[idx];
+                    }
+                }
+                for (int r = 0; r < gn - 1; ++r) {
+                    for (int c = 0; c < gn - 1; ++c) {
+                        const glm::vec3& p00 = grid[r * gn + c];
+                        const glm::vec3& p10 = grid[r * gn + (c + 1)];
+                        const glm::vec3& p11 = grid[(r + 1) * gn + (c + 1)];
+                        const glm::vec3& p01 = grid[(r + 1) * gn + c];
+                        float tTri = 0.0f;
+                        if (rayTriangleMT(ro, rd, p00, p10, p11, tTri) && tTri < bestT) {
+                            bestT = tTri; bestSolid = i; bestFace = fi;
+                            glm::vec3 tn = glm::cross(p10 - p00, p11 - p00);
+                            bestNormal = (glm::length(tn) > 1e-4f) ? glm::normalize(tn) : f.planeN;
+                            if (glm::dot(bestNormal, f.planeN) < 0.0f) bestNormal = -bestNormal;
+                        }
+                        if (rayTriangleMT(ro, rd, p00, p11, p01, tTri) && tTri < bestT) {
+                            bestT = tTri; bestSolid = i; bestFace = fi;
+                            glm::vec3 tn = glm::cross(p11 - p00, p01 - p00);
+                            bestNormal = (glm::length(tn) > 1e-4f) ? glm::normalize(tn) : f.planeN;
+                            if (glm::dot(bestNormal, f.planeN) < 0.0f) bestNormal = -bestNormal;
+                        }
+                    }
+                }
+            }
+            continue;
+        }
         float t = 0.0f;
         int fi = -1;
         if (pb::map::raySolidFace(ro, rd, s, t, fi) && t > 0.01f && t < bestT) {
             bestT = t;
             bestSolid = i;
             bestFace = fi;
+            bestNormal = s.faces[fi].planeN;
         }
     }
     if (bestSolid < 0) return out;
@@ -1116,7 +1230,7 @@ Dictionary Tf2MapDoc::raycast_face(const Vector3& ray_origin_g, const Vector3& r
     out["face_idx"] = bestFace;
     out["t"] = bestT * kInvUpm;
     out["hit_pos"] = toGodotPos(ro + rd * bestT);
-    const Vector3 gn = toGodotDir(f.planeN);
+    const Vector3 gn = toGodotDir(bestNormal);
     out["normal"] = gn;
     out["face_normal"] = gn;
     out["face_center"] = toGodotPos(fc);
@@ -1234,6 +1348,46 @@ int Tf2MapDoc::tie_solid_to_entity(int solid_idx, const String& classname, const
     return idx;
 }
 
+PackedInt32Array Tf2MapDoc::untie_brush_entity(int ent_idx) {
+    PackedInt32Array out;
+    if (ent_idx < 0 || ent_idx >= static_cast<int>(doc_.entities().size())) return out;
+    auto& e = doc_.entities()[ent_idx];
+    if (e.solids.empty()) return out;
+    for (auto& s : e.solids) {
+        s.id = doc_.nextId();
+        const int idx = static_cast<int>(doc_.worldSolids().size());
+        doc_.worldSolids().push_back(std::move(s));
+        out.push_back(idx);
+    }
+    doc_.entities().erase(doc_.entities().begin() + ent_idx);
+    doc_.markDirty();
+    return out;
+}
+
+Dictionary Tf2MapDoc::get_entity_mesh_data(int ent_idx) const {
+    Dictionary out;
+    out["ok"] = false;
+    if (ent_idx < 0 || ent_idx >= static_cast<int>(doc_.entities().size())) return out;
+    const auto& e = doc_.entities()[ent_idx];
+    if (e.solids.empty()) return out;
+    Array allSurfs;
+    PackedVector3Array allCol;
+    for (const auto& s : e.solids) {
+        Dictionary sd;
+        if (meshSolidToDict(s, sd)) {
+            Array ss = sd["surfaces"];
+            for (int i = 0; i < ss.size(); ++i) allSurfs.push_back(ss[i]);
+            PackedVector3Array sc = sd["collision_faces"];
+            for (int i = 0; i < sc.size(); ++i) allCol.push_back(sc[i]);
+        }
+    }
+    if (allSurfs.is_empty()) return out;
+    out["ok"] = true;
+    out["surfaces"] = allSurfs;
+    out["collision_faces"] = allCol;
+    return out;
+}
+
 int Tf2MapDoc::duplicate_entity(int ent_idx, const Vector3& offset_g) {
     if (ent_idx < 0 || ent_idx >= static_cast<int>(doc_.entities().size())) return -1;
     pb::map::MapEntity copy = doc_.entities()[ent_idx];
@@ -1323,12 +1477,13 @@ int Tf2MapDoc::add_wall_segment(const Vector3& p0_g, const Vector3& p1_g, float 
     const float z0 = std::min(a.z, b.z);
     const float z1 = z0 + hU;
 
+    // Extend ends slightly by halfT so chained 90-degree walls join without an exterior corner notch!
     const glm::vec3 mid = 0.5f * (a + b);
     std::vector<std::pair<glm::vec3, float>> planes = {
         { right,  glm::dot(right,  mid + right * halfT) },
         {-right,  glm::dot(-right, mid - right * halfT) },
-        { fwd,    glm::dot(fwd,    b) },
-        {-fwd,    glm::dot(-fwd,   a) },
+        { fwd,    glm::dot(fwd,    b + fwd * halfT) },
+        {-fwd,    glm::dot(-fwd,   a - fwd * halfT) },
         { glm::vec3(0, 0,  1),  z1 },
         { glm::vec3(0, 0, -1), -z0 },
     };
@@ -1386,6 +1541,28 @@ bool Tf2MapDoc::move_solid_vertex(int solid_idx, int vert_idx, const Vector3& de
     pb::map::Solid backup = s;
     const glm::vec3 dU = glm::round(toSourcePos(delta_g));
     if (!pb::map::moveVertexHandles(s, h, {vert_idx}, dU)) {
+        s = std::move(backup);
+        return false;
+    }
+    doc_.markDirty();
+    return true;
+}
+
+bool Tf2MapDoc::move_solid_vertex_at(int solid_idx, const Vector3& old_pos_g, const Vector3& delta_g) {
+    if (solid_idx < 0 || solid_idx >= static_cast<int>(doc_.worldSolids().size())) return false;
+    pb::map::Solid& s = doc_.worldSolids()[solid_idx];
+    const pb::map::BrushHandles h = pb::map::extractHandles(s);
+    const glm::vec3 targetU = toSourcePos(old_pos_g);
+    int bestIdx = -1;
+    float bestD = 8.0f; // 8 Hammer units tolerance (0.25m)
+    for (int i = 0; i < static_cast<int>(h.verts.size()); ++i) {
+        const float d = glm::distance(h.verts[i].pos, targetU);
+        if (d < bestD) { bestD = d; bestIdx = i; }
+    }
+    if (bestIdx < 0) return false;
+    pb::map::Solid backup = s;
+    const glm::vec3 dU = glm::round(toSourcePos(delta_g));
+    if (!pb::map::moveVertexHandles(s, h, {bestIdx}, dU)) {
         s = std::move(backup);
         return false;
     }
@@ -1533,33 +1710,62 @@ int Tf2MapDoc::sculpt_terrain_ex(const Vector3& center_g, float radius_m, float 
                         }
                         const glm::vec3 target = cur + pushDir * signedAmt;
                         const glm::vec3 off = target - base;
+                        // Keep displacement normal consistently oriented in the positive half-space of f.planeN
+                        // and store SIGNED distance so Lower/Smooth/Subdivide/Sew NEVER invert normals!
                         const float dlen = glm::length(off);
                         if (dlen > 0.001f) {
-                            const glm::vec3 dn = off / dlen;
+                            glm::vec3 dn = off / dlen;
+                            float sdist = dlen;
+                            if (glm::dot(dn, f.planeN) < 0.0f) {
+                                dn = -dn;
+                                sdist = -dlen;
+                            }
                             nextNrm[i * 3 + 0] = dn.x;
                             nextNrm[i * 3 + 1] = dn.y;
                             nextNrm[i * 3 + 2] = dn.z;
-                            nextDst[i] = dlen;
+                            nextDst[i] = sdist;
                             anyNrm = true;
                         } else {
+                            nextNrm[i * 3 + 0] = f.planeN.x;
+                            nextNrm[i * 3 + 1] = f.planeN.y;
+                            nextNrm[i * 3 + 2] = f.planeN.z;
                             nextDst[i] = 0.0f;
+                            anyNrm = true;
                         }
                         anyDst = true;
                     } else if (mode == 2) {
-                        // Smooth neighbor positions
-                        float sum = 0.0f; int cnt = 0;
+                        // Smooth neighbor 3D offset vectors (handles signed positive & negative displacements!)
+                        glm::vec3 sumOff(0.0f); int cnt = 0;
                         for (int dr = -1; dr <= 1; ++dr)
                             for (int dc = -1; dc <= 1; ++dc) {
                                 int rr = r + dr, cc = c + dc;
                                 if (rr >= 0 && rr < gn && cc >= 0 && cc < gn) {
-                                    sum += dst[rr * gn + cc]; ++cnt;
+                                    const int ni = rr * gn + cc;
+                                    sumOff += glm::vec3(nrm[ni * 3], nrm[ni * 3 + 1], nrm[ni * 3 + 2]) * dst[ni];
+                                    ++cnt;
                                 }
                             }
-                        nextDst[i] = dst[i] + ((sum / cnt) - dst[i]) * fall * 0.72f;
+                        const glm::vec3 avgOff = sumOff / static_cast<float>(std::max(1, cnt));
+                        const glm::vec3 curOff = nv * dst[i];
+                        const glm::vec3 smOff = curOff + (avgOff - curOff) * fall * 0.72f;
+                        const float slen = glm::length(smOff);
+                        if (slen > 0.001f) {
+                            glm::vec3 sn = smOff / slen;
+                            float sdist = slen;
+                            if (glm::dot(sn, f.planeN) < 0.0f) { sn = -sn; sdist = -slen; }
+                            nextNrm[i * 3 + 0] = sn.x; nextNrm[i * 3 + 1] = sn.y; nextNrm[i * 3 + 2] = sn.z;
+                            nextDst[i] = sdist;
+                        } else {
+                            nextDst[i] = 0.0f;
+                        }
+                        anyNrm = true;
                         anyDst = true;
                     } else if (mode == 3) {
-                        const float targetD = glm::dot(centerU - base, nv);
-                        nextDst[i] = dst[i] + (targetD - dst[i]) * fall * 0.78f;
+                        const float targetD = glm::dot(centerU - base, f.planeN);
+                        nextNrm[i * 3 + 0] = f.planeN.x; nextNrm[i * 3 + 1] = f.planeN.y; nextNrm[i * 3 + 2] = f.planeN.z;
+                        const float curSigned = glm::dot(nv * dst[i], f.planeN);
+                        nextDst[i] = curSigned + (targetD - curSigned) * fall * 0.78f;
+                        anyNrm = true;
                         anyDst = true;
                     }
                 }
@@ -1666,9 +1872,11 @@ int Tf2MapDoc::sew_displacements() {
         for (int i = 0; i < total; ++i) {
             const glm::vec3 off = dr.cur[i] - dr.base[i];
             const float len = glm::length(off);
-            const glm::vec3 nv = (len > 1e-4f) ? (off / len) : dr.face->planeN;
+            glm::vec3 nv = (len > 1e-4f) ? (off / len) : dr.face->planeN;
+            float sdist = len;
+            if (glm::dot(nv, dr.face->planeN) < 0.0f) { nv = -nv; sdist = -len; }
             nrm[i * 3 + 0] = nv.x; nrm[i * 3 + 1] = nv.y; nrm[i * 3 + 2] = nv.z;
-            dst[i] = len;
+            dst[i] = sdist;
         }
         for (auto& ch : dr.face->dispInfo.children) {
             if (ch.name == "normals") writeDispRows(ch, dr.gn, 3, nrm);
@@ -1687,17 +1895,34 @@ bool Tf2MapDoc::subdivide_displacement(int solid_idx) {
         const int power = f.dispInfo.getInt("power");
         if (power < 2 || power > 4) continue;
         const int gn = (1 << power) + 1;
-        std::vector<float> dst;
-        if (!readDispRows(f.dispInfo.child("distances"), gn, 1, dst)) continue;
-        std::vector<float> out = dst;
+        std::vector<float> nrm, dst;
+        if (!readDispRows(f.dispInfo.child("normals"), gn, 3, nrm) ||
+            !readDispRows(f.dispInfo.child("distances"), gn, 1, dst))
+            continue;
+        std::vector<float> outNrm = nrm, outDst = dst;
+        auto vecAt = [&](int idx) {
+            return glm::vec3(nrm[idx * 3], nrm[idx * 3 + 1], nrm[idx * 3 + 2]) * dst[idx];
+        };
         for (int r = 1; r < gn - 1; ++r)
             for (int c = 1; c < gn - 1; ++c) {
-                out[r * gn + c] = (dst[(r - 1) * gn + c] + dst[(r + 1) * gn + c] +
-                                   dst[r * gn + (c - 1)] + dst[r * gn + (c + 1)] +
-                                   dst[r * gn + c] * 2.0f) / 6.0f;
+                const int i = r * gn + c;
+                const glm::vec3 avg = (vecAt((r - 1) * gn + c) + vecAt((r + 1) * gn + c) +
+                                       vecAt(r * gn + (c - 1)) + vecAt(r * gn + (c + 1)) +
+                                       vecAt(i) * 2.0f) / 6.0f;
+                const float len = glm::length(avg);
+                if (len > 1e-4f) {
+                    glm::vec3 nv = avg / len;
+                    float sdist = len;
+                    if (glm::dot(nv, f.planeN) < 0.0f) { nv = -nv; sdist = -len; }
+                    outNrm[i * 3 + 0] = nv.x; outNrm[i * 3 + 1] = nv.y; outNrm[i * 3 + 2] = nv.z;
+                    outDst[i] = sdist;
+                } else {
+                    outDst[i] = 0.0f;
+                }
             }
         for (auto& ch : f.dispInfo.children) {
-            if (ch.name == "distances") { writeDispRows(ch, gn, 1, out); any = true; break; }
+            if (ch.name == "normals") writeDispRows(ch, gn, 3, outNrm);
+            if (ch.name == "distances") { writeDispRows(ch, gn, 1, outDst); any = true; }
         }
     }
     if (any) doc_.markDirty();
@@ -1785,6 +2010,7 @@ int Tf2MapDoc::replace_material(const String& find_mat, const String& replace_ma
 bool Tf2MapDoc::set_solid_hidden(int solid_idx, bool hidden) {
     if (solid_idx < 0 || solid_idx >= static_cast<int>(doc_.worldSolids().size())) return false;
     doc_.worldSolids()[solid_idx].hidden = hidden;
+    doc_.markDirty();
     return true;
 }
 
@@ -1792,6 +2018,7 @@ int Tf2MapDoc::unhide_all() {
     int n = 0;
     for (auto& s : doc_.worldSolids()) { if (s.hidden) { s.hidden = false; ++n; } }
     for (auto& e : doc_.entities()) { if (e.hidden) { e.hidden = false; ++n; } }
+    if (n > 0) doc_.markDirty();
     return n;
 }
 
@@ -1848,9 +2075,17 @@ Array Tf2MapDoc::check_problems() const {
                  Vector3(0, 8, 0), -1, -1, "add_sun");
     }
 
-    // Check broken I/O targets & invalid solids
+    // Check duplicate targetnames, broken I/O targets & invalid solids
+    std::unordered_map<std::string, bool> dupWarned;
     for (int i = 0; i < static_cast<int>(doc_.entities().size()); ++i) {
         const auto& e = doc_.entities()[i];
+        const std::string tn = e.targetname();
+        if (!tn.empty() && targetCounts[tn] > 1 && e.classname != "info_player_teamspawn" && !dupWarned[tn]) {
+            dupWarned[tn] = true;
+            pushProb("WARN", "DUP_TARGETNAME",
+                     "Duplicate targetname '" + tn + "' shared by " + std::to_string(targetCounts[tn]) + " entities",
+                     toGodotPos(e.origin), -1, i, "");
+        }
         for (const auto& c : e.connections) {
             auto comma = c.second.find(',');
             std::string tgt = (comma == std::string::npos) ? c.second : c.second.substr(0, comma);

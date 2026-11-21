@@ -414,6 +414,7 @@ Dictionary Tf2Core::read_material_rgba(const String& material_path) const {
     out["additive"] = rm.additive;
     out["no_cull"] = rm.noCull;
     out["self_illum"] = rm.selfIllum;
+    out["color_tint"] = Color(rm.colorTint[0], rm.colorTint[1], rm.colorTint[2], 1.0f);
     out["base_texture"] = toGodot(tex);
     out["rgba"] = bytes;
     out["has_blend"] = false;
@@ -574,6 +575,10 @@ Dictionary Tf2Core::read_skybox_panorama(const String& skyname, int pano_width, 
         }
         u = std::clamp(u, 0.0f, 1.0f);
         v = std::clamp(v, 0.0f, 1.0f);
+        // Valve half-height skybox faces (e.g. 1024x512) cover the upper hemisphere [0..0.5], clamped below horizon!
+        if (img.width == img.height * 2 && img.width >= 256) {
+            v = std::clamp(v * 2.0f, 0.0f, 1.0f);
+        }
         const float fx = u * static_cast<float>(img.width - 1);
         const float fy = v * static_cast<float>(img.height - 1);
         const int x0 = static_cast<int>(fx);
@@ -840,10 +845,10 @@ Dictionary Tf2Core::load_bsp_data(const String& bsp_path) {
     const Vector3 p0 = toGodotPos(mesh.playBoundsMin);
     const Vector3 p1 = toGodotPos(mesh.playBoundsMax);
 
-    // Export interactive func_door brush sub-models so F5 playtest opens spawn doors smoothly!
+    // Export interactive func_door brush sub-models + parented prop_dynamic door models!
     Array doorsArr;
     for (const auto& dr : mesh.doors) {
-        if (dr.vertices.empty() || dr.indices.empty()) continue;
+        if (dr.vertices.empty() && dr.attachedProps.empty()) continue;
         const Vector3 da = toGodotPos(dr.boundsMin);
         const Vector3 db = toGodotPos(dr.boundsMax);
         const Vector3 dmin(std::min(da.x, db.x), std::min(da.y, db.y), std::min(da.z, db.z));
@@ -895,7 +900,26 @@ Dictionary Tf2Core::load_bsp_data(const String& bsp_path) {
             sd["indices"] = inds;
             dSurfs.push_back(sd);
         }
-        if (dSurfs.is_empty()) continue;
+        Array attProps;
+        for (const auto& pr : dr.attachedProps) {
+            if (pr.model.empty()) continue;
+            const float yaw = glm::radians(pr.anglesPYR.y);
+            const float pit = glm::radians(pr.anglesPYR.x);
+            const float rol = glm::radians(pr.anglesPYR.z);
+            const glm::mat3 R =
+                glm::mat3(glm::rotate(glm::mat4(1.0f), yaw, glm::vec3(0, 0, 1))) *
+                glm::mat3(glm::rotate(glm::mat4(1.0f), pit, glm::vec3(0, 1, 0))) *
+                glm::mat3(glm::rotate(glm::mat4(1.0f), rol, glm::vec3(1, 0, 0)));
+            const float sc = (pr.scale > 0.01f) ? pr.scale : 1.0f;
+            const Vector3 bx = toGodotNrm(R * glm::vec3(1, 0, 0)) * sc;
+            const Vector3 by = toGodotNrm(R * glm::vec3(0, 0, 1)) * sc;
+            const Vector3 bz = toGodotNrm(R * glm::vec3(0, -1, 0)) * sc;
+            Dictionary pd;
+            pd["model"] = toGodot(pr.model);
+            pd["local_transform"] = Transform3D(Basis(bx, by, bz), toGodotPos(pr.pos) - dctr);
+            attProps.push_back(pd);
+        }
+        if (dSurfs.is_empty() && attProps.is_empty()) continue;
         Dictionary dd;
         dd["targetname"] = toGodot(dr.targetname);
         dd["center"] = dctr;
@@ -904,8 +928,10 @@ Dictionary Tf2Core::load_bsp_data(const String& bsp_path) {
         dd["movedir"] = toGodotNrm(dr.movedir).normalized();
         dd["travel_m"] = dr.travel * kInvUpm;
         dd["speed_m"] = dr.speed * kInvUpm;
+        dd["start_locked"] = dr.startLocked;
         dd["surfaces"] = dSurfs;
         dd["collision_faces"] = dCol;
+        dd["attached_props"] = attProps;
         doorsArr.push_back(dd);
     }
 
@@ -914,6 +940,10 @@ Dictionary Tf2Core::load_bsp_data(const String& bsp_path) {
     out["path"] = toGodot(path);
     out["version"] = bsp.version();
     out["skyname"] = toGodot(skyname);
+    out["has_sun"] = mesh.hasSun;
+    out["sun_pitch"] = mesh.sunPitch;
+    out["sun_yaw"] = mesh.sunYaw;
+    out["sun_color"] = Color(mesh.sunColor.r, mesh.sunColor.g, mesh.sunColor.b, 1.0f);
     out["pak_entries"] = static_cast<int64_t>(pakEntries);
     out["drawn_faces"] = static_cast<int64_t>(mesh.drawnFaces);
     out["surface_count"] = surfaces.size();

@@ -7,6 +7,7 @@ extends RefCounted
 ## and live VPK material swatch textures for the Material Browser!
 
 var core: Object
+var prop_ambient_boost: float = 0.28
 var _mat_cache: Dictionary = {}    # key -> StandardMaterial3D
 var _info_cache: Dictionary = {}   # key -> Dictionary {tex, tex2, has_blend, alpha_test, translucent, no_cull, self_illum, has_alpha}
 var _mesh_cache: Dictionary = {}   # mdl_path -> ArrayMesh
@@ -28,7 +29,7 @@ func get_material_info(mat_path: String) -> Dictionary:
 	var res := {
 		"ok": false, "tex": null, "tex2": null, "has_blend": false,
 		"alpha_test": false, "translucent": false, "additive": false, "no_cull": false,
-		"self_illum": false, "has_alpha": false,
+		"self_illum": false, "has_alpha": false, "color_tint": Color.WHITE,
 	}
 	var d: Dictionary = core.read_material_rgba(mat_path)
 	if d.get("ok", false):
@@ -44,6 +45,7 @@ func get_material_info(mat_path: String) -> Dictionary:
 		res["additive"] = bool(d.get("additive", false))
 		res["no_cull"] = bool(d.get("no_cull", false))
 		res["self_illum"] = bool(d.get("self_illum", false))
+		res["color_tint"] = d.get("color_tint", Color.WHITE)
 		if d.get("has_blend", false):
 			var w2 := int(d["width2"])
 			var h2 := int(d["height2"])
@@ -72,6 +74,8 @@ func get_material(mat_path: String, triplanar := false, is_prop := false) -> Sta
 	if info.get("ok", false):
 		var tex: ImageTexture = info["tex"]
 		mat.albedo_texture = tex
+		var tint: Color = info.get("color_tint", Color.WHITE)
+		mat.albedo_color = tint
 		mat.texture_filter = BaseMaterial3D.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS_ANISOTROPIC
 		if info["additive"]:
 			# Authentic Valve $additive hologram / glow / light-beam material (e.g. cappoint_hologram.mdl!)
@@ -91,10 +95,10 @@ func get_material(mat_path: String, triplanar := false, is_prop := false) -> Sta
 			mat.emission_enabled = true
 			mat.emission_texture = tex
 			mat.emission_energy_multiplier = 0.72
-		elif is_prop:
+		elif is_prop and not info["additive"]:
 			mat.emission_enabled = true
 			mat.emission_texture = tex
-			mat.emission_energy_multiplier = 0.28
+			mat.emission_energy_multiplier = prop_ambient_boost
 		if triplanar:
 			mat.uv1_triplanar = true
 			mat.uv1_world_triplanar = true

@@ -8,6 +8,7 @@ var doc: Object
 var assets: RefCounted
 var door_ctrl: Node = null
 var show_logic_wires: bool = true
+var show_logic_markers: bool = false # Keep mid-air tf_gamerules/tf_logic_* markers hidden unless toggled in VisGroups!
 var show_volumes: bool = true
 var show_triggers: bool = true
 var show_props: bool = true
@@ -198,34 +199,65 @@ func _spawn_entity_node(idx: int, e: Dictionary, pos: Vector3) -> void:
 		var bmax: Vector3 = e["bounds_max"]
 		_ent_bounds[idx] = [bmin, bmax]
 		var sz := (bmax - bmin).max(Vector3(0.2, 0.2, 0.2))
+
+		# Build ACTUAL textured 3D brush mesh from doc.get_entity_mesh_data(idx) for solid brush entities
+		# (func_detail, func_door, func_wall, etc.) so Ctrl+T never turns ramps/arches into untextured boxes!
+		var built_real_mesh: ArrayMesh = null
+		var built_col: PackedVector3Array = PackedVector3Array()
+		if not is_trig and cls != "func_water" and cls != "func_upgradestation" and doc.has_method("get_entity_mesh_data"):
+			var md: Dictionary = doc.get_entity_mesh_data(idx)
+			if md.get("ok", false):
+				built_real_mesh = ArrayMesh.new()
+				for s in md["surfaces"]:
+					var arr := []
+					arr.resize(Mesh.ARRAY_MAX)
+					var verts: PackedVector3Array = s["vertices"]
+					var local_v := PackedVector3Array()
+					local_v.resize(verts.size())
+					for vi in range(verts.size()):
+						local_v[vi] = verts[vi] - pos
+					arr[Mesh.ARRAY_VERTEX] = local_v
+					arr[Mesh.ARRAY_NORMAL] = s["normals"]
+					arr[Mesh.ARRAY_TEX_UV] = s["uvs"]
+					arr[Mesh.ARRAY_INDEX] = s["indices"]
+					built_real_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arr)
+					var si := built_real_mesh.get_surface_count() - 1
+					built_real_mesh.surface_set_material(si, assets.get_material(str(s["material"]), false))
+				var raw_col: PackedVector3Array = md.get("collision_faces", PackedVector3Array())
+				built_col.resize(raw_col.size())
+				for ci in range(raw_col.size()):
+					built_col[ci] = raw_col[ci] - pos
+
 		var mi := MeshInstance3D.new()
-		var bm := BoxMesh.new()
-		bm.size = sz
-		mi.mesh = bm
-		var mat := StandardMaterial3D.new()
-		mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-		mat.cull_mode = BaseMaterial3D.CULL_DISABLED
-		mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-		var col := Color(0.95, 0.65, 0.16, 0.22)
-		if cls == "func_respawnroom":
-			col = Color(0.85, 0.22, 0.18, 0.16) if str(kv.get("TeamNum", "2")) == "2" else Color(0.22, 0.52, 0.85, 0.16)
-		elif cls == "func_door":
-			col = Color(0.55, 0.60, 0.65, 0.94)
-			mat.shading_mode = BaseMaterial3D.SHADING_MODE_PER_PIXEL
-			mat.transparency = BaseMaterial3D.TRANSPARENCY_DISABLED
-			# Make custom func_door solid & interactive so F5 playtest slides it open!
+		if built_real_mesh != null:
+			mi.mesh = built_real_mesh
+		else:
+			var bm := BoxMesh.new()
+			bm.size = sz
+			mi.mesh = bm
+
+		if cls == "func_door":
+			# Make custom func_door solid & interactive so F5 playtest slides it open smoothly!
 			var ab := AnimatableBody3D.new()
 			ab.sync_to_physics = false
 			ab.collision_layer = 1
 			ab.collision_mask = 0
 			ab.position = pos
-			mat.albedo_color = col
-			mi.material_override = mat
+			if built_real_mesh == null:
+				var dmat := StandardMaterial3D.new()
+				dmat.albedo_color = Color(0.55, 0.60, 0.65, 1.0)
+				mi.material_override = dmat
 			ab.add_child(mi)
 			var cs := CollisionShape3D.new()
-			var bs := BoxShape3D.new()
-			bs.size = sz
-			cs.shape = bs
+			if built_col.size() >= 3:
+				var poly := ConcavePolygonShape3D.new()
+				poly.backface_collision = true
+				poly.set_faces(built_col)
+				cs.shape = poly
+			else:
+				var bs := BoxShape3D.new()
+				bs.size = sz
+				cs.shape = bs
 			ab.add_child(cs)
 			ents_root.add_child(ab)
 			if door_ctrl != null:
@@ -239,9 +271,31 @@ func _spawn_entity_node(idx: int, e: Dictionary, pos: Vector3) -> void:
 				var trav := maxf(2.4, absf(mdir.x) * sz.x + absf(mdir.y) * sz.y + absf(mdir.z) * sz.z - 0.15)
 				door_ctrl.register_door(ab, pos, mdir, trav, spd, maxf(4.5, sz.length() * 0.8 + 2.0), str(kv.get("targetname", "")))
 			return
-		elif cls == "func_detail":
-			col = Color(0.58, 0.72, 0.84, 0.76)
-			mat.shading_mode = BaseMaterial3D.SHADING_MODE_PER_PIXEL
+
+		if built_real_mesh != null:
+			# Solid world-textured brush entity (func_detail, func_wall, etc.) — also add static collision for F5!
+			var sb := StaticBody3D.new()
+			sb.collision_layer = 1
+			sb.collision_mask = 0
+			sb.add_child(mi)
+			if built_col.size() >= 3:
+				var cs := CollisionShape3D.new()
+				var poly := ConcavePolygonShape3D.new()
+				poly.backface_collision = true
+				poly.set_faces(built_col)
+				cs.shape = poly
+				sb.add_child(cs)
+			holder.add_child(sb)
+			ents_root.add_child(holder)
+			return
+
+		var mat := StandardMaterial3D.new()
+		mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+		mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+		mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		var col := Color(0.95, 0.65, 0.16, 0.22)
+		if cls == "func_respawnroom":
+			col = Color(0.85, 0.22, 0.18, 0.16) if str(kv.get("TeamNum", "2")) == "2" else Color(0.22, 0.52, 0.85, 0.16)
 		elif cls == "func_water":
 			col = Color(0.18, 0.55, 0.78, 0.52)
 		elif cls == "trigger_hurt":
@@ -344,8 +398,8 @@ func _spawn_entity_node(idx: int, e: Dictionary, pos: Vector3) -> void:
 		_ent_bounds[idx] = [pos - Vector3(0.4, 0.4, 0.4), pos + Vector3(0.4, 0.4, 0.4)]
 		return
 
-	# 6. Generic Logic Entity icon badge (sleek small Mann Co. translucent diamond — never blocks map view!)
-	if cls != "light_environment":
+	# 6. Generic Logic Entity icon badge (hidden by default unless toggled in VisGroups so sky stays clean!)
+	if cls != "light_environment" and show_logic_markers:
 		var box := MeshInstance3D.new()
 		var bm := BoxMesh.new()
 		bm.size = Vector3(0.32, 0.32, 0.32)

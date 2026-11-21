@@ -48,6 +48,8 @@ var _peak_y: float = 0.0
 var _ground_y: float = 0.0
 var _sightline_u: float = 0.0
 
+var base_fov: float = 90.0
+var noclip_speed_u: float = 680.0
 var cam: Camera3D
 var col_shape: CollisionShape3D
 var _vfx_root: Node3D
@@ -71,7 +73,7 @@ func _ready() -> void:
 	add_child(col_shape)
 
 	cam = Camera3D.new()
-	cam.fov = 90.0 # Classic TF2 fov_desired 90!
+	cam.fov = base_fov # Configurable via Settings (default TF2 fov_desired 90!)
 	cam.far = 500.0
 	cam.position = Vector3(0, STAND_EYE, 0)
 	add_child(cam)
@@ -125,7 +127,7 @@ func set_tf2_class(idx: int) -> void:
 	scoped = false
 	_fire_cd = 0.0
 	if cam != null:
-		cam.fov = 90.0
+		cam.fov = base_fov
 
 func get_class_info() -> Dictionary:
 	return CLASSES[class_idx]
@@ -182,7 +184,7 @@ func handle_mouse_button(button: int, pressed: bool) -> void:
 	elif button == MOUSE_BUTTON_RIGHT and pressed and class_idx == 3:
 		scoped = not scoped
 		if cam != null:
-			cam.fov = 25.0 if scoped else 90.0
+			cam.fov = 25.0 if scoped else base_fov
 
 func trigger_primary_action() -> void:
 	if _fire_cd > 0.0:
@@ -225,7 +227,7 @@ func _physics_process(delta: float) -> void:
 
 	# Noclip / Free-Fly Mode (press V — just like TF2's noclip command!)
 	if noclip:
-		var fly_spd := (680.0 / UPM) * (2.0 if Input.is_key_pressed(KEY_SHIFT) else 1.0)
+		var fly_spd := (noclip_speed_u / UPM) * (2.0 if Input.is_key_pressed(KEY_SHIFT) else 1.0)
 		var cam_fwd := -cam.global_transform.basis.z
 		var cam_right := cam.global_transform.basis.x
 		var move := cam_fwd * inp.y + cam_right * inp.x

@@ -47,9 +47,16 @@ func tick(player_pos: Vector3, delta: float) -> void:
 		if not is_instance_valid(n):
 			continue
 		var cpos: Vector3 = d["closed_pos"]
-		var dist := player_pos.distance_to(cpos)
-		var want_open := dist <= float(d["trigger_r"])
-		var target_t := 1.0 if want_open else 0.0
+		# Cylinder-bounded trigger (tight vertical Y check so doors don't open through floors above/below!)
+		var hdist := Vector2(player_pos.x - cpos.x, player_pos.z - cpos.z).length()
+		var vdist := absf(player_pos.y - cpos.y)
+		var want_open := (hdist <= float(d["trigger_r"]) and vdist <= 3.2)
+		if want_open:
+			d["hold_ttl"] = 1.6
+		else:
+			d["hold_ttl"] = maxf(0.0, float(d.get("hold_ttl", 0.0)) - delta)
+		var keep_open := want_open or float(d.get("hold_ttl", 0.0)) > 0.0
+		var target_t := 1.0 if keep_open else 0.0
 		var cur_t: float = float(d["open_t"])
 		var rate: float = float(d["speed_m"]) / maxf(0.5, float(d["travel_m"]))
 		if cur_t < target_t:

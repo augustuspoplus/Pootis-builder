@@ -47,11 +47,13 @@ struct InteractiveDoor {
     glm::vec3 movedir{0.0f, 0.0f, 1.0f}; // Source Z-up unit slide direction
     float travel = 112.0f;               // Hammer units to slide
     float speed = 320.0f;                // Hammer units / sec
+    bool startLocked = false;            // spawnflags bit 2048 (Starts Locked)
     glm::vec3 boundsMin{0.0f};
     glm::vec3 boundsMax{0.0f};
     std::vector<WorldVertex> vertices;
     std::vector<uint32_t> indices;
     std::vector<DrawBatch> batches;
+    std::vector<PropInstance> attachedProps; // prop_dynamic door models parented to this func_door!
 };
 
 // CPU-side result of turning a BSP into something drawable.
@@ -84,6 +86,12 @@ struct WorldMesh {
     bool hasSpawn = false;
     glm::vec3 spawnPos{0.0f};
     float spawnYaw = 0.0f;  // degrees, around +Z
+
+    // Extracted light_environment sun orientation & color so Godot sun aligns with Valve VRAD!
+    bool hasSun = false;
+    float sunPitch = -45.0f;
+    float sunYaw = 45.0f;
+    glm::vec3 sunColor{1.0f, 0.96f, 0.90f};
 
     size_t drawnFaces = 0;
     size_t skippedFaces = 0;

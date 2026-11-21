@@ -27,13 +27,13 @@ const SettingsModalScript    = preload("res://scripts/ui/SettingsModal.gd")
 const Blueprint2DScript      = preload("res://scripts/ui/Blueprint2DView.gd")
 const EditorDrawersScript    = preload("res://scripts/ui/EditorDrawers.gd")
 
-const REPO_ROOT := "C:/Users/steph/Documents/Git/pootis builder"
 const UPM := 32.0
 const GRID_STEPS: Array[int] = [8, 16, 32, 64, 128]
 
 enum Stage { BUILD, GAMEPLAY, STYLE, PLAYTEST }
 enum SymmetryMode { OFF, MIRROR_X, ROT_180 }
 
+var repo_root: String = ""
 # Core native & scene systems
 var core: Object
 var doc: Object
@@ -61,6 +61,7 @@ var grid_floor: MeshInstance3D
 
 # Editor State
 var stage: int = Stage.BUILD
+var _prev_stage: int = Stage.BUILD
 var active_tool: String = "select"
 var active_material: String = "WOOD/WOOD_WALL002"
 var active_prop_mdl: String = "models/props_2fort/miningcrate001.mdl"
@@ -92,25 +93,33 @@ var _move_last_pos: Vector3 = Vector3.ZERO
 var _dragging_vertex: bool = false
 var _drag_vert_idx: int = -1
 var _drag_vert_last: Vector3 = Vector3.ZERO
+var _drag_vert_pos: Vector3 = Vector3.ZERO
 
 # Interactive Drag-to-Draw Box & Point-to-Point Wall Chain State!
 var _drawing_box: bool = false
 var _box_start: Vector3 = Vector3.ZERO
+var box_height_m: float = 0.5   # 16u slab default (adjustable in Wall/Box drawer!)
 var _wall_chain_active: bool = false
 var _wall_chain_start: Vector3 = Vector3.ZERO
-var wall_height_m: float = 4.5 # 144u standard TF2 story height
-var wall_thick_m: float = 0.75 # 24u wall thickness
+var wall_height_m: float = 4.5  # 144u standard TF2 story height
+var wall_thick_m: float = 0.75  # 24u wall thickness
 var _clip_keep_mode: int = 0
 
-# Building Wizard, Terrain Brush & Browser Search State
+# Building Wizard, Terrain Brush, Cliff Controls & Browser Search State
 var bld_floors: int = 2
 var bld_roof_style: int = 1
 var bld_door_side: int = 2
+var cliff_facing: int = 0       # 0=South, 1=North, 2=East, 3=West
+var cliff_height_m: float = 9.0 # 288u default canyon cliff height
+var cliff_power: int = 3        # Power-3 (9x9) Valve displacement grid
 var terrain_mode: int = 0       # 0=Raise, 1=Lower, 2=Smooth, 3=Flatten, 4=Alpha+, 5=Alpha-, 6=Noise
-var terrain_axis_mode: int = 0  # 0=Face Normal (cliffs!), 1=World Y, 2=World X, 3=World Z
+var terrain_axis_mode: int = 0  # 0=Face Normal (cliffs!), 1=Up(Z), 2=East(X), 3=North(Y)
 var terrain_radius_m: float = 4.5
-var terrain_strength_m: float = 1.2
+var terrain_strength_m: float = 1.25
 var _terrain_sculpting: bool = false
+var _terrain_changed: bool = false
+var _terrain_sync_accum: float = 0.0
+var _autosave_slot: int = 0
 var _mat_search_text: String = ""
 var _mat_browse_all: bool = false
 var _prop_search_text: String = ""
@@ -181,11 +190,12 @@ func _ready() -> void:
 	_parse_cli_shots()
 
 func _init_core_systems() -> void:
+	repo_root = ProjectSettings.globalize_path("res://").trim_suffix("/").get_base_dir()
 	settings = AppSettingsScript.new()
 	settings.load_from_disk()
 
 	core = ClassDB.instantiate("Tf2Core")
-	core.mount_tf2(REPO_ROOT)
+	core.mount_tf2(repo_root)
 	assets = Tf2AssetsScript.new(core)
 	bsp_loader = Tf2BspLoaderScript.new(core, assets)
 	doc = ClassDB.instantiate("Tf2MapDoc")
@@ -329,6 +339,9 @@ func _init_ui() -> void:
 	overlay_2d = HudWidgets.ViewportOverlay.new(self)
 	hud_layer.add_child(overlay_2d)
 
+	var ui_theme: Theme = HudWidgets.create_global_theme(fonts)
+	get_tree().root.theme = ui_theme
+
 	_build_top_bar()
 	_build_left_rail()
 	_build_toast_pill()
@@ -344,10 +357,16 @@ func _init_ui() -> void:
 	settings_modal.setup(settings, fonts, core)
 	settings_modal.settings_applied.connect(_on_settings_applied)
 	settings_modal.rebuild_icons_requested.connect(func():
+		icon_cache.icon_size = clampi(settings.icon_resolution, 96, 256)
 		icon_cache.clear_disk_cache()
-		_toast("Rebuilding real 3D TF2 VPK icon cache...")
+		_toast("Rebuilding real 3D TF2 VPK icon cache (%dpx)..." % icon_cache.icon_size)
 	)
 	hud_layer.add_child(settings_modal)
+
+	# Apply global TF2 theme directly onto CanvasLayer control roots (CanvasLayer breaks Window.theme inheritance!)
+	for ctrl in [top_bar, left_rail_panel, bottom_dock, selection_bar, right_drawer, split_2d_panel, welcome_panel, settings_modal]:
+		if ctrl is Control:
+			(ctrl as Control).theme = ui_theme
 
 	pie_wheel = HudWidgets.RadialPieWheel.new(fonts["heading"])
 	pie_wheel.action_chosen.connect(_on_pie_action)
@@ -713,8 +732,9 @@ func _rebuild_bottom_dock() -> void:
 			{"id": "import3d", "piece": "Model",    "lbl": "Import 3D",   "icon": "crate"},
 		]
 	elif stage == Stage.GAMEPLAY:
-		# ALL REAL 3D BAKED TF2 GAME-ASSET ICONS + DRAG-AND-DROP PAYLOADS!
+		# Select tool + ALL REAL 3D BAKED TF2 GAME-ASSET ICONS + DRAG-AND-DROP PAYLOADS!
 		slots = [
+			{"id": "select",          "piece": "Pull",     "lbl": "Select/Edit", "tool": true, "tkind": "Pull"},
 			{"id": "spawn_red",       "piece": "Spawn",    "lbl": "RED Spawn",   "team": 1, "icon": "spawn_red",       "drag": {"kind": "gameplay", "id": "spawn_red"}},
 			{"id": "spawn_blu",       "piece": "Spawn",    "lbl": "BLU Spawn",   "team": 2, "icon": "spawn_blu",       "drag": {"kind": "gameplay", "id": "spawn_blu"}},
 			{"id": "bomb_cart",       "piece": "Ramp",     "lbl": "Payload",     "icon": "bomb_cart",                  "drag": {"kind": "gameplay", "id": "bomb_cart"}},
@@ -728,8 +748,9 @@ func _rebuild_bottom_dock() -> void:
 			{"id": "fgd_all",         "piece": "Wire",     "lbl": "All 450+ Ent","tool": true, "tkind": "Wire"},
 		]
 	elif stage == Stage.STYLE:
-		# REAL 3D TF2 PROP DRAG SHELF + MATERIAL PAINTER + BIOMES + SKY!
+		# Select tool + REAL 3D TF2 PROP DRAG SHELF + MATERIAL PAINTER + BIOMES + SKY!
 		slots = [
+			{"id": "select",    "piece": "Pull",     "lbl": "Select Face","tool": true, "tkind": "Pull"},
 			{"id": "materials", "piece": "Wall",     "lbl": "Face Edit"},
 			{"id": "props",     "piece": "Box",      "lbl": "All Props",  "icon": "crate"},
 			{"id": "biomes",    "piece": "Building", "lbl": "Biomes"},
@@ -835,10 +856,14 @@ func _build_split_2d_pane() -> void:
 	hdr.add_child(xb)
 
 	bp_top = Blueprint2DScript.new(); bp_top.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	bp_top.setup(doc, fonts["mono"], 0); vb.add_child(bp_top)
+	bp_top.setup(doc, fonts["mono"], 0)
+	bp_top.solid_clicked.connect(func(sidx: int): _select_solid(sidx, -1); audio.play("click"))
+	vb.add_child(bp_top)
 
 	bp_side = Blueprint2DScript.new(); bp_side.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	bp_side.setup(doc, fonts["mono"], 1); vb.add_child(bp_side)
+	bp_side.setup(doc, fonts["mono"], 1)
+	bp_side.solid_clicked.connect(func(sidx: int): _select_solid(sidx, -1); audio.play("click"))
+	vb.add_child(bp_side)
 
 func _build_playtest_hud() -> void:
 	playtest_hud = CenterContainer.new()
@@ -1128,6 +1153,8 @@ func set_stage(new_stage: int) -> void:
 	_wall_chain_active = false
 	_drawing_box = false
 	if new_stage == Stage.PLAYTEST:
+		if stage != Stage.PLAYTEST:
+			_prev_stage = stage
 		stage = Stage.PLAYTEST
 		_enter_playtest()
 	else:
@@ -1136,7 +1163,7 @@ func set_stage(new_stage: int) -> void:
 		stage = new_stage
 		map_sync.set_vertex_mode(false)
 		if stage == Stage.BUILD: active_tool = "select"
-		elif stage == Stage.GAMEPLAY: active_tool = "spawn_red"
+		elif stage == Stage.GAMEPLAY: active_tool = "select"
 		elif stage == Stage.STYLE:
 			active_tool = "materials"
 			if not viewing_bsp: _open_materials_drawer()
@@ -1158,11 +1185,13 @@ func _select_tool(sid: String) -> void:
 	_drawing_box = false
 	map_sync.set_vertex_mode(sid == "vertex")
 	if sid == "vertex":
-		_toast("Vertex Manipulation (Shift+V): Select a brush and drag yellow corner cubes!")
+		_toast("Vertex Edit (Shift+V): Drag yellow corners (hold Shift to move UP/DOWN vertically!)")
 	elif sid == "wall":
-		_toast("Wall Chain Tool: Click Point A -> Click Point B to draw custom walls (RMB/Esc ends chain)")
+		_open_wall_box_drawer()
+		_toast("Wall Chain Tool: Click Point A -> Click corners (RMB/Esc ends chain)")
 	elif sid == "floor":
-		_toast("Drag Box Tool: Click & Drag Corner A -> B for custom size (or click once for 256×256u slab)")
+		_open_wall_box_drawer()
+		_toast("Drag Box Tool: Click & Drag footprint using active material (adjust height on right)")
 	elif sid == "building": _open_building_wizard()
 	elif sid == "terrain": _open_terrain_studio()
 	elif sid == "import3d": _open_import_model_drawer()
@@ -1176,7 +1205,9 @@ func _select_tool(sid: String) -> void:
 
 func _clear_drawer(title: String) -> void:
 	_prop_preview_mesh = null
-	split_2d_panel.visible = false
+	if split_2d_panel.visible:
+		split_2d_panel.visible = false
+		settings.show_2d_split = false
 	right_drawer_title.text = title
 	for ch in right_drawer_vbox.get_children():
 		ch.queue_free()
@@ -1203,6 +1234,10 @@ func _open_terrain_studio() -> void:
 	_clear_drawer("CLIFF & TERRAIN DISPLACEMENT STUDIO")
 	EditorDrawersScript.build_terrain_drawer(self, right_drawer_vbox)
 
+func _open_wall_box_drawer() -> void:
+	_clear_drawer("WALL CHAIN & DRAG-BOX OPTIONS")
+	EditorDrawersScript.build_wall_box_drawer(self, right_drawer_vbox)
+
 func _open_check_problems_drawer() -> void:
 	_clear_drawer("CHECK MAP FOR PROBLEMS (ALT+P)")
 	EditorDrawersScript.build_check_problems_drawer(self, right_drawer_vbox)
@@ -1210,9 +1245,10 @@ func _open_check_problems_drawer() -> void:
 func _open_visgroups_drawer() -> void:
 	_clear_drawer("VISGROUPS (LAYER VISIBILITY)")
 	var toggles := [
-		{"lbl": "Triggers & Respawn Volumes", "val": ent_vis.show_triggers, "fn": func(v: bool): ent_vis.show_triggers = v; ent_vis.sync_all()},
-		{"lbl": "3D Props (.mdl)",            "val": ent_vis.show_props,    "fn": func(v: bool): ent_vis.show_props = v; ent_vis.sync_all()},
-		{"lbl": "Point Lights",               "val": ent_vis.show_lights,   "fn": func(v: bool): ent_vis.show_lights = v; ent_vis.sync_all()},
+		{"lbl": "Triggers & Respawn Volumes", "val": ent_vis.show_triggers,      "fn": func(v: bool): ent_vis.show_triggers = v; ent_vis.sync_all()},
+		{"lbl": "3D Props (.mdl)",            "val": ent_vis.show_props,         "fn": func(v: bool): ent_vis.show_props = v; ent_vis.sync_all()},
+		{"lbl": "Point Lights",               "val": ent_vis.show_lights,        "fn": func(v: bool): ent_vis.show_lights = v; ent_vis.sync_all()},
+		{"lbl": "Logic Entity Markers",       "val": ent_vis.show_logic_markers, "fn": func(v: bool): ent_vis.show_logic_markers = v; ent_vis.sync_all()},
 		{"lbl": "3D I/O Logic Wires",         "val": ent_vis.show_logic_wires, "fn": func(v: bool): ent_vis.show_logic_wires = v; ent_vis.sync_all()},
 		{"lbl": "Playerclip / Clip Brushes",  "val": map_sync.show_clips,   "fn": func(v: bool): map_sync.show_clips = v; map_sync.sync_all()},
 		{"lbl": "Skybox Sealing Shell",       "val": map_sync.show_skybox_shell, "fn": func(v: bool): map_sync.show_skybox_shell = v; map_sync.sync_all()},
@@ -1303,7 +1339,7 @@ func _open_import_model_drawer() -> void:
 	HudWidgets.style_tf2_button(pick_b, fonts["heading"], 13, true)
 	pick_b.pressed.connect(func(): _open_file_dialog("model"))
 	right_drawer_vbox.add_child(pick_b)
-	var sample_obj := REPO_ROOT + "/godot/maps/imported_models/custom_pylon.obj"
+	var sample_obj: String = repo_root.path_join("godot/maps/imported_models/custom_pylon.obj")
 	if FileAccess.file_exists(sample_obj):
 		var sb := Button.new(); sb.text = "Quick Test: Place Sample Custom Pylon"
 		HudWidgets.style_tf2_button(sb, fonts["body"], 11)
@@ -1340,19 +1376,24 @@ func _open_compile_drawer() -> void:
 	_clear_drawer("COMPILE TO REAL TF2 (.BSP)")
 	var paths: Dictionary = compile_ctrl.detect_paths()
 	var plbl := Label.new()
-	plbl.text = "Valve Compilers: %s\nVAC-Safe Lock: -insecure +sv_lan 1 ALWAYS ON" % ("READY" if paths.get("valid", false) else "Not Found")
+	plbl.text = "Valve Compilers: %s  |  Default Preset: %s\nVAC-Safe Lock: -insecure +sv_lan 1 ALWAYS ON" % [
+		"READY" if paths.get("valid", false) else "Not Found", settings.compile_preset
+	]
 	plbl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART; plbl.add_theme_font_size_override("font_size", 11)
 	plbl.add_theme_color_override("font_color", HudWidgets.COL_GREEN)
 	right_drawer_vbox.add_child(plbl)
 
 	for spec in [
-		{"t": "Fast Compile (vbsp + vvis -fast + vrad)", "fast": true,  "vis": true,  "rad": true,  "run": false, "acc": true,  "team": 0},
-		{"t": "Full Final Compile (HDR/LDR Lighting)",   "fast": false, "vis": true,  "rad": true,  "run": false, "acc": false, "team": 0},
-		{"t": "Quick Geometry Check (vbsp only)",        "fast": true,  "vis": false, "rad": false, "run": false, "acc": false, "team": 0},
-		{"t": "Compile & Launch in Real TF2 (-insecure)","fast": true,  "vis": true,  "rad": true,  "run": true,  "acc": false, "team": 2},
+		{"id": "Fast",          "t": "Fast Compile (vbsp + vvis -fast + vrad)", "fast": true,  "vis": true,  "rad": true,  "run": false, "team": 0},
+		{"id": "Default",       "t": "Default Standard Compile (Normal VVIS)",  "fast": false, "vis": true,  "rad": true,  "run": false, "team": 0},
+		{"id": "Only Entities", "t": "Only Entities / Geometry (vbsp only)",    "fast": true,  "vis": false, "rad": false, "run": false, "team": 0},
+		{"id": "HDR Full",      "t": "HDR Full Compile (HDR + LDR Lighting)",   "fast": false, "vis": true,  "rad": true,  "run": false, "team": 0},
+		{"id": "HDR Final",     "t": "HDR Final Release Compile",               "fast": false, "vis": true,  "rad": true,  "run": false, "team": 0},
+		{"id": "Launch",        "t": "Compile & Launch in Real TF2 (-insecure)","fast": true,  "vis": true,  "rad": true,  "run": true,  "team": 2},
 	]:
 		var b := Button.new(); b.text = spec["t"]
-		HudWidgets.style_tf2_button(b, fonts["heading"], 11, bool(spec["acc"]), int(spec["team"]))
+		var is_def: bool = (str(spec["id"]) == str(settings.compile_preset))
+		HudWidgets.style_tf2_button(b, fonts["heading"], 11, is_def, int(spec["team"]))
 		var sp: Dictionary = spec
 		b.pressed.connect(func(): _run_compile(bool(sp["fast"]), bool(sp["vis"]), bool(sp["rad"]), bool(sp["run"])))
 		right_drawer_vbox.add_child(b)
@@ -1367,6 +1408,17 @@ func _open_compile_drawer() -> void:
 func _commit_solid_edit(label: String) -> void:
 	doc.record_undo(label); map_sync.sync_all(); _refresh_selection_bar(); _refresh_2d_views(); audio.play("place")
 
+func _untie_selected_entity() -> void:
+	if selected_entity < 0:
+		return
+	var ids: PackedInt32Array = doc.untie_brush_entity(selected_entity)
+	if not ids.is_empty():
+		doc.record_undo("Move to World")
+		map_sync.sync_all(); ent_vis.sync_all()
+		_select_solid(ids[0], -1)
+		audio.play("place")
+		_toast("Moved brush entity back to World Solid #%d (Ctrl+Shift+W)!" % ids[0])
+
 func _push_selected_top(delta_m: float) -> void:
 	if selected_solid >= 0 and doc.push_pull_normal(selected_solid, Vector3(0, 1, 0), delta_m):
 		_commit_solid_edit("Push/Pull Top")
@@ -1378,16 +1430,18 @@ func _do_hollow_selected() -> void:
 	var ids: PackedInt32Array = doc.make_hollow(selected_solid, -0.5)
 	if not ids.is_empty():
 		doc.record_undo("Make Hollow"); _clear_selection(); map_sync.sync_all(); audio.play("carve")
-		_toast("Hollowed solid into %d sealed walls (-16u thick)!" % ids.size())
+		_toast("Hollowed solid into %d walls (-16u outward shell)!" % ids.size())
 
 func _do_quickhide_selected() -> void:
 	if selected_solid >= 0:
 		doc.set_solid_hidden(selected_solid, true)
+		doc.record_undo("QuickHide Solid")
 		_clear_selection(); map_sync.sync_all()
-		_toast("QuickHid solid (press U to Unhide All)")
+		_toast("QuickHid solid (press U to Unhide All or Ctrl+Z)")
 
 func _do_unhide_all() -> void:
 	var n: int = doc.unhide_all()
+	if n > 0: doc.record_undo("Unhide All")
 	map_sync.sync_all(); ent_vis.sync_all()
 	_toast("Restored %d hidden object(s)!" % n)
 
@@ -1471,6 +1525,9 @@ func _load_official_bsp(map_name: String) -> void:
 	viewing_bsp = true; current_bsp_name = map_name
 	active_sky = str(res.get("skyname", "sky_badlands_01"))
 	we.environment.sky = assets.get_sky(active_sky)
+	if bool(res.get("has_sun", false)):
+		sun.rotation_degrees = Vector3(float(res.get("sun_pitch", -45.0)), float(res.get("sun_yaw", 45.0)) - 90.0, 0.0)
+		sun.light_color = res.get("sun_color", Color(1.0, 0.96, 0.90))
 	current_bsp_spawn = res.get("spawn_pos", Vector3(0, 2, 0))
 	current_bsp_yaw = float(res.get("spawn_yaw", 0.0))
 	map_title_lbl.text = "| [OFFICIAL] " + map_name
@@ -1500,12 +1557,15 @@ func _apply_environment_from_biome(bkey: String) -> void:
 	we.environment.sky = assets.get_sky(b["sky"]); sun.light_color = b["sun_color"]; sun.rotation_degrees = b["sun_angles"]
 
 func _save_current_vmf() -> String:
-	DirAccess.make_dir_recursive_absolute(REPO_ROOT + "/godot/maps")
+	DirAccess.make_dir_recursive_absolute(repo_root.path_join("godot/maps"))
 	var mname: String = doc.get_map_name()
 	if mname.is_empty(): mname = "pb_untitled"
-	var path := REPO_ROOT + "/godot/maps/" + mname + ".vmf"
+	var path := repo_root.path_join("godot/maps/" + mname + ".vmf")
 	var r: Dictionary = doc.save_vmf(path)
-	if r.get("ok", false): _toast("Saved " + path.get_file()); return path
+	if r.get("ok", false):
+		doc.clear_dirty()
+		_toast("Saved " + path.get_file())
+		return path
 	_toast("Save failed: " + str(r.get("error", ""))); return ""
 
 func _do_undo() -> void:
@@ -1546,15 +1606,18 @@ func _open_file_dialog(kind: String) -> void:
 
 func _on_file_selected(path: String) -> void:
 	if str(file_dialog.get_meta("kind", "model")) == "vmf":
-		_clear_official_bsp(); _clear_selection()
 		var r: Dictionary = doc.load_vmf(path)
-		if r.get("ok", false):
-			active_sky = doc.get_skyname(); we.environment.sky = assets.get_sky(active_sky)
-			grid_floor.visible = settings.show_grid_floor
-			map_sync.clear_all(); map_sync.sync_all(); ent_vis.sync_all()
-			map_title_lbl.text = "| " + doc.get_map_name()
-			_sync_mode_visibility(); _rebuild_bottom_dock(); _show_welcome_hub(false)
-			_toast("Opened " + path.get_file())
+		if not r.get("ok", false):
+			_toast("Failed to open %s: %s" % [path.get_file(), str(r.get("error", "invalid VMF"))])
+			return
+		_clear_official_bsp(); _clear_selection()
+		doc.clear_dirty()
+		active_sky = doc.get_skyname(); we.environment.sky = assets.get_sky(active_sky)
+		grid_floor.visible = settings.show_grid_floor
+		map_sync.clear_all(); map_sync.sync_all(); ent_vis.sync_all()
+		map_title_lbl.text = "| " + doc.get_map_name()
+		_sync_mode_visibility(); _rebuild_bottom_dock(); _show_welcome_hub(false)
+		_toast("Opened " + path.get_file())
 	else:
 		_import_3d_model_file(path)
 
@@ -1563,7 +1626,7 @@ func _import_3d_model_file(path: String) -> void:
 	if not imp.get("ok", false): _toast("Import error: " + str(imp.get("error", ""))); return
 	var node: Node3D = imp["node"]; node.position = hover_pos if hover_valid else Vector3.ZERO
 	imported_props_root.add_child(node)
-	ModelImporterScript.export_tf2_qc_smd(REPO_ROOT + "/godot/maps/exported_qc", imp["name"], imp["mesh"], float(imp["scale"]))
+	ModelImporterScript.export_tf2_qc_smd(repo_root.path_join("godot/maps/exported_qc"), imp["name"], imp["mesh"], float(imp["scale"]))
 	audio.play("success", -10.0)
 	_toast("Imported %s (%.0fu tall) + exported Valve .QC/.SMD!" % [imp["name"], (imp["size_u"] as Vector3).y])
 
@@ -1618,10 +1681,37 @@ func _is_typing_in_ui() -> bool:
 	var f := get_viewport().gui_get_focus_owner()
 	return f is LineEdit or f is TextEdit
 
+func _input(event: InputEvent) -> void:
+	# Always catch mouse button RELEASES & ESC focus release even over HUD panels so drags/mouselook NEVER get stuck!
+	if event is InputEventMouseButton:
+		var mb := event as InputEventMouseButton
+		if not mb.pressed:
+			if mb.button_index == MOUSE_BUTTON_RIGHT:
+				_rmb_looking = false
+			elif mb.button_index == MOUSE_BUTTON_MIDDLE:
+				_mmb_panning = false
+			elif mb.button_index == MOUSE_BUTTON_LEFT:
+				if _dragging_vertex:
+					_dragging_vertex = false; doc.record_undo("Move Vertex"); _refresh_selection_bar()
+				if _dragging_face:
+					_dragging_face = false; doc.record_undo("Push/Pull Face"); _refresh_selection_bar()
+				if _dragging_move:
+					_dragging_move = false; doc.record_undo("Move Selection"); _refresh_selection_bar()
+				if _drawing_box:
+					_finish_drag_box()
+				if _terrain_sculpting:
+					_terrain_sculpting = false
+					if _terrain_changed:
+						map_sync.sync_all(); doc.record_undo("Sculpt Terrain"); _terrain_changed = false
+	elif event is InputEventKey and event.pressed and event.keycode == KEY_ESCAPE:
+		if _is_typing_in_ui():
+			get_viewport().gui_release_focus()
+			get_viewport().set_input_as_handled()
+
 func _unhandled_input(event: InputEvent) -> void:
 	if settings_modal.visible:
 		if event is InputEventKey and event.pressed and event.keycode == KEY_ESCAPE:
-			settings_modal.visible = false
+			settings_modal.cancel_modal()
 		return
 	if welcome_panel.visible:
 		if event is InputEventKey and event.pressed and event.keycode == KEY_ESCAPE:
@@ -1635,11 +1725,11 @@ func _unhandled_input(event: InputEvent) -> void:
 			if event.keycode == KEY_COMMA and event.ctrl_pressed:
 				settings_modal.open_modal(); return
 			if event.keycode == KEY_F5:
-				set_stage(Stage.BUILD if stage == Stage.PLAYTEST else Stage.PLAYTEST); return
+				set_stage(_prev_stage if stage == Stage.PLAYTEST else Stage.PLAYTEST); return
 			if event.keycode == KEY_F9 and not viewing_bsp and stage != Stage.PLAYTEST:
 				_open_compile_drawer(); return
 			if event.keycode == KEY_ESCAPE:
-				if stage == Stage.PLAYTEST: set_stage(Stage.BUILD)
+				if stage == Stage.PLAYTEST: set_stage(_prev_stage)
 				elif _wall_chain_active: _wall_chain_active = false; ghost_mesh.visible = false; _toast("Finished wall chain")
 				elif _drawing_box: _drawing_box = false; ghost_mesh.visible = false
 				elif selected_solid >= 0 or selected_entity >= 0: _clear_selection()
@@ -1651,10 +1741,12 @@ func _unhandled_input(event: InputEvent) -> void:
 				pie_wheel.open_at(get_viewport().get_mouse_position()); return
 			elif event.keycode == KEY_L:
 				ent_vis.show_logic_wires = not ent_vis.show_logic_wires; ent_vis.sync_all()
+			elif event.keycode == KEY_Z and event.ctrl_pressed and event.shift_pressed: _do_redo()
 			elif event.keycode == KEY_Z and event.ctrl_pressed: _do_undo()
 			elif event.keycode == KEY_Y and event.ctrl_pressed: _do_redo()
 			elif event.keycode == KEY_S and event.ctrl_pressed: _save_current_vmf()
 			elif event.keycode == KEY_D and event.ctrl_pressed: _duplicate_selection()
+			elif event.keycode == KEY_W and event.ctrl_pressed and event.shift_pressed: _untie_selected_entity()
 			elif event.keycode == KEY_T and event.ctrl_pressed: _open_tie_entity_drawer()
 			elif event.keycode == KEY_X and event.shift_pressed: _open_clip_drawer()
 			elif event.keycode == KEY_V and event.shift_pressed: _select_tool("vertex")
@@ -1662,12 +1754,12 @@ func _unhandled_input(event: InputEvent) -> void:
 			elif event.keycode == KEY_A and event.shift_pressed: set_stage(Stage.STYLE); _open_materials_drawer()
 			elif event.keycode == KEY_P and event.alt_pressed: _open_check_problems_drawer()
 			elif (event.keycode == KEY_ENTER or event.keycode == KEY_KP_ENTER) and event.alt_pressed: _open_inspector_drawer()
-			elif event.keycode == KEY_DELETE or event.keycode == KEY_BACKSPACE: _delete_selection()
+			elif event.keycode == KEY_DELETE: _delete_selection()
 			elif event.keycode == KEY_BRACKETLEFT: _step_grid(-1)
 			elif event.keycode == KEY_BRACKETRIGHT: _step_grid(1)
-			elif event.keycode == KEY_R: _rotate_selection()
-			elif event.keycode == KEY_H: _do_quickhide_selected()
-			elif event.keycode == KEY_U: _do_unhide_all()
+			elif event.keycode == KEY_R and not event.ctrl_pressed: _rotate_selection()
+			elif event.keycode == KEY_H and not event.ctrl_pressed: _do_quickhide_selected()
+			elif event.keycode == KEY_U and not event.ctrl_pressed: _do_unhide_all()
 			elif event.keycode == KEY_SPACE: _toggle_2d_view()
 			elif selected_solid >= 0 or selected_entity >= 0:
 				var fwd_h := Vector3(-editor_cam.global_transform.basis.z.x, 0.0, -editor_cam.global_transform.basis.z.z).normalized()
@@ -1699,7 +1791,7 @@ func _unhandled_input(event: InputEvent) -> void:
 
 	if event is InputEventMouseMotion:
 		if pie_wheel.visible: pie_wheel.update_pointer(event.position); return
-		if _dragging_vertex: _update_vertex_drag(event.position); return
+		if _dragging_vertex: _update_vertex_drag(event.position, event.shift_pressed); return
 		if _dragging_face: _update_face_drag(event.position); return
 		if _dragging_move: _update_move_drag(event.position); return
 		if _rmb_looking and not top_down_2d:
@@ -1717,6 +1809,8 @@ func _unhandled_input(event: InputEvent) -> void:
 				_do_terrain_sculpt_stroke()
 
 	elif event is InputEventMouseButton:
+		if event.pressed:
+			get_viewport().gui_release_focus()
 		if event.button_index == MOUSE_BUTTON_RIGHT:
 			if event.pressed and _wall_chain_active:
 				_wall_chain_active = false; ghost_mesh.visible = false; _toast("Ended wall chain")
@@ -1729,43 +1823,33 @@ func _unhandled_input(event: InputEvent) -> void:
 		elif event.button_index == MOUSE_BUTTON_WHEEL_DOWN and event.pressed:
 			if top_down_2d: editor_cam.size = min(180.0, editor_cam.size * 1.12)
 			else: cam_pos -= (-editor_cam.global_transform.basis.z) * 2.2; _apply_editor_cam()
-		elif event.button_index == MOUSE_BUTTON_LEFT:
-			if not event.pressed:
-				if _dragging_vertex:
-					_dragging_vertex = false; doc.record_undo("Move Vertex"); _refresh_selection_bar(); return
-				if _dragging_face:
-					_dragging_face = false; doc.record_undo("Push/Pull Face"); _refresh_selection_bar(); return
-				if _dragging_move:
-					_dragging_move = false; doc.record_undo("Move Selection"); _refresh_selection_bar(); return
-				if _drawing_box:
-					_finish_drag_box(); return
+		elif event.button_index == MOUSE_BUTTON_LEFT and event.pressed:
 			if active_tool == "terrain":
-				_terrain_sculpting = event.pressed
-				if event.pressed and hover_valid: _do_terrain_sculpt_stroke()
-				elif not event.pressed: doc.record_undo("Sculpt Terrain")
-			elif event.pressed:
+				_terrain_sculpting = true; _terrain_changed = false
+				if hover_valid: _do_terrain_sculpt_stroke()
+			else:
 				_handle_left_click(event.position, event.shift_pressed, event.alt_pressed)
 
 func _finish_drag_box() -> void:
 	_drawing_box = false
-	var b: Dictionary = Tf2GamemodesScript.get_biome(active_biome)
 	var a := _box_start
 	var c := hover_pos
 	var dx := absf(c.x - a.x); var dz := absf(c.z - a.z)
+	var mat: String = active_material if not active_material.is_empty() else str(Tf2GamemodesScript.get_biome(active_biome)["floor"])
+	var h := maxf(0.25, box_height_m)
 	var sid: int = -1
 	if dx < grid_m * 0.6 and dz < grid_m * 0.6:
-		# Quick single click = instant 256×256×16u floor slab
-		sid = doc.add_box(a + Vector3(-4, -0.5, -4), a + Vector3(4, 0, 4), b["floor"])
+		sid = doc.add_box(a + Vector3(-4, 0, -4), a + Vector3(4, h, 4), mat)
 	else:
-		var mn := Vector3(minf(a.x, c.x), a.y - 0.5, minf(a.z, c.z))
-		var mx := Vector3(maxf(a.x, c.x), a.y, maxf(a.z, c.z))
+		var mn := Vector3(minf(a.x, c.x), a.y, minf(a.z, c.z))
+		var mx := Vector3(maxf(a.x, c.x), a.y + h, maxf(a.z, c.z))
 		if mx.x - mn.x < grid_m: mx.x = mn.x + grid_m
 		if mx.z - mn.z < grid_m: mx.z = mn.z + grid_m
-		sid = doc.add_box(mn, mx, b["floor"])
+		sid = doc.add_box(mn, mx, mat)
 	if sid >= 0:
 		if symmetry != SymmetryMode.OFF:
 			doc.mirror_solid_x(sid, symmetry == SymmetryMode.ROT_180)
-		doc.record_undo("Draw Floor/Box"); map_sync.sync_all(); _select_solid(sid, -1); audio.play("place")
+		doc.record_undo("Draw Box"); map_sync.sync_all(); _select_solid(sid, -1); audio.play("place")
 
 func _ray_plane_point(screen_pos: Vector2, plane_y: float) -> Vector3:
 	var ro := editor_cam.project_ray_origin(screen_pos)
@@ -1790,12 +1874,21 @@ func _update_face_drag(screen_pos: Vector2) -> void:
 	if absf(step) >= grid_m * 0.5 and doc.push_pull_normal(_drag_solid, _drag_normal, step):
 		_drag_accum = snapped_t; map_sync.sync_solid(_drag_solid); map_sync.set_selection(_drag_solid, -1); _refresh_selection_bar(); audio.play("click", -14.0)
 
-func _update_vertex_drag(screen_pos: Vector2) -> void:
-	var p := _ray_plane_point(screen_pos, _drag_vert_last.y)
-	var delta := p - _drag_vert_last
+func _update_vertex_drag(screen_pos: Vector2, vertical_mode: bool = false) -> void:
+	var p: Vector3
+	if vertical_mode:
+		# Hold Shift during Shift+V vertex drag to move the corner UP/DOWN vertically for sloped roofs & ramps!
+		var ro := editor_cam.project_ray_origin(screen_pos); var rd := editor_cam.project_ray_normal(screen_pos)
+		var ty := snappedf(_project_ray_onto_axis(ro, rd, _drag_vert_pos, Vector3.UP), grid_m)
+		p = Vector3(_drag_vert_pos.x, _drag_vert_pos.y + ty, _drag_vert_pos.z)
+	else:
+		p = _ray_plane_point(screen_pos, _drag_vert_pos.y)
+	var delta := p - _drag_vert_pos
 	if delta.length_squared() >= grid_m * grid_m * 0.25:
-		if doc.move_solid_vertex(selected_solid, _drag_vert_idx, delta):
-			_drag_vert_last = p; map_sync.sync_solid(selected_solid); map_sync.set_selection(selected_solid, -1); _refresh_selection_bar(); audio.play("click", -14.0)
+		if doc.move_solid_vertex_at(selected_solid, _drag_vert_pos, delta):
+			_drag_vert_pos = p
+			_drag_vert_last = p
+			map_sync.sync_solid(selected_solid); map_sync.set_selection(selected_solid, -1); _refresh_selection_bar(); audio.play("click", -14.0)
 
 func _update_move_drag(screen_pos: Vector2) -> void:
 	var p := _ray_plane_point(screen_pos, _move_last_pos.y)
@@ -1832,7 +1925,7 @@ func _handle_left_click(screen_pos: Vector2, shift_held: bool = false, alt_held:
 		if selected_solid >= 0:
 			var vh: Dictionary = map_sync.hit_test_vertex_handle(ro, rd)
 			if not vh.is_empty():
-				_dragging_vertex = true; _drag_vert_idx = int(vh["vert_idx"]); _drag_vert_last = vh["pos"]
+				_dragging_vertex = true; _drag_vert_idx = int(vh["vert_idx"]); _drag_vert_last = vh["pos"]; _drag_vert_pos = vh["pos"]
 				audio.play("click"); return
 		var pick := _pick_scene_object(ro, rd)
 		if pick["kind"] == "solid": _select_solid(pick["idx"], pick["face"]); audio.play("click")
@@ -1852,6 +1945,7 @@ func _handle_left_click(screen_pos: Vector2, shift_held: bool = false, alt_held:
 				var nid: int = doc.duplicate_entity(eidx, Vector3.ZERO)
 				if nid >= 0: ent_vis.sync_all(); eidx = nid; _toast("Shift+Drag Cloned Entity #%d!" % nid)
 			_select_entity(eidx); _dragging_move = true; _move_last_pos = _ray_plane_point(screen_pos, (pick["hit_pos"] as Vector3).y); audio.play("click")
+			if stage == Stage.GAMEPLAY: _open_inspector_drawer()
 		elif pick["kind"] == "solid":
 			var sidx: int = pick["idx"]; var fidx: int = pick["face"]
 			if shift_held:
@@ -1861,20 +1955,25 @@ func _handle_left_click(screen_pos: Vector2, shift_held: bool = false, alt_held:
 					_move_last_pos = _ray_plane_point(screen_pos, (pick["hit_pos"] as Vector3).y); audio.play("place")
 					_toast("Shift+Drag Cloned Solid #%d!" % nid); return
 			_select_solid(sidx, fidx); audio.play("click")
+			if stage == Stage.STYLE and right_drawer.visible: _open_materials_drawer()
 		else: _clear_selection()
 		return
 
-	if active_tool == "paint":
+	if active_tool == "paint" or active_tool == "materials":
 		var rc: Dictionary = doc.raycast_face(ro, rd)
 		if rc.get("hit", false):
+			var sidx := int(rc["solid_idx"]); var fidx := int(rc["face_idx"])
+			_select_solid(sidx, fidx)
 			if alt_held:
 				var pm: String = str(rc.get("material", active_material))
 				if not pm.is_empty():
 					active_material = pm; audio.play("click"); _toast("Eyedropper picked: " + active_material)
-					if right_drawer.visible: _open_materials_drawer()
-				return
-			doc.set_face_material(int(rc["solid_idx"]), int(rc["face_idx"]), active_material)
-			doc.record_undo("Paint Face"); map_sync.sync_solid(int(rc["solid_idx"])); audio.play("place")
+			elif active_tool == "paint":
+				doc.set_face_material(sidx, fidx, active_material)
+				doc.record_undo("Paint Face"); map_sync.sync_solid(sidx); audio.play("place")
+			else:
+				audio.play("click")
+			if right_drawer.visible: _open_materials_drawer()
 		return
 
 	if active_tool == "floor" and hover_valid:
@@ -1886,7 +1985,8 @@ func _handle_left_click(screen_pos: Vector2, shift_held: bool = false, alt_held:
 			_toast("Wall Chain started — click next corner (RMB or Esc to finish)")
 		else:
 			var b: Dictionary = Tf2GamemodesScript.get_biome(active_biome)
-			var wid: int = doc.add_wall_segment(_wall_chain_start, hover_pos, wall_height_m, wall_thick_m, b["wall"])
+			var wmat: String = active_material if not active_material.is_empty() else str(b["wall"])
+			var wid: int = doc.add_wall_segment(_wall_chain_start, hover_pos, wall_height_m, wall_thick_m, wmat)
 			if wid >= 0:
 				if symmetry != SymmetryMode.OFF: doc.mirror_solid_x(wid, symmetry == SymmetryMode.ROT_180)
 				doc.record_undo("Draw Wall"); map_sync.sync_all(); _select_solid(wid, -1); audio.play("place")
@@ -1936,7 +2036,8 @@ func _place_tool_at(pos: Vector3) -> void:
 		Tf2GamemodesScript.stamp_preset(doc, preset, pos, team)
 		if symmetry != SymmetryMode.OFF:
 			var mpos := Vector3(-pos.x, pos.y, -pos.z if symmetry == SymmetryMode.ROT_180 else pos.z)
-			Tf2GamemodesScript.stamp_preset(doc, preset, mpos, 3 if team == 2 else 2)
+			var mteam := (3 if team == 2 else 2) if preset in ["spawn", "intel", "resupply"] else team
+			Tf2GamemodesScript.stamp_preset(doc, preset, mpos, mteam)
 		doc.record_undo("Place " + active_tool); ent_vis.sync_all(); audio.play("place")
 	elif stage == Stage.STYLE and active_tool == "light":
 		Tf2GamemodesScript.stamp_preset(doc, "light", pos, 2)
@@ -1944,7 +2045,11 @@ func _place_tool_at(pos: Vector3) -> void:
 
 func _do_terrain_sculpt_stroke() -> void:
 	var n: int = doc.sculpt_terrain_ex(hover_pos, terrain_radius_m, terrain_strength_m * 0.18, terrain_mode, terrain_axis_mode)
-	if n > 0: map_sync.sync_all()
+	if n > 0:
+		_terrain_changed = true
+		if _terrain_sync_accum >= 0.045:
+			_terrain_sync_accum = 0.0
+			map_sync.sync_all()
 
 func _update_hover(screen_pos: Vector2) -> void:
 	if viewing_bsp:
@@ -1952,7 +2057,24 @@ func _update_hover(screen_pos: Vector2) -> void:
 		map_sync.set_hover(-1); ent_vis.set_hover(-1); overlay_2d.queue_redraw(); return
 
 	var ro := editor_cam.project_ray_origin(screen_pos); var rd := editor_cam.project_ray_normal(screen_pos)
-	if active_tool == "select" or active_tool == "paint" or active_tool == "vertex":
+
+	# Always compute live 3D cursor XYZ coordinate (fixes frozen XYZ: 0u, 0u, 0u in Select/Paint/Vertex!)
+	if active_tool == "terrain":
+		# Smooth UNSNAPPED direct raycast onto displaced cliffs & terrain surfaces!
+		var rc_t: Dictionary = doc.raycast_face(ro, rd)
+		if rc_t.get("hit", false):
+			hover_valid = true; hover_pos = rc_t["hit_pos"]
+		else:
+			var pt := _project_screen_to_surface(screen_pos)
+			hover_valid = pt["valid"]; hover_pos = pt["pos"]
+	elif _drawing_box:
+		# Lock drag-box cursor strictly to the starting horizontal Y plane (no jumpy wall/roof spikes!)
+		hover_valid = true; hover_pos = _ray_plane_point(screen_pos, _box_start.y)
+	else:
+		var proj := _project_screen_to_surface(screen_pos)
+		hover_valid = proj["valid"]; hover_pos = proj["pos"]
+
+	if active_tool == "select" or active_tool == "paint" or active_tool == "materials" or active_tool == "vertex":
 		var pick := _pick_scene_object(ro, rd)
 		if pick["kind"] == "entity" and active_tool == "select":
 			ent_vis.set_hover(pick["idx"]); map_sync.set_hover(-1)
@@ -1964,17 +2086,16 @@ func _update_hover(screen_pos: Vector2) -> void:
 	else:
 		map_sync.set_hover(-1); ent_vis.set_hover(-1)
 
-	var proj := _project_screen_to_surface(screen_pos)
-	hover_valid = proj["valid"]; hover_pos = proj["pos"]
 	if hover_valid:
 		if active_tool == "terrain":
 			ghost_mesh.visible = false; brush_ring.visible = true
 			brush_ring.position = hover_pos + Vector3(0, 0.15, 0); brush_ring.scale = Vector3(terrain_radius_m, 1.0, terrain_radius_m)
 		elif _drawing_box:
 			brush_ring.visible = false; ghost_mesh.visible = true; ghost_mesh.rotation = Vector3.ZERO
-			var sz := Vector3(maxf(grid_m, absf(hover_pos.x - _box_start.x)), 0.5, maxf(grid_m, absf(hover_pos.z - _box_start.z)))
+			var h := maxf(0.25, box_height_m)
+			var sz := Vector3(maxf(grid_m, absf(hover_pos.x - _box_start.x)), h, maxf(grid_m, absf(hover_pos.z - _box_start.z)))
 			(ghost_mesh.mesh as BoxMesh).size = sz
-			ghost_mesh.position = Vector3((_box_start.x + hover_pos.x) * 0.5, _box_start.y - 0.25, (_box_start.z + hover_pos.z) * 0.5)
+			ghost_mesh.position = Vector3((_box_start.x + hover_pos.x) * 0.5, _box_start.y + h * 0.5, (_box_start.z + hover_pos.z) * 0.5)
 		elif _wall_chain_active and active_tool == "wall":
 			brush_ring.visible = false; ghost_mesh.visible = true
 			var d := hover_pos - _wall_chain_start
@@ -1984,8 +2105,8 @@ func _update_hover(screen_pos: Vector2) -> void:
 			ghost_mesh.rotation = Vector3(0, -atan2(d.z, d.x), 0)
 		elif stage == Stage.BUILD and active_tool in ["floor", "wall", "building", "ramp", "stairs", "arch", "carve"]:
 			brush_ring.visible = false; ghost_mesh.visible = true; ghost_mesh.rotation = Vector3.ZERO
-			var sz := Vector3(8, 0.5, 8)
-			if active_tool == "wall": sz = Vector3(0.75, wall_height_m, 0.75)
+			var sz := Vector3(8, maxf(0.25, box_height_m), 8)
+			if active_tool == "wall": sz = Vector3(wall_thick_m, wall_height_m, wall_thick_m)
 			elif active_tool == "building": sz = Vector3(8, bld_floors * 4.5, 8)
 			elif active_tool == "ramp" or active_tool == "stairs": sz = Vector3(4, 2.5, 4)
 			elif active_tool == "arch": sz = Vector3(6, 5.0, 1.5)
@@ -2011,21 +2132,27 @@ func _on_pie_action(aid: String) -> void:
 		"playtest": set_stage(Stage.PLAYTEST)
 
 func _process(delta: float) -> void:
+	_terrain_sync_accum += delta
 	if _toast_ttl > 0.0:
 		_toast_ttl -= delta
 		if _toast_ttl <= 0.0: toast_panel.visible = false
 	if _prop_preview_mesh != null and is_instance_valid(_prop_preview_mesh):
 		_prop_preview_mesh.rotate_y(delta * 0.85)
 
-	# Periodic Auto-Save when enabled
+	# Rolling Auto-Save honoring settings.backup_count (1..N rotating slots!)
 	if settings.autosave_enabled and not viewing_bsp and stage != Stage.PLAYTEST:
 		_autosave_accum += delta
 		if _autosave_accum >= float(settings.autosave_minutes) * 60.0:
 			_autosave_accum = 0.0
-			DirAccess.make_dir_recursive_absolute(REPO_ROOT + "/godot/maps/autosave")
-			doc.save_vmf(REPO_ROOT + "/godot/maps/autosave/%s_autosave.vmf" % doc.get_map_name())
+			var as_dir := repo_root.path_join("godot/maps/autosave")
+			DirAccess.make_dir_recursive_absolute(as_dir)
+			var max_b: int = maxi(1, int(settings.backup_count))
+			_autosave_slot = (_autosave_slot % max_b) + 1
+			doc.save_vmf(as_dir.path_join("%s_autosave_%02d.vmf" % [doc.get_map_name(), _autosave_slot]))
 
-	if stage != Stage.PLAYTEST and not welcome_panel.visible and not settings_modal.visible and not _is_typing_in_ui():
+	# Gate 3D WASD/E/C fly on RMB-held (and zero Ctrl/Alt modifiers) so Ctrl+S/Ctrl+D/Shift+A/Shift+E NEVER move the camera!
+	var no_mod := not Input.is_key_pressed(KEY_CTRL) and not Input.is_key_pressed(KEY_ALT)
+	if _rmb_looking and no_mod and stage != Stage.PLAYTEST and not welcome_panel.visible and not settings_modal.visible and not _is_typing_in_ui():
 		var spd: float = float(settings.fly_speed) * (2.2 if Input.is_key_pressed(KEY_SHIFT) else 1.0)
 		var mv := Vector3.ZERO
 		var fwd := -editor_cam.global_transform.basis.z; var right := editor_cam.global_transform.basis.x
@@ -2040,7 +2167,12 @@ func _process(delta: float) -> void:
 			_apply_editor_cam()
 			_refresh_2d_views()
 
-	# Update bottom-left compact telemetry pill
+	# Update top-left dirty indicator + bottom-left compact telemetry pill
+	if not viewing_bsp and map_title_lbl != null:
+		var dirty_s := "*" if doc.is_dirty() else ""
+		var want_t := "| %s%s" % [doc.get_map_name(), dirty_s]
+		if map_title_lbl.text != want_t:
+			map_title_lbl.text = want_t
 	if status_pill.visible:
 		status_lbl_top.text = "XYZ: %du, %du, %du" % [int(hover_pos.x * UPM), int(-hover_pos.z * UPM), int(hover_pos.y * UPM)]
 		var sealed_s := "SEALED" if doc.is_map_sealed() else "UNSEALED"
@@ -2140,7 +2272,7 @@ func _setup_auto_shot(idx: int) -> void:
 		"v2_cliff":
 			_show_welcome_hub(false); _load_gamemode("koth", "badlands", false); set_stage(Stage.BUILD)
 			doc.make_cliff_wall(Vector3(-12, 0, -14), Vector3(12, 0, -14), 10.0, 3.0, 3, "NATURE/BLENDROCKWALLDIRT001", 1.3)
-			map_sync.sync_all(); _open_terrain_studio()
+			map_sync.sync_all(); _select_tool("terrain")
 			cam_pos = Vector3(13.5, 7.5, 3.0); editor_cam.look_at_from_position(cam_pos, Vector3(-1.5, 3.8, -13.0), Vector3.UP)
 			cam_yaw = editor_cam.rotation.y; cam_pitch = editor_cam.rotation.x
 		"v2_upward":
@@ -2164,14 +2296,15 @@ func _setup_auto_shot(idx: int) -> void:
 			cam_pos = cap_pos + Vector3(9.0, 6.0, 9.0)
 			editor_cam.look_at_from_position(cam_pos, cap_pos, Vector3.UP)
 			cam_yaw = editor_cam.rotation.y; cam_pitch = editor_cam.rotation.x
+	if not viewing_bsp and not settings_modal.visible:
+		_update_hover(get_viewport().get_visible_rect().size * Vector2(0.42, 0.52))
 
 func _step_cli_shots() -> void:
 	if _auto_shots.is_empty(): return
-	_auto_shot_frames += 1
-	# Wait until all real 3D TF2 icons have finished baking so every slot shows its live 3D game asset!
-	if icon_cache != null and icon_cache.is_busy() and _auto_shot_frames < 240:
+	if icon_cache != null and icon_cache.is_busy():
 		return
-	var target_frame := 18
+	_auto_shot_frames += 1
+	var target_frame := 28
 	if _auto_shot_frames >= target_frame:
 		var sh: Dictionary = _auto_shots[_auto_shot_idx]
 		get_viewport().get_texture().get_image().save_png(sh["out"])

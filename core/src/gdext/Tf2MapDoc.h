@@ -36,6 +36,8 @@ public:
     String get_map_name() const;
     String get_skyname() const;
     void set_skyname(const String& sky);
+    bool is_dirty() const;
+    void clear_dirty();
     void set_grid_units(int units);
     int get_grid_units() const;
 
@@ -65,6 +67,7 @@ public:
     PackedInt32Array make_hollow(int solid_idx, float wall_thick_m);
     PackedVector3Array get_solid_vertices(int solid_idx) const;
     bool move_solid_vertex(int solid_idx, int vert_idx, const Vector3& delta_g);
+    bool move_solid_vertex_at(int solid_idx, const Vector3& old_pos_g, const Vector3& delta_g);
 
     // Hammer Face Edit UV & Material Tools (Shift+A)
     Dictionary get_face_uv(int solid_idx, int face_idx) const;
@@ -97,6 +100,8 @@ public:
     bool rotate_solid_y(int solid_idx, float deg);
     int clip_solid(int solid_idx, const Vector3& plane_pt_g, const Vector3& plane_normal_g, int keep_mode = 0);
     int tie_solid_to_entity(int solid_idx, const String& classname, const Dictionary& kv);
+    PackedInt32Array untie_brush_entity(int ent_idx);
+    Dictionary get_entity_mesh_data(int ent_idx) const;
     int duplicate_entity(int ent_idx, const Vector3& offset_g);
     Dictionary raycast_entity(const Vector3& ray_origin_g, const Vector3& ray_dir_g) const;
 
@@ -122,7 +127,9 @@ public:
     bool set_entity_kv(int ent_idx, const String& key, const String& val);
     bool set_entity_pos(int ent_idx, const Vector3& pos_g);
     bool add_connection(int src_ent_idx, const String& output_name, const String& target_name,
-                        const String& input_name, const String& param = String(), float delay = 0.0f);
+                        const String& input_name, const String& param = String(), float delay = 0.0f,
+                        bool once_only = false);
+    bool remove_connection(int src_ent_idx, int conn_idx);
     bool delete_entity(int ent_idx);
     int get_entity_count() const;
     Array get_entities() const;

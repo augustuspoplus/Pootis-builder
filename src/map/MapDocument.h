@@ -54,6 +54,7 @@ public:
     const std::string& name() const { return name_; }
     bool dirty() const { return dirty_; }
     void markDirty() { dirty_ = true; }
+    void clearDirty() { dirty_ = false; }
 
     Solid* resolve(const SolidRef& r);
     const Solid* resolve(const SolidRef& r) const;

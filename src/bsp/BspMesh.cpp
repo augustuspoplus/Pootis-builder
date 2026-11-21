@@ -264,6 +264,10 @@ WorldMesh buildWorldMesh(const BspFile& bsp, const MeshBuildOptions& opts) {
             float lip = 8.0f;
             if (auto li = ent.find("lip"); li != ent.end())
                 lip = static_cast<float>(std::atof(li->second.c_str()));
+            if (auto sf = ent.find("spawnflags"); sf != ent.end()) {
+                const int fl = std::atoi(sf->second.c_str());
+                door.startLocked = (fl & 2048) != 0;
+            }
             const glm::vec3 dmin = toVec(models[idx].mins) + origin;
             const glm::vec3 dmax = toVec(models[idx].maxs) + origin;
             door.boundsMin = dmin;
@@ -373,7 +377,8 @@ WorldMesh buildWorldMesh(const BspFile& bsp, const MeshBuildOptions& opts) {
 
     auto addPolyVertexTo = [&](std::vector<WorldVertex>& dstVerts, const Face_t& face,
                                const TexInfo_t& ti, const glm::vec3& p, const glm::vec3& n,
-                               const EmitFace& ef, float texW, float texH) {
+                               const EmitFace& ef, float texW, float texH,
+                               const glm::vec3* lmPosOverride = nullptr) {
         WorldVertex v;
         v.pos = p;
         v.normal = n;
@@ -384,12 +389,15 @@ WorldMesh buildWorldMesh(const BspFile& bsp, const MeshBuildOptions& opts) {
              p.z * ti.textureVecs[1][2] + ti.textureVecs[1][3]) / texH,
         };
         if (ef.lit) {
-            float lu = p.x * ti.lightmapVecs[0][0] + p.y * ti.lightmapVecs[0][1] +
-                       p.z * ti.lightmapVecs[0][2] + ti.lightmapVecs[0][3];
-            float lv = p.x * ti.lightmapVecs[1][0] + p.y * ti.lightmapVecs[1][1] +
-                       p.z * ti.lightmapVecs[1][2] + ti.lightmapVecs[1][3];
-            lu -= static_cast<float>(face.lightmapMins[0]);
-            lv -= static_cast<float>(face.lightmapMins[1]);
+            const glm::vec3 lp = lmPosOverride ? *lmPosOverride : p;
+            float lu = lp.x * ti.lightmapVecs[0][0] + lp.y * ti.lightmapVecs[0][1] +
+                       lp.z * ti.lightmapVecs[0][2] + ti.lightmapVecs[0][3];
+            float lv = lp.x * ti.lightmapVecs[1][0] + lp.y * ti.lightmapVecs[1][1] +
+                       lp.z * ti.lightmapVecs[1][2] + ti.lightmapVecs[1][3];
+            lu = std::clamp(lu - static_cast<float>(face.lightmapMins[0]), 0.0f,
+                            std::max(0.0f, static_cast<float>(ef.lmW - 1)));
+            lv = std::clamp(lv - static_cast<float>(face.lightmapMins[1]), 0.0f,
+                            std::max(0.0f, static_cast<float>(ef.lmH - 1)));
             v.uv = {(ef.lmX + lu + 0.5f) / atlasW, (ef.lmY + lv + 0.5f) / atlasH};
             v.tint = glm::vec3(1.0f);
         } else {
@@ -404,8 +412,9 @@ WorldMesh buildWorldMesh(const BspFile& bsp, const MeshBuildOptions& opts) {
     };
     auto addPolyVertex = [&](const Face_t& face, const TexInfo_t& ti,
                              const glm::vec3& p, const glm::vec3& n, const EmitFace& ef,
-                             float texW, float texH) {
-        return addPolyVertexTo(mesh.vertices, face, ti, p, n, ef, texW, texH);
+                             float texW, float texH,
+                             const glm::vec3* lmPosOverride = nullptr) {
+        return addPolyVertexTo(mesh.vertices, face, ti, p, n, ef, texW, texH, lmPosOverride);
     };
 
     std::unordered_map<uint64_t, uint8_t> wireSeen;
@@ -504,13 +513,13 @@ WorldMesh buildWorldMesh(const BspFile& bsp, const MeshBuildOptions& opts) {
                 const glm::vec3 e1 = B + (C - B) * tb;
                 for (int col = 0; col < gn; ++col) {
                     const float ta = static_cast<float>(col) / (gn - 1);  // A->B
-                    glm::vec3 p = e0 + (e1 - e0) * ta;
+                    const glm::vec3 baseP = e0 + (e1 - e0) * ta;
                     const DispVert_t& dv =
                         dispVerts[di.dispVertStart + row * gn + col];
-                    p += glm::vec3(dv.vec.x, dv.vec.y, dv.vec.z) * dv.dist;
+                    const glm::vec3 p = baseP + glm::vec3(dv.vec.x, dv.vec.y, dv.vec.z) * dv.dist;
                     const uint32_t vIdx =
                         addPolyVertex(face, ti, p, n, ef, static_cast<float>(tw),
-                                      static_cast<float>(th));
+                                      static_cast<float>(th), &baseP);
                     mesh.vertices[vIdx].blend = std::clamp(dv.alpha / 255.0f, 0.0f, 1.0f);
                     gridIdx[row * gn + col] = vIdx;
                     bmin = glm::min(bmin, p);
@@ -632,11 +641,33 @@ WorldMesh buildWorldMesh(const BspFile& bsp, const MeshBuildOptions& opts) {
         {"item_teamflag",         "models/flag/briefcase.mdl"},
     };
 
+    std::unordered_map<std::string, int> doorByTargetname;
+    for (int di = 0; di < static_cast<int>(mesh.doors.size()); ++di) {
+        if (!mesh.doors[di].targetname.empty()) {
+            doorByTargetname[mesh.doors[di].targetname] = di;
+        }
+    }
+
     size_t dynPropsAdded = 0;
     for (const auto& ent : bsp.entities()) {
         auto cit = ent.find("classname");
         if (cit == ent.end() || cit->second == "worldspawn") continue;
         const std::string& cls = cit->second;
+        if (cls == "light_environment" && !mesh.hasSun) {
+            mesh.hasSun = true;
+            if (auto pi = ent.find("pitch"); pi != ent.end())
+                mesh.sunPitch = static_cast<float>(std::atof(pi->second.c_str()));
+            if (auto ai = ent.find("angles"); ai != ent.end()) {
+                glm::vec3 a = parseVec3(ai->second);
+                mesh.sunYaw = a.y;
+                if (ent.find("pitch") == ent.end() && std::fabs(a.x) > 0.1f) mesh.sunPitch = a.x;
+            }
+            if (auto li = ent.find("_light"); li != ent.end()) {
+                float r = 255, g = 245, b = 225;
+                if (std::sscanf(li->second.c_str(), " %f %f %f", &r, &g, &b) == 3)
+                    mesh.sunColor = glm::clamp(glm::vec3(r, g, b) / 255.0f, glm::vec3(0.25f), glm::vec3(1.0f));
+            }
+        }
         auto oit = ent.find("origin");
         glm::vec3 pos(0.0f);
         bool hasPos = false;
@@ -702,7 +733,18 @@ WorldMesh buildWorldMesh(const BspFile& bsp, const MeshBuildOptions& opts) {
                         float v = static_cast<float>(std::atof(sc->second.c_str()));
                         if (v > 0.05f && v < 25.0f) pi.scale = v;
                     }
-                    mesh.props.push_back(std::move(pi));
+                    // If this prop_dynamic is parented to an interactive func_door, attach it directly
+                    // to the door so visual door models (spawn gates/doors) slide open with their collider!
+                    bool attachedToDoor = false;
+                    if (auto pit = ent.find("parentname"); pit != ent.end() && !pit->second.empty()) {
+                        if (auto dit = doorByTargetname.find(pit->second); dit != doorByTargetname.end()) {
+                            mesh.doors[dit->second].attachedProps.push_back(std::move(pi));
+                            attachedToDoor = true;
+                        }
+                    }
+                    if (!attachedToDoor) {
+                        mesh.props.push_back(std::move(pi));
+                    }
                     ++dynPropsAdded;
                 }
             }

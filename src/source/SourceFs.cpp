@@ -492,6 +492,8 @@ ResolvedMaterial SourceFs::resolveMaterial(std::string name) const {
     if (vmt.shader != "patch" && !vmt.shader.empty()) out.shader = vmt.shader;
 
     out.baseTexture = vmt.get("$basetexture");
+    if (out.baseTexture.empty()) out.baseTexture = vmt.get("$hdrbasetexture");
+    if (out.baseTexture.empty()) out.baseTexture = vmt.get("$hdrcompressedtexture");
     out.baseTexture2 = vmt.get("$basetexture2");
     out.surfaceProp = vmt.get("$surfaceprop");
     out.additive = vmt.flag("$additive");
@@ -499,6 +501,25 @@ ResolvedMaterial SourceFs::resolveMaterial(std::string name) const {
     out.alphaTest = vmt.flag("$alphatest");
     out.noCull = vmt.flag("$nocull");
     out.selfIllum = vmt.flag("$selfillum");
+    // Parse VMT $color / $color2 RGB tint (either [r g b] in 0..1 or {r g b} in 0..255)
+    std::string colStr = vmt.get("$color2");
+    if (colStr.empty()) colStr = vmt.get("$color");
+    if (!colStr.empty()) {
+        float r = 1.0f, g = 1.0f, b = 1.0f;
+        const bool is255 = colStr.find('{') != std::string::npos;
+        std::string clean = colStr;
+        for (char& ch : clean) {
+            if (ch == '[' || ch == ']' || ch == '{' || ch == '}') ch = ' ';
+        }
+        if (std::sscanf(clean.c_str(), " %f %f %f", &r, &g, &b) == 3) {
+            if (is255 || r > 1.5f || g > 1.5f || b > 1.5f) {
+                r /= 255.0f; g /= 255.0f; b /= 255.0f;
+            }
+            out.colorTint[0] = std::clamp(r, 0.05f, 1.5f);
+            out.colorTint[1] = std::clamp(g, 0.05f, 1.5f);
+            out.colorTint[2] = std::clamp(b, 0.05f, 1.5f);
+        }
+    }
     if (out.baseTexture.empty()) out.baseTexture = vmt.get("%tooltexture");
     return out;
 }
