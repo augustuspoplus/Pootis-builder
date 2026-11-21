@@ -1,4 +1,5 @@
 #include "bsp/BspMesh.h"
+#include "bsp/Lzma.h"
 
 #include <algorithm>
 #include <array>
@@ -100,6 +101,16 @@ void parseStaticProps(const BspFile& bsp, WorldMesh& mesh) {
         const uint8_t* end = file + std::min<size_t>(
                                        fileSize, base + static_cast<size_t>(h.filelen));
         if (h.filelen <= 0 || end <= q) end = file + fileSize;
+
+        // Modern TF2 BSPs (ctf_2fort, cp_process_final, pl_upward, etc.) LZMA-compress
+        // the sprp game lump; decompress it before parsing the prop dictionary.
+        std::vector<uint8_t> decomp;
+        if ((h.flags & 1) || isLzmaLump(q, fileSize - base)) {
+            decomp = decompressLzmaLump(q, fileSize - base);
+            if (decomp.empty()) continue;
+            q = decomp.data();
+            end = decomp.data() + decomp.size();
+        }
 
         auto take = [&](size_t n) -> const uint8_t* {
             if (q + n > end) return nullptr;
@@ -428,9 +439,11 @@ WorldMesh buildWorldMesh(const BspFile& bsp, const MeshBuildOptions& opts) {
                     const DispVert_t& dv =
                         dispVerts[di.dispVertStart + row * gn + col];
                     p += glm::vec3(dv.vec.x, dv.vec.y, dv.vec.z) * dv.dist;
-                    gridIdx[row * gn + col] =
+                    const uint32_t vIdx =
                         addPolyVertex(face, ti, p, n, ef, static_cast<float>(tw),
                                       static_cast<float>(th));
+                    mesh.vertices[vIdx].blend = std::clamp(dv.alpha / 255.0f, 0.0f, 1.0f);
+                    gridIdx[row * gn + col] = vIdx;
                     bmin = glm::min(bmin, p);
                     bmax = glm::max(bmax, p);
                 }

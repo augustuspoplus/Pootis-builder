@@ -13,17 +13,24 @@ shader_type spatial;
 render_mode unshaded, cull_disabled;
 
 uniform sampler2D u_albedo : source_color, filter_linear_mipmap_anisotropic, repeat_enable;
+uniform sampler2D u_albedo2 : source_color, filter_linear_mipmap_anisotropic, repeat_enable;
 uniform sampler2D u_lightmap : filter_linear, repeat_disable;
 uniform float u_exposure = 1.06;
 uniform float u_alpha_scissor = 0.0;
+uniform float u_has_blend = 0.0;
 
 void fragment() {
 	vec4 alb = texture(u_albedo, UV);
 	if (u_alpha_scissor > 0.0 && alb.a < u_alpha_scissor) {
 		discard;
 	}
+	vec3 base_rgb = alb.rgb;
+	if (u_has_blend > 0.5) {
+		vec3 alb2 = texture(u_albedo2, UV).rgb;
+		base_rgb = mix(base_rgb, alb2, clamp(COLOR.a, 0.0, 1.0));
+	}
 	vec3 lm = texture(u_lightmap, UV2).rgb;
-	ALBEDO = alb.rgb * lm * COLOR.rgb * u_exposure;
+	ALBEDO = base_rgb * lm * COLOR.rgb * u_exposure;
 }
 """
 
@@ -75,6 +82,8 @@ func load_bsp_into(map_name_or_path: String, parent: Node3D) -> Dictionary:
 
 func build_bsp_scene(bsp_path: String) -> Dictionary:
 	var t0 := Time.get_ticks_msec()
+	if assets != null:
+		assets.clear_bsp_cache()
 	var data: Dictionary = core.load_bsp_data(bsp_path)
 	if not data.get("ok", false):
 		return {"ok": false, "error": data.get("error", "load_bsp_data failed")}
@@ -195,22 +204,25 @@ func _make_bsp_material(mat_path: String, lm_tex: ImageTexture, translucent: boo
 		wsm.set_shader_parameter("u_alpha_const", 0.78)
 		return wsm
 
-	var base_mat: StandardMaterial3D = assets.get_material(mat_path, false)
-	var is_trans := translucent or base_mat.transparency == BaseMaterial3D.TRANSPARENCY_ALPHA
+	var info: Dictionary = assets.get_material_info(mat_path)
+	var is_trans: bool = translucent or bool(info.get("translucent", false))
 	var sm := ShaderMaterial.new()
 	sm.shader = _trans_shader if is_trans else _opaque_shader
 	sm.set_shader_parameter("u_lightmap", lm_tex)
 	sm.set_shader_parameter("u_exposure", 1.06)
 
-	if base_mat.albedo_texture != null:
-		sm.set_shader_parameter("u_albedo", base_mat.albedo_texture)
+	if info.get("ok", false) and info["tex"] != null:
+		sm.set_shader_parameter("u_albedo", info["tex"])
+		if not is_trans and info.get("has_blend", false) and info["tex2"] != null:
+			sm.set_shader_parameter("u_albedo2", info["tex2"])
+			sm.set_shader_parameter("u_has_blend", 1.0)
 	else:
 		var grey := Image.create(2, 2, false, Image.FORMAT_RGBA8)
 		grey.fill(Color(0.55, 0.52, 0.48, 1.0))
 		sm.set_shader_parameter("u_albedo", ImageTexture.create_from_image(grey))
 
-	if not is_trans and base_mat.transparency == BaseMaterial3D.TRANSPARENCY_ALPHA_SCISSOR:
-		sm.set_shader_parameter("u_alpha_scissor", 0.45)
+	if not is_trans and bool(info.get("alpha_test", false)):
+		sm.set_shader_parameter("u_alpha_scissor", 0.42)
 	elif is_trans:
-		sm.set_shader_parameter("u_alpha_const", 0.72)
+		sm.set_shader_parameter("u_alpha_const", 0.85)
 	return sm

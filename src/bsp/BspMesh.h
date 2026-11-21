@@ -15,6 +15,7 @@ struct WorldVertex {
     glm::vec2 uv;      // lightmap atlas UV (or white-pixel UV)
     glm::vec2 texUv;   // albedo/material UV
     glm::vec3 tint;    // multiplier applied to the lightmap sample
+    float blend = 0.0f; // displacement WorldVertexTransition alpha [0..1]
 };
 
 struct DrawBatch {

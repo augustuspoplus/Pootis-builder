@@ -223,6 +223,19 @@ Dictionary Tf2Core::read_material_rgba(const String& material_path) const {
     out["self_illum"] = rm.selfIllum;
     out["base_texture"] = toGodot(tex);
     out["rgba"] = bytes;
+    out["has_blend"] = false;
+    if (!rm.baseTexture2.empty()) {
+        const pb::source::VtfImage img2 = fs_.loadTexture(rm.baseTexture2);
+        if (img2.ok()) {
+            PackedByteArray bytes2;
+            bytes2.resize(static_cast<int64_t>(img2.rgba.size()));
+            std::memcpy(bytes2.ptrw(), img2.rgba.data(), img2.rgba.size());
+            out["has_blend"] = true;
+            out["width2"] = img2.width;
+            out["height2"] = img2.height;
+            out["rgba2"] = bytes2;
+        }
+    }
     return out;
 }
 
@@ -480,8 +493,9 @@ Dictionary Tf2Core::load_bsp_data(const String& bsp_path) {
         return out;
     }
 
-    // Mount embedded BSP Pakfile ZIP (Lump 40) so map-packed textures & _wvt_patch resolve!
+    // Mount embedded BSP Pakfile ZIP (Lump 40) so map-packed textures, models & _wvt_patch resolve!
     fs_.clearBspPak();
+    pb::model::clearModelCache();
     size_t pakEntries = 0;
     const uint8_t* pakPtr = nullptr;
     size_t pakSize = 0;
@@ -530,7 +544,7 @@ Dictionary Tf2Core::load_bsp_data(const String& bsp_path) {
             norms.push_back(toGodotNrm(v.normal));
             uvs.push_back(Vector2(v.texUv.x, v.texUv.y));
             uv2s.push_back(Vector2(v.uv.x, v.uv.y));
-            colors.push_back(Color(v.tint.r, v.tint.g, v.tint.b, 1.0f));
+            colors.push_back(Color(v.tint.r, v.tint.g, v.tint.b, v.blend));
             remap.emplace(srcIdx, dstIdx);
             return dstIdx;
         };

@@ -2,6 +2,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "source/Vpk.h"
@@ -30,6 +31,10 @@ class SourceFs {
 public:
     void addLooseRoot(const std::string& dir);
     bool addVpk(const std::string& vpkPath);
+    // Mounts uncompressed (STORED) ZIP entries from a BSP's LUMP_PAKFILE (lump 40)
+    // so community maps and VBSP-patched materials resolve cleanly.
+    size_t mountBspPak(const uint8_t* data, size_t size);
+    void clearBspPak();
 
     // Mounts the installed TF2 content and the bundled ABS pack (exeDir is used
     // to find assets/mapping_resource_pack/). Safe to call when TF2 is absent.
@@ -62,6 +67,14 @@ public:
     size_t vpkCount() const { return vpks_.size(); }
 
 private:
+    struct PakSpan {
+        size_t offset = 0;
+        size_t compSize = 0;
+        size_t uncompSize = 0;
+        uint16_t method = 0;  // 0=STORED, 8=DEFLATE, 14=LZMA
+    };
+    std::vector<uint8_t> pakBlob_;
+    std::unordered_map<std::string, PakSpan> pakEntries_;
     std::vector<std::unique_ptr<Vpk>> vpks_;
     std::vector<std::string> looseRoots_;
 };
