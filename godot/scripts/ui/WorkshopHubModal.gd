@@ -494,6 +494,16 @@ func _build_official_maps_tab() -> void:
 			)
 			hb.add_child(walk_b)
 
+			var remix_b := Button.new(); remix_b.text = "Remix"
+			remix_b.tooltip_text = "Decompile official Valve .bsp into editable .vmf and open in Editor!"
+			HudWidgets.style_tf2_button(remix_b, fonts["body"], 10, false, 3)
+			remix_b.pressed.connect(func():
+				app.audio.play("click")
+				app._show_welcome_hub(false)
+				app._remix_official_bsp(mcopy)
+			)
+			hb.add_child(remix_b)
+
 			var view_b := Button.new(); view_b.text = "Inspect"
 			HudWidgets.style_tf2_button(view_b, fonts["body"], 10)
 			view_b.pressed.connect(func():

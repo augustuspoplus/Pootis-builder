@@ -1049,3 +1049,30 @@ class DraggablePropCard extends Button:
 			pv.add_child(lb)
 		set_drag_preview(pv)
 		return drag_payload
+
+## Draggable TF2 Material Swatch Button (Drag & Drop directly onto any 3D wall/floor face!)
+class DraggableSwatchButton extends Button:
+	var mat_path: String = ""
+	var swatch_rect: TextureRect = null
+
+	func _get_drag_data(_at_position: Vector2) -> Variant:
+		if mat_path.is_empty():
+			return null
+		var pv := PanelContainer.new()
+		var sb := StyleBoxFlat.new()
+		sb.bg_color = Color(0.14, 0.12, 0.10, 0.94); sb.border_color = COL_CYAN
+		sb.set_border_width_all(2); sb.set_corner_radius_all(8); sb.set_content_margin_all(5)
+		pv.add_theme_stylebox_override("panel", sb)
+		var vb := VBoxContainer.new(); vb.add_theme_constant_override("separation", 2); pv.add_child(vb)
+		if swatch_rect != null and swatch_rect.texture != null:
+			var tr := TextureRect.new()
+			tr.texture = swatch_rect.texture
+			tr.custom_minimum_size = Vector2(56, 56)
+			tr.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+			tr.stretch_mode = TextureRect.STRETCH_SCALE
+			vb.add_child(tr)
+		var lb := Label.new(); lb.text = mat_path.get_file()
+		lb.add_theme_font_size_override("font_size", 10)
+		vb.add_child(lb)
+		set_drag_preview(pv)
+		return {"kind": "material", "mat": mat_path, "name": mat_path.get_file()}

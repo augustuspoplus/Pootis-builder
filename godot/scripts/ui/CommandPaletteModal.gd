@@ -148,6 +148,7 @@ func _collect_candidates(query: String) -> Array[Dictionary]:
 		{"tag": "STUDIO", "col": HudWidgets.COL_CYAN, "title": "Scene Outliner & Map Hierarchy (O)",        "sub": "Browse Spawns, Doors, Lights, Props & Solids — click to frame", "kind": "cmd", "id": "outliner"},
 		{"tag": "STUDIO", "col": HudWidgets.COL_ACC,  "title": "View & Workspace Studio",                   "sub": "Lighting (F3), Symmetry, Split 2D, VisGroups & Camera Bookmarks", "kind": "cmd", "id": "view_studio"},
 		{"tag": "STUDIO", "col": HudWidgets.COL_GREEN,"title": "Smart TF2 Room & Layout Generator",         "sub": "1-click complete RED/BLU Spawn Rooms, Hallways, Sniper Decks & Mid Arenas", "kind": "cmd", "id": "room_kit"},
+		{"tag": "STUDIO", "col": HudWidgets.COL_GREEN,"title": "3D Prop Scatter & Foliage Brush",           "sub": "Click to paint grounded clusters of pines, rocks, crates & consoles", "kind": "cmd", "id": "scatter"},
 		{"tag": "ACTION", "col": HudWidgets.COL_CYAN, "title": "Focus Camera on Selection (F)",             "sub": "Frame the 3D camera smoothly onto the active solid or entity", "kind": "cmd", "id": "focus"},
 		{"tag": "STUDIO", "col": Color(0.74, 0.42, 0.96), "title": "Mann vs. Machine (MvM) Studio",        "sub": "Robot Spawns, Tank Track & Valve .pop Wave Exporter", "kind": "cmd", "id": "mvm_studio"},
 		{"tag": "STUDIO", "col": Color(0.98, 0.80, 0.20), "title": "Payload Track Spline Studio",          "sub": "Click-to-chain auto-linked path_track rails & landmarks", "kind": "cmd", "id": "payload_studio"},
@@ -302,6 +303,7 @@ func _run_item(it: Dictionary) -> void:
 			"outliner": app._open_outliner_drawer()
 			"view_studio": app._open_viewport_menu_drawer()
 			"room_kit": app._open_room_kit_drawer()
+			"scatter": app.set_stage(app.Stage.STYLE); app.active_tool = "scatter_props"; app._open_scatter_drawer()
 			"focus": app._focus_camera_on_selection()
 			"zen": app._toggle_zen_mode()
 			"hub": app._show_welcome_hub(true)

@@ -129,6 +129,11 @@ var _outliner_search: String = ""
 var _outliner_collapsed: Dictionary = {}
 var _cam_bookmarks: Dictionary = {} # slot 1..4 -> {pos, yaw, pitch}
 var _room_kit_team: int = 2 # 2=RED, 3=BLU, 0=Neutral
+var scatter_kit: String = "winter_pines"
+var scatter_radius_m: float = 6.0 # 192u
+var scatter_count: int = 5
+var scatter_rand_yaw: bool = true
+var scatter_rand_scale: bool = true
 var _payload_track_idx: int = 0
 var _payload_prev_ent: int = -1
 var mvm_start_cash: int = 800
@@ -1491,12 +1496,13 @@ func _rebuild_bottom_dock() -> void:
 
 	if _dock_prop_cat == "_tools":
 		var tslots := [
-			{"id": "select",    "piece": "Pull",     "lbl": "Select Face", "tool": true, "tkind": "Pull"},
-			{"id": "materials", "piece": "Wall",     "lbl": "Face Edit"},
-			{"id": "props",     "piece": "Box",      "lbl": "Prop Drawer", "icon": "crate"},
-			{"id": "biomes",    "piece": "Building", "lbl": "Biomes"},
-			{"id": "sky_sun",   "piece": "Terrain",  "lbl": "Sky & Sun",   "tool": true, "tkind": "Terrain"},
-			{"id": "light",     "piece": "Floor",    "lbl": "Add Light",   "icon": "light", "drag": {"kind": "gameplay", "id": "light"}},
+			{"id": "select",        "piece": "Pull",     "lbl": "Select Face",  "tool": true, "tkind": "Pull"},
+			{"id": "materials",     "piece": "Wall",     "lbl": "Face Edit"},
+			{"id": "scatter_props", "piece": "Terrain",  "lbl": "Prop Scatter", "tool": true, "tkind": "Terrain"},
+			{"id": "props",         "piece": "Box",      "lbl": "Prop Drawer",  "icon": "crate"},
+			{"id": "biomes",        "piece": "Building", "lbl": "Biomes"},
+			{"id": "sky_sun",       "piece": "Terrain",  "lbl": "Sky & Sun",    "tool": true, "tkind": "Terrain"},
+			{"id": "light",         "piece": "Floor",    "lbl": "Add Light",    "icon": "light", "drag": {"kind": "gameplay", "id": "light"}},
 		]
 		for sl in tslots:
 			var sid: String = sl["id"]
@@ -1710,6 +1716,30 @@ func on_viewport_drag_hover(screen_pos: Vector2, _data: Dictionary) -> void:
 func on_viewport_drop(screen_pos: Vector2, data: Dictionary) -> void:
 	brush_ring.visible = false
 	if viewing_bsp:
+		return
+	var drop_kind: String = str(data.get("kind", ""))
+	if drop_kind == "material":
+		var mp: String = str(data.get("mat", ""))
+		if mp.is_empty():
+			return
+		var ro := editor_cam.project_ray_origin(screen_pos); var rd := editor_cam.project_ray_normal(screen_pos)
+		var rc: Dictionary = doc.raycast_face(ro, rd)
+		if rc.get("hit", false):
+			var sidx := int(rc["solid_idx"]); var fidx := int(rc["face_idx"])
+			active_material = mp
+			_track_recent_material(mp)
+			if Input.is_key_pressed(KEY_SHIFT):
+				doc.set_solid_material(sidx, mp)
+				_record_history("Drag-Paint Solid: " + mp.get_file())
+				_toast("Painted entire Solid #%d with %s!" % [sidx, mp.get_file()])
+			else:
+				doc.set_face_material(sidx, fidx, mp)
+				_record_history("Drag-Paint Face: " + mp.get_file())
+				_toast("Painted Face #%d with %s! (Hold Shift+Drop for whole solid)" % [fidx, mp.get_file()])
+			map_sync.sync_solid(sidx, true)
+			_select_solid(sidx, fidx)
+			_spawn_place_fx(rc["hit_pos"], HudWidgets.COL_CYAN)
+			audio.play("place")
 		return
 	var p := _project_screen_to_surface(screen_pos)
 	if not p["valid"]:
@@ -2016,6 +2046,7 @@ func _select_tool(sid: String) -> void:
 	elif sid == "biomes": _open_biomes_drawer()
 	elif sid == "materials": _open_materials_drawer()
 	elif sid == "props": _open_props_drawer()
+	elif sid == "scatter_props": _open_scatter_drawer()
 	elif sid == "sky_sun": _open_sky_sun_drawer()
 	else: right_drawer.visible = false
 	_rebuild_left_rail()
@@ -2786,6 +2817,61 @@ func _open_room_kit_drawer() -> void:
 	_clear_drawer("SMART TF2 ROOM GENERATOR")
 	EditorDrawersScript.build_room_kit_drawer(self, right_drawer_vbox)
 
+func _open_scatter_drawer() -> void:
+	_clear_drawer("3D PROP SCATTER BRUSH")
+	EditorDrawersScript.build_scatter_drawer(self, right_drawer_vbox)
+
+func _do_prop_scatter_at(center: Vector3) -> void:
+	var kits := {
+		"winter_pines": ["models/props_foliage/tree_pine_extrasmall_snow.mdl", "models/props_foliage/tree_pine_small_snow.mdl", "models/props_nature/rock_worn001.mdl"],
+		"badlands":     ["models/props_nature/rock_worn001.mdl", "models/props_foliage/shrub_03_cluster.mdl", "models/props_badlands/barrel01.mdl"],
+		"farm_cover":   ["models/props_2fort/miningcrate001.mdl", "models/props_farm/wooden_barrel.mdl", "models/props_farm/haypile001.mdl"],
+		"spytech":      ["models/props_spytech/control_room_console01.mdl", "models/props_spytech/computer_wall02.mdl", "models/props_spytech/vent_system_vent01.mdl"],
+		"industrial":   ["models/props_badlands/barrel01.mdl", "models/props_2fort/miningcrate001.mdl", "models/props_hydro/barrel_crate_set01.mdl"],
+	}
+	var pool: Array = kits.get(scatter_kit, [])
+	if scatter_kit == "active_prop" or pool.is_empty():
+		pool = [active_prop_mdl]
+	var placed := 0
+	for _i in range(scatter_count):
+		var ang := randf_range(0.0, TAU)
+		var rad := sqrt(randf()) * scatter_radius_m
+		var pt := center + Vector3(cos(ang) * rad, 0.0, sin(ang) * rad)
+		# Raycast down onto exact terrain/cliff/floor height so scattered props NEVER float!
+		var rc: Dictionary = doc.raycast_face(pt + Vector3(0, 12.0, 0), Vector3(0, -1, 0))
+		if rc.get("hit", false):
+			pt = rc["hit_pos"]
+		var mdl: String = str(pool[randi() % pool.size()])
+		var yaw_v := randf_range(0.0, 360.0) if scatter_rand_yaw else prop_yaw_deg
+		var kv := {"model": mdl, "angles": "0 %d 0" % int(round(yaw_v)), "solid": "6"}
+		if scatter_rand_scale:
+			kv["modelscale"] = "%.2f" % randf_range(0.85, 1.18)
+		var eid: int = doc.add_point_entity("prop_static", pt, kv)
+		if eid >= 0:
+			ent_vis.sync_entity(eid, true)
+			placed += 1
+	if placed > 0:
+		_record_history("Scatter %d Props (%s)" % [placed, scatter_kit])
+		_spawn_place_fx(center, HudWidgets.COL_GREEN)
+		audio.play("place")
+		_toast("Scattered %d TF2 props cleanly onto ground! (Ctrl+Z undoes cluster)" % placed)
+
+func _remix_official_bsp(map_name: String) -> void:
+	var paths: Dictionary = compile_ctrl.detect_paths()
+	var bsp_path: String = str(paths.get("tf2_dir", "")).path_join("tf/maps").path_join(map_name)
+	if not FileAccess.file_exists(bsp_path):
+		_toast("Official map file not found: " + map_name)
+		return
+	_toast("Decompiling %s into editable .vmf..." % map_name)
+	var res: Dictionary = compile_ctrl.decompile_bsp(repo_root, bsp_path)
+	if res.get("ok", false) and not str(res.get("vmf_path", "")).is_empty():
+		_load_vmf_file(str(res["vmf_path"]))
+		_toast("Remixed official Valve map %s into editable .VMF!" % map_name)
+	else:
+		audio.play("warn")
+		_toast("BSPSource Remix: %s — loading official map to walk/inspect instead." % str(res.get("error", "Java/BSPSource not configured")))
+		_load_official_bsp(map_name)
+
 func _focus_camera_on_pos(target: Vector3, dist: float = 12.0) -> void:
 	var dir := (cam_pos - target)
 	if dir.length_squared() < 0.25:
@@ -3422,6 +3508,10 @@ func _handle_left_click(screen_pos: Vector2, shift_held: bool = false, alt_held:
 			_toast("Click a target entity (door, relay, light, sound) or press Esc to cancel.")
 		return
 
+	if active_tool == "scatter_props" and hover_valid:
+		_do_prop_scatter_at(hover_pos)
+		return
+
 	if active_tool == "stamp_custom_prefab" and hover_valid:
 		var ids := _stamp_custom_prefab(_active_custom_prefab, hover_pos)
 		if not ids.is_empty():
@@ -3756,6 +3846,9 @@ func _update_hover(screen_pos: Vector2) -> void:
 		if active_tool == "terrain":
 			ghost_mesh.visible = false; brush_ring.visible = true
 			brush_ring.position = hover_pos + Vector3(0, 0.15, 0); brush_ring.scale = Vector3(terrain_radius_m, 1.0, terrain_radius_m)
+		elif active_tool == "scatter_props":
+			ghost_mesh.visible = false; brush_ring.visible = true
+			brush_ring.position = hover_pos + Vector3(0, 0.15, 0); brush_ring.scale = Vector3(scatter_radius_m, 1.0, scatter_radius_m)
 		elif _drawing_box:
 			brush_ring.visible = false; ghost_mesh.visible = true; ghost_mesh.rotation = Vector3.ZERO
 			var h := maxf(0.25, box_height_m)
@@ -4209,6 +4302,19 @@ func _setup_auto_shot(idx: int) -> void:
 			_set_lighting_mode(0); _show_welcome_hub(false); _load_gamemode("koth", "badlands", false); set_stage(Stage.BUILD)
 			_open_room_kit_drawer()
 			cam_pos = Vector3(20, 14, 24); cam_yaw = 0.65; cam_pitch = -0.42; _apply_editor_cam()
+		"v12_scatter_studio":
+			_set_lighting_mode(0); _show_welcome_hub(false); _load_gamemode("koth", "winter", false); set_stage(Stage.STYLE)
+			scatter_kit = "winter_pines"; scatter_count = 6; scatter_radius_m = 6.0
+			_do_prop_scatter_at(Vector3(-8.0, 0.0, -7.0))
+			_do_prop_scatter_at(Vector3(8.0, 0.0, 7.0))
+			active_tool = "scatter_props"; _open_scatter_drawer()
+			cam_pos = Vector3(20, 14, 24); cam_yaw = 0.65; cam_pitch = -0.42; _apply_editor_cam()
+		"v12_light_inspector":
+			_set_lighting_mode(1); _show_welcome_hub(false); _load_gamemode("koth", "badlands", false); set_stage(Stage.GAMEPLAY)
+			var lid: int = doc.add_point_entity("light_spot", Vector3(0.0, 5.5, 0.0), {"_light": "255 205 135 550", "pitch": "-75", "_cone": "54"})
+			ent_vis.sync_all(); _select_entity(lid); _insp_tab = 0; _open_inspector_drawer()
+			cam_pos = Vector3(13.0, 9.5, 14.0); editor_cam.look_at_from_position(cam_pos, Vector3(0.0, 2.5, 0.0), Vector3.UP)
+			cam_yaw = editor_cam.rotation.y; cam_pitch = editor_cam.rotation.x
 	if not viewing_bsp and not settings_modal.visible:
 		_update_hover(get_viewport().get_visible_rect().size * Vector2(0.42, 0.52))
 

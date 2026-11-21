@@ -50,7 +50,7 @@ static func build_materials_drawer(app: Node3D, vbox: VBoxContainer) -> void:
 	ivb.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	top.add_child(ivb)
 	ivb.add_child(_lbl(app.active_material, fonts["heading"], 11, HudWidgets.COL_ACC))
-	ivb.add_child(_lbl("LMB: Paint Face | Alt+Click: Eyedropper", fonts["body"], 10, HudWidgets.COL_TX_MUTED))
+	ivb.add_child(_lbl("Drag Swatch onto 3D Face  |  Shift+Drop = Solid", fonts["body"], 10, HudWidgets.COL_TX_MUTED))
 
 	var act_row := HBoxContainer.new(); act_row.add_theme_constant_override("separation", 4); ivb.add_child(act_row)
 	var ap_b := Button.new(); ap_b.text = "Apply Solid"
@@ -169,9 +169,11 @@ static func build_materials_drawer(app: Node3D, vbox: VBoxContainer) -> void:
 
 	var add_swatch_btn := func(g: GridContainer, label: String, mp: String) -> void:
 		var is_act: bool = (str(app.active_material).to_lower() == mp.to_lower())
-		var b := Button.new()
+		var b := HudWidgets.DraggableSwatchButton.new()
+		b.mat_path = mp
 		b.custom_minimum_size = Vector2(0, 48)
 		b.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		b.tooltip_text = "%s\nDrag directly onto any 3D wall/floor face (Shift+Drop = whole solid)!" % mp
 		HudWidgets.style_tf2_button(b, fonts["body"], 10, is_act)
 		var hb := HBoxContainer.new()
 		hb.set_anchors_preset(Control.PRESET_FULL_RECT)
@@ -184,6 +186,7 @@ static func build_materials_drawer(app: Node3D, vbox: VBoxContainer) -> void:
 		sw.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
 		sw.stretch_mode = TextureRect.STRETCH_SCALE
 		sw.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		b.swatch_rect = sw
 		# Async non-blocking VTF decode — zero main-thread hitch when scrolling 31,506 materials!
 		app.assets.request_material_swatch_async(mp, sw)
 		hb.add_child(sw)
@@ -794,9 +797,72 @@ static func build_inspector_drawer(app: Node3D, vbox: VBoxContainer) -> void:
 			tb.pressed.connect(func(): app._insp_tab = ti; app._open_inspector_drawer())
 			tabs.add_child(tb)
 
-		_sec(vbox, "ENTITY #%d â€” %s" % [app.selected_entity, cls], fonts)
+		# Crisp Entity Visual Header Card (3D Icon + Coords + Quick Actions!)
+		var hcard := HudWidgets.make_section_card("", fonts, HudWidgets.COL_ACC)
+		vbox.add_child(hcard["panel"])
+		var hvb: VBoxContainer = hcard["vbox"]
+		var hrow := HBoxContainer.new(); hrow.add_theme_constant_override("separation", 8); hvb.add_child(hrow)
+		var ep_u: Vector3 = ((e["bounds_min"] + e["bounds_max"]) * 0.5 if bool(e.get("is_brush", false)) else e["pos"]) * 32.0
+		var mdl_key := str(kv.get("model", ""))
+		var ic_tex: Texture2D = app.icon_cache.get_icon(mdl_key) if (not mdl_key.is_empty() and app.icon_cache != null) else null
+		if ic_tex != null:
+			var itr := TextureRect.new(); itr.texture = ic_tex; itr.custom_minimum_size = Vector2(44, 44)
+			itr.expand_mode = TextureRect.EXPAND_IGNORE_SIZE; itr.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+			hrow.add_child(itr)
+		var itvb := VBoxContainer.new(); itvb.size_flags_horizontal = Control.SIZE_EXPAND_FILL; itvb.add_theme_constant_override("separation", 2); hrow.add_child(itvb)
+		itvb.add_child(_lbl("ENTITY #%d — %s" % [app.selected_entity, cls], fonts["heading"], 11, HudWidgets.COL_ACC))
+		itvb.add_child(_lbl("XYZ: %du, %du, %du" % [int(ep_u.x), int(-ep_u.z), int(ep_u.y)], fonts["mono"], 10, HudWidgets.COL_TX_MUTED))
+		var qrow := HBoxContainer.new(); qrow.add_theme_constant_override("separation", 4); hvb.add_child(qrow)
+		for qa in [
+			{"t": "Focus (F)", "fn": func(): app._focus_camera_on_selection(), "tm": 0},
+			{"t": "Wire 3D",   "fn": func(): app._start_visual_3d_wire(app.selected_entity), "tm": 3},
+			{"t": "Rot 90°",   "fn": func(): app._rotate_selection(), "tm": 0},
+			{"t": "Clone",     "fn": func(): app._duplicate_selection(), "tm": 0},
+		]:
+			var qb := Button.new(); qb.text = str(qa["t"]); qb.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+			HudWidgets.style_tf2_button(qb, fonts["body"], 9, false, int(qa["tm"]))
+			var qfn: Callable = qa["fn"]
+			qb.pressed.connect(func(): app.audio.play("click"); qfn.call())
+			qrow.add_child(qb)
+
 		if fgd.get("found", false) and not str(fgd.get("description", "")).is_empty():
 			vbox.add_child(_lbl(str(fgd["description"]), fonts["body"], 10, HudWidgets.COL_TX_MUTED))
+
+		# 1-Click TF2 Light Color & Brightness Studio for light / light_spot!
+		if cls == "light" or cls == "light_spot":
+			var lcard := HudWidgets.make_section_card("1-CLICK TF2 LIGHTING PRESETS (LIVE F3 PREVIEW)", fonts, Color(1.0, 0.85, 0.35))
+			vbox.add_child(lcard["panel"])
+			var lvb: VBoxContainer = lcard["vbox"]
+			var cur_parts := str(kv.get("_light", "255 240 210 400")).split(" ", false)
+			var cur_bright := float(cur_parts[3]) if cur_parts.size() >= 4 else 400.0
+			var lg := GridContainer.new(); lg.columns = 2; lg.add_theme_constant_override("h_separation", 5); lg.add_theme_constant_override("v_separation", 5); lvb.add_child(lg)
+			for lp in [
+				{"t": "Warm Tungsten",    "rgb": "255 205 135", "b": 480},
+				{"t": "Cool Spytech",     "rgb": "185 225 255", "b": 460},
+				{"t": "RED Base Glow",    "rgb": "255 125 105", "b": 520},
+				{"t": "BLU Base Glow",    "rgb": "105 175 255", "b": 520},
+				{"t": "Bright Sunbeam",   "rgb": "255 245 215", "b": 780},
+				{"t": "Spooky Violet",    "rgb": "205 125 255", "b": 460},
+			]:
+				var lb := Button.new(); lb.text = str(lp["t"]); lb.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+				HudWidgets.style_tf2_button(lb, fonts["body"], 10)
+				var lstr := "%s %d" % [str(lp["rgb"]), int(lp["b"])]
+				lb.pressed.connect(func():
+					app.doc.set_entity_kv(app.selected_entity, "_light", lstr)
+					app._record_history("Set Light Preset")
+					app.ent_vis.sync_entity(app.selected_entity, false)
+					app.audio.play("click")
+					app._open_inspector_drawer()
+				)
+				lg.add_child(lb)
+			var br_sb := SpinBox.new(); br_sb.min_value = 50; br_sb.max_value = 1800; br_sb.step = 50; br_sb.value = cur_bright; br_sb.prefix = "Brightness: "
+			br_sb.value_changed.connect(func(v: float):
+				var p2 := str(app.doc.get_entities()[app.selected_entity]["kv"].get("_light", "255 240 210 400")).split(" ", false)
+				var rgb_s := "%s %s %s" % [p2[0] if p2.size() > 0 else "255", p2[1] if p2.size() > 1 else "240", p2[2] if p2.size() > 2 else "210"]
+				app.doc.set_entity_kv(app.selected_entity, "_light", "%s %d" % [rgb_s, int(v)])
+				app.ent_vis.sync_entity(app.selected_entity, false)
+			)
+			lvb.add_child(br_sb)
 
 		if bool(e.get("is_brush", false)):
 			var untie_b := Button.new(); untie_b.text = "Move to World (Ctrl+Shift+W)"
@@ -1854,3 +1920,66 @@ static func build_room_kit_drawer(app: Node3D, vbox: VBoxContainer) -> void:
 			app._stamp_smart_room_kit(kid)
 		)
 		v2.add_child(b)
+
+# ==============================================================================
+# 14. 3D PROP SCATTER / FOLIAGE & COVER BRUSH STUDIO
+# ==============================================================================
+static func build_scatter_drawer(app: Node3D, vbox: VBoxContainer) -> void:
+	var fonts: Dictionary = app.fonts
+
+	var c1 := HudWidgets.make_section_card("1. CHOOSE TF2 PROP SCATTER KIT", fonts, HudWidgets.COL_GREEN)
+	vbox.add_child(c1["panel"])
+	var v1: VBoxContainer = c1["vbox"]
+	v1.add_child(_lbl("Click anywhere in 3D to paint naturally rotated & scaled prop clusters grounded cleanly onto terrain & cliffs (1-step Undo)!", fonts["body"], 10, HudWidgets.COL_TX_MUTED))
+
+	var kits := [
+		{"id": "winter_pines", "t": "Winter Snowy Pines"},
+		{"id": "badlands",     "t": "Badlands Rocks & Shrubs"},
+		{"id": "farm_cover",   "t": "Farm Crates & Barrels"},
+		{"id": "spytech",      "t": "Spytech Consoles"},
+		{"id": "industrial",   "t": "Industrial Oil Drums"},
+		{"id": "active_prop",  "t": "Scatter Active Prop"},
+	]
+	var kg := GridContainer.new(); kg.columns = 2; kg.add_theme_constant_override("h_separation", 5); kg.add_theme_constant_override("v_separation", 5)
+	v1.add_child(kg)
+	for k in kits:
+		var kid: String = str(k["id"])
+		var b := Button.new(); b.text = str(k["t"]); b.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		HudWidgets.style_tf2_button(b, fonts["heading"], 10, app.scatter_kit == kid)
+		b.pressed.connect(func():
+			app.audio.play("click")
+			app.scatter_kit = kid
+			app.active_tool = "scatter_props"
+			app._open_scatter_drawer()
+		)
+		kg.add_child(b)
+
+	var c2 := HudWidgets.make_section_card("2. BRUSH RADIUS, DENSITY & VARIATION", fonts, HudWidgets.COL_ACC)
+	vbox.add_child(c2["panel"])
+	var v2: VBoxContainer = c2["vbox"]
+	var g2 := GridContainer.new(); g2.columns = 2; g2.add_theme_constant_override("h_separation", 6); v2.add_child(g2)
+
+	var rad_sb := SpinBox.new(); rad_sb.min_value = 96; rad_sb.max_value = 640; rad_sb.step = 32; rad_sb.value = app.scatter_radius_m * 32.0; rad_sb.prefix = "Radius: "; rad_sb.suffix = "u"
+	rad_sb.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	rad_sb.value_changed.connect(func(v: float): app.scatter_radius_m = v / 32.0)
+	g2.add_child(rad_sb)
+
+	var cnt_sb := SpinBox.new(); cnt_sb.min_value = 2; cnt_sb.max_value = 16; cnt_sb.step = 1; cnt_sb.value = app.scatter_count; cnt_sb.prefix = "Props: "
+	cnt_sb.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	cnt_sb.value_changed.connect(func(v: float): app.scatter_count = int(v))
+	g2.add_child(cnt_sb)
+
+	var rot_cb := CheckButton.new(); rot_cb.text = "Random Yaw Rotation (0°–360°)"; rot_cb.button_pressed = app.scatter_rand_yaw
+	rot_cb.toggled.connect(func(on: bool): app.scatter_rand_yaw = on)
+	v2.add_child(rot_cb)
+
+	var sc_cb := CheckButton.new(); sc_cb.text = "Natural Scale Variation (0.85x–1.18x)"; sc_cb.button_pressed = app.scatter_rand_scale
+	sc_cb.toggled.connect(func(on: bool): app.scatter_rand_scale = on)
+	v2.add_child(sc_cb)
+
+	var act_b := Button.new()
+	act_b.text = "ACTIVE: Click 3D Ground to Stamp Cluster" if app.active_tool == "scatter_props" else "Activate Prop Scatter Brush"
+	act_b.custom_minimum_size = Vector2(0, 38)
+	HudWidgets.style_tf2_button(act_b, fonts["heading"], 11, true)
+	act_b.pressed.connect(func(): app.audio.play("click"); app.active_tool = "scatter_props"; app._open_scatter_drawer(); app._toast("Prop Scatter Brush active — click ground/cliffs in 3D!"))
+	v2.add_child(act_b)
