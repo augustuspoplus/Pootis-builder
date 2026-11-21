@@ -55,7 +55,7 @@ target_include_directories(pootis_core PRIVATE
     "${PB_ROOT}/src"
     "${PB_ROOT}/third_party"
     "${PB_ROOT}/third_party/lzma"
-    "${PB_ROOT}/build/_deps/glm-src"
+    "${CMAKE_CURRENT_SOURCE_DIR}/third_party/glm"
 )
 
 target_compile_definitions(pootis_core PRIVATE
