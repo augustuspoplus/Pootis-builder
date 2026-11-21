@@ -1,4 +1,4 @@
-class_name EditorDrawers
+﻿class_name EditorDrawers
 extends RefCounted
 
 ## Modular Valve Hammer++ / TrenchBroom Drawer Builders for Pootis Builder 2.0!
@@ -71,7 +71,7 @@ static func build_materials_drawer(app: Node3D, vbox: VBoxContainer) -> void:
 			var old_m: String = str(si.get("material", ""))
 			if not old_m.is_empty():
 				var n: int = app.doc.replace_material(old_m, app.active_material)
-				app.doc.record_undo("Replace Textures")
+				app._record_history("Replace Textures")
 				app.map_sync.sync_all()
 				app._toast("Replaced %d faces (%s -> %s)" % [n, old_m.get_file(), app.active_material.get_file()])
 	)
@@ -107,7 +107,7 @@ static func build_materials_drawer(app: Node3D, vbox: VBoxContainer) -> void:
 				var mid: int = jm["m"]
 				jb.pressed.connect(func():
 					app.doc.justify_face_uv(app.selected_solid, fidx, mid)
-					app.doc.record_undo("Justify UV")
+					app._record_history("Justify UV")
 					app.map_sync.sync_solid(app.selected_solid)
 				)
 				jrow.add_child(jb)
@@ -132,7 +132,7 @@ static func build_materials_drawer(app: Node3D, vbox: VBoxContainer) -> void:
 	mode_row.add_child(b_all)
 
 	var search := LineEdit.new()
-	search.placeholder_text = "Search 29k+ TF2 textures (wood, brick, blend…)"
+	search.placeholder_text = "Search 29k+ TF2 textures (wood, brick, blendâ€¦)"
 	search.text = app._mat_search_text
 	vbox.add_child(search)
 
@@ -184,7 +184,7 @@ static func build_materials_drawer(app: Node3D, vbox: VBoxContainer) -> void:
 		var fl := flt.to_lower().strip_edges()
 		if app._mat_browse_all or fl.length() >= 3:
 			var found: PackedStringArray = app.core.search_materials(fl, 42)
-			list_root.add_child(_lbl("LIVE TF2 VPK RESULTS (%d shown — type to narrow):" % found.size(), fonts["heading"], 10, HudWidgets.COL_CYAN))
+			list_root.add_child(_lbl("LIVE TF2 VPK RESULTS (%d shown â€” type to narrow):" % found.size(), fonts["heading"], 10, HudWidgets.COL_CYAN))
 			var g := GridContainer.new(); g.columns = 2; g.add_theme_constant_override("h_separation", 4); g.add_theme_constant_override("v_separation", 4); list_root.add_child(g)
 			for m in found:
 				add_swatch_btn.call(g, str(m).get_file(), str(m))
@@ -583,12 +583,12 @@ static func build_props_drawer(app: Node3D, vbox: VBoxContainer) -> void:
 	sr_row.add_child(sc_minus); sr_row.add_child(sc_lbl); sr_row.add_child(sc_plus)
 
 	var rot_b := Button.new()
-	rot_b.text = "Yaw: %d° (R)" % int(app.prop_yaw_deg)
+	rot_b.text = "Yaw: %dÂ° (R)" % int(app.prop_yaw_deg)
 	rot_b.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	HudWidgets.style_tf2_button(rot_b, fonts["body"], 10)
 	rot_b.pressed.connect(func():
 		app.prop_yaw_deg = fmod(app.prop_yaw_deg + 90.0, 360.0)
-		rot_b.text = "Yaw: %d° (R)" % int(app.prop_yaw_deg)
+		rot_b.text = "Yaw: %dÂ° (R)" % int(app.prop_yaw_deg)
 		app.audio.play("click")
 	)
 	sr_row.add_child(rot_b)
@@ -765,7 +765,7 @@ static func build_inspector_drawer(app: Node3D, vbox: VBoxContainer) -> void:
 			tb.pressed.connect(func(): app._insp_tab = ti; app._open_inspector_drawer())
 			tabs.add_child(tb)
 
-		_sec(vbox, "ENTITY #%d — %s" % [app.selected_entity, cls], fonts)
+		_sec(vbox, "ENTITY #%d â€” %s" % [app.selected_entity, cls], fonts)
 		if fgd.get("found", false) and not str(fgd.get("description", "")).is_empty():
 			vbox.add_child(_lbl(str(fgd["description"]), fonts["body"], 10, HudWidgets.COL_TX_MUTED))
 
@@ -803,7 +803,7 @@ static func build_inspector_drawer(app: Node3D, vbox: VBoxContainer) -> void:
 					ob.item_selected.connect(func(idx: int):
 						var nv: String = str(ob.get_item_metadata(idx))
 						app.doc.set_entity_kv(app.selected_entity, key, nv)
-						app.doc.record_undo("Set " + key)
+						app._record_history("Set " + key)
 						app.ent_vis.sync_all()
 						app._toast("Set %s = %s" % [key, nv])
 					)
@@ -816,7 +816,7 @@ static func build_inspector_drawer(app: Node3D, vbox: VBoxContainer) -> void:
 							return
 						last_saved[0] = nv
 						app.doc.set_entity_kv(app.selected_entity, key, nv)
-						app.doc.record_undo("Set " + key)
+						app._record_history("Set " + key)
 						app.ent_vis.sync_all()
 						app._toast("Set %s = %s" % [key, nv])
 					le.text_submitted.connect(commit_kv)
@@ -860,7 +860,7 @@ static func build_inspector_drawer(app: Node3D, vbox: VBoxContainer) -> void:
 							var sf := int(str(app.doc.get_entities()[app.selected_entity]["kv"].get("spawnflags", "0")).to_int())
 							sf = (sf | bit) if on else (sf & ~bit)
 							app.doc.set_entity_kv(app.selected_entity, "spawnflags", str(sf))
-							app.doc.record_undo("Toggle Flag")
+							app._record_history("Toggle Flag")
 						)
 						vbox.add_child(cb)
 			if not found_flags:
@@ -872,7 +872,7 @@ static func build_inspector_drawer(app: Node3D, vbox: VBoxContainer) -> void:
 			for ci in range(conns.size()):
 				var c: Dictionary = conns[ci]
 				var crow := HBoxContainer.new(); crow.add_theme_constant_override("separation", 4); vbox.add_child(crow)
-				var cl := _lbl("• %s -> %s" % [str(c["output"]), str(c["args"])], fonts["mono"], 10, HudWidgets.COL_CYAN)
+				var cl := _lbl("â€¢ %s -> %s" % [str(c["output"]), str(c["args"])], fonts["mono"], 10, HudWidgets.COL_CYAN)
 				cl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 				crow.add_child(cl)
 				var del_c := Button.new(); del_c.text = "X"
@@ -880,7 +880,7 @@ static func build_inspector_drawer(app: Node3D, vbox: VBoxContainer) -> void:
 				var cidx := ci
 				del_c.pressed.connect(func():
 					app.doc.remove_connection(app.selected_entity, cidx)
-					app.doc.record_undo("Remove Output")
+					app._record_history("Remove Output")
 					app.ent_vis.sync_all()
 					app._open_inspector_drawer()
 				)
@@ -902,7 +902,7 @@ static func build_inspector_drawer(app: Node3D, vbox: VBoxContainer) -> void:
 				if not out_le.text.is_empty() and not tgt_le.text.is_empty() and not inp_le.text.is_empty():
 					app.doc.add_connection(app.selected_entity, out_le.text.strip_edges(), tgt_le.text.strip_edges(),
 						inp_le.text.strip_edges(), par_le.text.strip_edges(), float(del_sb.value), once_cb.button_pressed)
-					app.doc.record_undo("Add I/O Output")
+					app._record_history("Add I/O Output")
 					app.ent_vis.sync_all()
 					app._toast("Wired %s -> %s :: %s!" % [out_le.text, tgt_le.text, inp_le.text])
 					app._open_inspector_drawer()
@@ -989,7 +989,7 @@ static func build_terrain_drawer(app: Node3D, vbox: VBoxContainer) -> void:
 				var cid: int = app.doc.make_cliff_wall(a, b, app.cliff_height_m, 2.5, app.cliff_power, mat, 1.2)
 				if cid >= 0:
 					app.terrain_axis_mode = 0
-					app.doc.record_undo("Add Canyon Cliff")
+					app._record_history("Add Canyon Cliff")
 					app.map_sync.sync_all(); app._select_solid(cid, -1); app.audio.play("place")
 					app._toast("Stamped Canyon Cliff Wall! Hold LMB to sculpt.")
 			else:
@@ -1004,7 +1004,7 @@ static func build_terrain_drawer(app: Node3D, vbox: VBoxContainer) -> void:
 					elif pid == "crater":
 						app.doc.sculpt_terrain(p, 6.5, 2.4, 1, 1)
 					app.terrain_axis_mode = 1
-					app.doc.record_undo("Add " + pr["name"])
+					app._record_history("Add " + pr["name"])
 					app.map_sync.sync_all(); app._select_solid(sid, -1); app.audio.play("place")
 					app._toast("Stamped %s! Hold LMB in 3D to sculpt." % pr["name"])
 		)
@@ -1137,7 +1137,7 @@ static func build_terrain_drawer(app: Node3D, vbox: VBoxContainer) -> void:
 	b_sew.add_theme_color_override("font_color", Color(0.92, 1.0, 0.94))
 	b_sew.pressed.connect(func():
 		var n: int = app.doc.sew_displacements()
-		app.doc.record_undo("Sew Displacements"); app.map_sync.sync_all(); app.audio.play("carve")
+		app._record_history("Sew Displacements"); app.map_sync.sync_all(); app.audio.play("carve")
 		app._toast("Auto-Sewed %d displacement seam vertices (0 cracks)!" % n)
 	)
 	t_row.add_child(b_sew)
@@ -1195,7 +1195,7 @@ static func build_check_problems_drawer(app: Node3D, vbox: VBoxContainer) -> voi
 	], fonts["body"], 11, HudWidgets.COL_GREEN if probs.is_empty() else HudWidgets.COL_ACC))
 
 	if probs.is_empty():
-		vbox.add_child(_lbl("✓ Zero map errors detected — ready to compile cleanly in Valve vbsp!", fonts["heading"], 12, HudWidgets.COL_GREEN))
+		vbox.add_child(_lbl("âœ“ Zero map errors detected â€” ready to compile cleanly in Valve vbsp!", fonts["heading"], 12, HudWidgets.COL_GREEN))
 		return
 
 	var fix_all_b := Button.new(); fix_all_b.text = "Fix All Auto-Fixable Problems"
@@ -1207,7 +1207,7 @@ static func build_check_problems_drawer(app: Node3D, vbox: VBoxContainer) -> voi
 			elif fk == "add_red_spawn": Tf2GamemodesScript.stamp_preset(app.doc, "spawn", Vector3(-12, 0.5, 0), 2)
 			elif fk == "add_blu_spawn": Tf2GamemodesScript.stamp_preset(app.doc, "spawn", Vector3(12, 0.5, 0), 3)
 			elif fk == "add_sun": app.doc.add_point_entity("light_environment", Vector3(0, 10, 0), {"_light": "255 245 220 400", "pitch": "-45"})
-		app.doc.record_undo("Fix All Problems")
+		app._record_history("Fix All Problems")
 		app.map_sync.sync_all(); app.ent_vis.sync_all()
 		app._open_check_problems_drawer()
 	)
@@ -1245,7 +1245,84 @@ static func build_check_problems_drawer(app: Node3D, vbox: VBoxContainer) -> voi
 				elif fk == "add_blu_spawn": Tf2GamemodesScript.stamp_preset(app.doc, "spawn", Vector3(12, 0.5, 0), 3); app.ent_vis.sync_all()
 				elif fk == "add_sun": app.doc.add_point_entity("light_environment", Vector3(0, 10, 0), {"_light": "255 245 220 400", "pitch": "-45"}); app.ent_vis.sync_all()
 				elif fk == "delete_solid" and sidx >= 0: app.doc.delete_solid(sidx); app.map_sync.sync_all()
-				app.doc.record_undo("Fix " + fk)
+				app._record_history("Fix " + fk)
 				app._open_check_problems_drawer()
 			)
 			brow.add_child(fix_b)
+
+# ==============================================================================
+# 7. VISUAL MAP HISTORY TIMELINE (Click any past/future step to Undo/Redo!)
+# ==============================================================================
+static func build_history_drawer(app: Node3D, vbox: VBoxContainer) -> void:
+	var fonts: Dictionary = app.fonts
+	var entries: Array = app._history_entries
+	var cur_idx: int = app._history_idx
+
+	var top := HBoxContainer.new(); top.add_theme_constant_override("separation", 6); vbox.add_child(top)
+	var b_u := Button.new(); b_u.text = "Undo (Ctrl+Z)"; b_u.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	b_u.disabled = (cur_idx <= 0)
+	HudWidgets.style_tf2_button(b_u, fonts["heading"], 11, cur_idx > 0)
+	b_u.pressed.connect(func(): app._do_undo())
+	top.add_child(b_u)
+
+	var b_r := Button.new(); b_r.text = "Redo (Ctrl+Y)"; b_r.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	b_r.disabled = (cur_idx >= entries.size() - 1)
+	HudWidgets.style_tf2_button(b_r, fonts["heading"], 11, cur_idx < entries.size() - 1)
+	b_r.pressed.connect(func(): app._do_redo())
+	top.add_child(b_r)
+
+	vbox.add_child(_lbl("Map Edit Timeline - Step %d of %d (click any step to jump there!)" % [
+		cur_idx + 1, maxi(1, entries.size())
+	], fonts["body"], 11, HudWidgets.COL_TX_MUTED))
+
+	# Show newest edits at top so recent actions are immediately visible!
+	for rev in range(entries.size() - 1, -1, -1):
+		var ent: Dictionary = entries[rev]
+		var is_cur: bool = (rev == cur_idx)
+		var is_future: bool = (rev > cur_idx)
+		var btn := Button.new()
+		btn.custom_minimum_size = Vector2(0, 38)
+		btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		btn.focus_mode = Control.FOCUS_NONE
+		var sb := StyleBoxFlat.new()
+		sb.bg_color = Color(0.28, 0.20, 0.12, 0.98) if is_cur else (Color(0.11, 0.10, 0.09, 0.80) if is_future else HudWidgets.COL_BG_CARD)
+		sb.border_color = HudWidgets.COL_ACC if is_cur else (Color(0.28, 0.25, 0.22, 0.70) if is_future else HudWidgets.COL_SLOT_BD)
+		sb.border_width_left = 4 if is_cur else 1
+		sb.border_width_top = 1; sb.border_width_right = 1; sb.border_width_bottom = 1
+		sb.set_corner_radius_all(7)
+		var sbh := sb.duplicate(); sbh.bg_color = HudWidgets.COL_SLOT_HOV; sbh.border_color = HudWidgets.COL_ACC
+		btn.add_theme_stylebox_override("normal", sb)
+		btn.add_theme_stylebox_override("hover", sbh)
+		btn.add_theme_stylebox_override("pressed", sbh)
+
+		var hb := HBoxContainer.new()
+		hb.set_anchors_preset(Control.PRESET_FULL_RECT)
+		hb.offset_left = 10; hb.offset_right = -10
+		hb.add_theme_constant_override("separation", 8)
+		hb.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		btn.add_child(hb)
+
+		var prefix := "> " if is_cur else ("" if not is_future else "(redo) ")
+		var l1 := Label.new()
+		l1.text = "%s#%d  %s" % [prefix, rev, str(ent["label"])]
+		l1.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		l1.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+		l1.clip_text = true
+		l1.add_theme_font_override("font", fonts["heading"] if is_cur else fonts["body"])
+		l1.add_theme_font_size_override("font_size", 11)
+		l1.add_theme_color_override("font_color", HudWidgets.COL_ACC if is_cur else (HudWidgets.COL_TX_MUTED if is_future else HudWidgets.COL_TX))
+		l1.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		hb.add_child(l1)
+
+		var l2 := Label.new()
+		l2.text = str(ent["time"])
+		l2.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+		l2.add_theme_font_override("font", fonts["mono"])
+		l2.add_theme_font_size_override("font_size", 10)
+		l2.add_theme_color_override("font_color", HudWidgets.COL_TX_MUTED)
+		l2.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		hb.add_child(l2)
+
+		var target_i := rev
+		btn.pressed.connect(func(): app._jump_to_history(target_i))
+		vbox.add_child(btn)

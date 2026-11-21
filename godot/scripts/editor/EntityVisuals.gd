@@ -4,15 +4,18 @@ extends Node3D
 ## Milestone 5 + 17 — Real 3D TF2 .mdl Entity Visualizer + 3D Spline Track Ribbon
 ## + Glowing 3D Bezier Logic Wires + Dynamic Point Lights + VisGroups + Selection/Hover Boxes.
 
+const Tf2CatalogScript = preload("res://scripts/core/Tf2Catalog.gd")
+
 var doc: Object
 var assets: RefCounted
 var door_ctrl: Node = null
 var show_logic_wires: bool = true
-var show_logic_markers: bool = false # Keep mid-air tf_gamerules/tf_logic_* markers hidden unless toggled in VisGroups!
+var show_logic_markers: bool = true # Show crisp 3D billboard icons on ALL placed entities so none are invisible!
 var show_volumes: bool = true
 var show_triggers: bool = true
 var show_props: bool = true
 var show_lights: bool = true
+var playtest_mode: bool = false
 var selected_entity: int = -1
 var hovered_entity: int = -1
 
@@ -23,6 +26,8 @@ var selection_box: MeshInstance3D
 var hover_box: MeshInstance3D
 
 var _ent_bounds: Dictionary = {} # ent_idx -> [bmin: Vector3, bmax: Vector3]
+var _badge_tex_cache: Dictionary = {} # kind -> ImageTexture
+var _editor_only_nodes: Array[Node3D] = []
 
 const ENTITY_MODELS := {
 	"item_healthkit_small":  "models/items/medkit_small.mdl",
@@ -71,9 +76,22 @@ func clear_all() -> void:
 	if track_mesh != null:
 		track_mesh.mesh = null
 	_ent_bounds.clear()
+	_editor_only_nodes.clear()
 	selected_entity = -1
 	hovered_entity = -1
 	_rebuild_highlight_boxes()
+
+func set_playtest_mode(on: bool) -> void:
+	playtest_mode = on
+	for n in _editor_only_nodes:
+		if is_instance_valid(n):
+			n.visible = not on
+	if wires_mesh != null:
+		wires_mesh.visible = (not on) and show_logic_wires
+	if selection_box != null:
+		selection_box.visible = not on
+	if hover_box != null:
+		hover_box.visible = not on
 
 func sync_all() -> void:
 	if doc == null:
@@ -85,6 +103,7 @@ func sync_all() -> void:
 	wires_mesh.mesh = null
 	track_mesh.mesh = null
 	_ent_bounds.clear()
+	_editor_only_nodes.clear()
 
 	var ents: Array = doc.get_entities()
 	var target_pos := {} # targetname -> Vector3
@@ -309,6 +328,9 @@ func _spawn_entity_node(idx: int, e: Dictionary, pos: Vector3) -> void:
 		mat.albedo_color = col
 		mi.material_override = mat
 		holder.add_child(mi)
+		_attach_entity_billboard_icon(holder, cls, kv, Vector3(0, sz.y * 0.5 + 0.55, 0))
+		_editor_only_nodes.append(mi)
+		mi.visible = not playtest_mode
 		ents_root.add_child(holder)
 		return
 
@@ -379,11 +401,14 @@ func _spawn_entity_node(idx: int, e: Dictionary, pos: Vector3) -> void:
 		bmat.albedo_color = lcol
 		bulb.material_override = bmat
 		holder.add_child(bulb)
+		_attach_entity_billboard_icon(holder, cls, kv, Vector3(0, 0.72, 0))
+		_editor_only_nodes.append(bulb)
+		bulb.visible = not playtest_mode
 		ents_root.add_child(holder)
-		_ent_bounds[idx] = [pos - Vector3(0.35, 0.35, 0.35), pos + Vector3(0.35, 0.35, 0.35)]
+		_ent_bounds[idx] = [pos - Vector3(0.45, 0.45, 0.45), pos + Vector3(0.45, 1.15, 0.45)]
 		return
 
-	# 5. Path Track node (yellow rail beacon)
+	# 5. Path Track node (yellow rail beacon + billboard icon)
 	if cls == "path_track":
 		var node_m := MeshInstance3D.new()
 		var sm := SphereMesh.new()
@@ -394,26 +419,118 @@ func _spawn_entity_node(idx: int, e: Dictionary, pos: Vector3) -> void:
 		mat.albedo_color = Color(0.98, 0.78, 0.18)
 		node_m.material_override = mat
 		holder.add_child(node_m)
+		_attach_entity_billboard_icon(holder, cls, kv, Vector3(0, 0.75, 0))
+		_editor_only_nodes.append(node_m)
+		node_m.visible = not playtest_mode
 		ents_root.add_child(holder)
-		_ent_bounds[idx] = [pos - Vector3(0.4, 0.4, 0.4), pos + Vector3(0.4, 0.4, 0.4)]
+		_ent_bounds[idx] = [pos - Vector3(0.45, 0.45, 0.45), pos + Vector3(0.45, 1.15, 0.45)]
 		return
 
-	# 6. Generic Logic Entity icon badge (hidden by default unless toggled in VisGroups so sky stays clean!)
-	if cls != "light_environment" and show_logic_markers:
-		var box := MeshInstance3D.new()
-		var bm := BoxMesh.new()
-		bm.size = Vector3(0.32, 0.32, 0.32)
-		box.mesh = bm
-		box.rotation_degrees = Vector3(45, 45, 0)
-		var mat := StandardMaterial3D.new()
-		var base_c := Color(0.86, 0.56, 0.24, 0.55) if cls.begins_with("tf_logic") else Color(0.36, 0.68, 0.82, 0.50)
-		mat.albedo_color = base_c
-		mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-		mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-		box.material_override = mat
-		holder.add_child(box)
+	# 6. EVERY OTHER ENTITY gets a crisp, color-coded 3D Billboard Icon + Label so NO entity is ever invisible!
+	if show_logic_markers:
+		_attach_entity_billboard_icon(holder, cls, kv, Vector3(0, 0.78, 0))
 		ents_root.add_child(holder)
-		_ent_bounds[idx] = [pos - Vector3(0.28, 0.28, 0.28), pos + Vector3(0.28, 0.28, 0.28)]
+		_ent_bounds[idx] = [pos + Vector3(-0.55, 0.0, -0.55), pos + Vector3(0.55, 1.45, 0.55)]
+
+func _attach_entity_billboard_icon(holder: Node3D, cls: String, kv: Dictionary, offset: Vector3) -> void:
+	var ic: Dictionary = Tf2CatalogScript.get_entity_icon_spec(cls)
+	var kind: String = str(ic.get("key", "relay"))
+	var spr := Sprite3D.new()
+	spr.texture = _get_badge_texture(kind)
+	spr.billboard = BaseMaterial3D.BILLBOARD_ENABLED
+	spr.pixel_size = 0.0155
+	spr.position = offset
+	spr.visible = not playtest_mode
+	holder.add_child(spr)
+	_editor_only_nodes.append(spr)
+
+	var tname: String = str(kv.get("targetname", ""))
+	var pretty: String = cls.replace("info_", "").replace("env_", "").replace("logic_", "").replace("tf_", "").replace("trigger_", "").replace("_", " ").capitalize()
+	var lbl := Label3D.new()
+	lbl.text = "%s\n(%s)" % [pretty, tname] if not tname.is_empty() else pretty
+	lbl.billboard = BaseMaterial3D.BILLBOARD_ENABLED
+	lbl.font_size = 24
+	lbl.outline_size = 6
+	lbl.pixel_size = 0.0055
+	lbl.modulate = Color(0.96, 0.92, 0.85, 0.95)
+	lbl.position = offset + Vector3(0, -0.62, 0)
+	lbl.visible = not playtest_mode
+	holder.add_child(lbl)
+	_editor_only_nodes.append(lbl)
+
+func _get_badge_texture(kind: String) -> ImageTexture:
+	if _badge_tex_cache.has(kind):
+		return _badge_tex_cache[kind]
+	var sz := 64
+	var img := Image.create(sz, sz, false, Image.FORMAT_RGBA8)
+	img.fill(Color(0, 0, 0, 0))
+	var bg := Color(0.22, 0.14, 0.29, 0.96)
+	var bd := Color(0.76, 0.48, 0.94, 1.0)
+	var fg := Color(0.98, 0.95, 0.88, 1.0)
+	match kind:
+		"door":       bg = Color(0.14, 0.24, 0.32, 0.96); bd = Color(0.24, 0.88, 0.98, 1.0)
+		"trigger":    bg = Color(0.30, 0.22, 0.08, 0.96); bd = Color(0.98, 0.82, 0.28, 1.0)
+		"hurt":       bg = Color(0.36, 0.10, 0.10, 0.96); bd = Color(0.96, 0.28, 0.26, 1.0)
+		"jump_pad":   bg = Color(0.10, 0.28, 0.16, 0.96); bd = Color(0.30, 0.88, 0.46, 1.0)
+		"teleporter": bg = Color(0.12, 0.20, 0.34, 0.96); bd = Color(0.24, 0.86, 0.98, 1.0)
+		"light":      bg = Color(0.32, 0.25, 0.08, 0.96); bd = Color(0.98, 0.86, 0.34, 1.0)
+		"sun":        bg = Color(0.34, 0.22, 0.08, 0.96); bd = Color(0.98, 0.68, 0.24, 1.0)
+		"sound":      bg = Color(0.10, 0.26, 0.30, 0.96); bd = Color(0.28, 0.88, 0.96, 1.0)
+		"particle":   bg = Color(0.32, 0.15, 0.08, 0.96); bd = Color(0.98, 0.62, 0.24, 1.0)
+		"clip":       bg = Color(0.28, 0.14, 0.26, 0.96); bd = Color(0.92, 0.46, 0.80, 1.0)
+		"win":        bg = Color(0.12, 0.28, 0.14, 0.96); bd = Color(0.34, 0.88, 0.44, 1.0)
+		"camera":     bg = Color(0.14, 0.22, 0.32, 0.96); bd = Color(0.36, 0.68, 0.96, 1.0)
+		"ai":         bg = Color(0.28, 0.14, 0.26, 0.96); bd = Color(0.92, 0.50, 0.84, 1.0)
+		"cap_point":  bg = Color(0.30, 0.20, 0.10, 0.96); bd = Color(0.96, 0.64, 0.24, 1.0)
+		"path_node":  bg = Color(0.30, 0.24, 0.08, 0.96); bd = Color(0.98, 0.80, 0.20, 1.0)
+
+	# Rounded square badge with crisp 3px colored frame
+	for y in range(4, sz - 4):
+		for x in range(4, sz - 4):
+			var dx := maxf(0.0, maxf(12.0 - float(x), float(x) - float(sz - 13)))
+			var dy := maxf(0.0, maxf(12.0 - float(y), float(y) - float(sz - 13)))
+			var d := Vector2(dx, dy).length()
+			if d <= 8.0:
+				img.set_pixel(x, y, bd if d >= 5.0 else bg)
+
+	# Crisp centered geometric glyph per entity category!
+	var cx := 32.0; var cy := 32.0
+	for y in range(14, 50):
+		for x in range(14, 50):
+			var px := float(x) - cx; var py := float(y) - cy
+			var r := Vector2(px, py).length()
+			var draw_fg := false
+			match kind:
+				"light", "sun":
+					draw_fg = (r <= 9.0) or (kind == "sun" and r >= 12.0 and r <= 16.0 and (absf(px) < 2.0 or absf(py) < 2.0 or absf(absf(px) - absf(py)) < 2.2))
+				"door":
+					draw_fg = (absf(px) <= 1.8 and absf(py) <= 15.0) or (px < -4.0 and absf(py) <= (-px - 4.0) * 0.7 and px > -14.0) or (px > 4.0 and absf(py) <= (px - 4.0) * 0.7 and px < 14.0)
+				"trigger":
+					draw_fg = (r <= 6.5) or (absf(absf(px) - absf(py)) <= 2.2 and r <= 15.0)
+				"hurt":
+					draw_fg = (Vector2(px, py + 3.0).length() <= 10.5 and not (Vector2(absf(px) - 4.0, py + 3.0).length() <= 2.4)) or (absf(px) <= 5.5 and py >= 6.0 and py <= 13.0)
+				"jump_pad":
+					draw_fg = (absf(px) <= 4.0 and py >= -2.0 and py <= 14.0) or (py <= 0.0 and py >= -14.0 and absf(px) <= (py + 14.0) * 0.9)
+				"teleporter":
+					draw_fg = (r >= 10.0 and r <= 13.5) or (r >= 5.0 and r <= 7.5 and py > -4.0) or (r <= 2.5)
+				"timer":
+					draw_fg = (r >= 11.0 and r <= 14.0) or (absf(px) <= 1.8 and py <= 1.0 and py >= -9.0) or (absf(py) <= 1.8 and px >= 0.0 and px <= 8.0)
+				"sound":
+					draw_fg = (px >= -13.0 and px <= -4.0 and absf(py) <= 5.0) or (px > -4.0 and px <= 3.0 and absf(py) <= 5.0 + (px + 4.0) * 1.1) or (px > 5.0 and r >= 8.0 and r <= 11.0 and absf(py) < px * 0.9)
+				"clip":
+					draw_fg = (absf(px) >= 11.0 and absf(px) <= 14.0 and absf(py) <= 14.0) or (absf(py) >= 11.0 and absf(py) <= 14.0 and absf(px) <= 14.0) or (absf(px - py) <= 2.0 and absf(px) <= 13.0)
+				"win":
+					draw_fg = (px >= -10.0 and px <= -6.5 and absf(py) <= 14.0) or (px >= -6.5 and px <= 12.0 and py >= -13.0 and py <= 2.0 and (py + 5.5) * 0.0 + absf(py + 5.5) <= (12.0 - px) * 0.45)
+				"ai", "cap_point":
+					draw_fg = (r >= 9.0 and r <= 12.0) or (r <= 3.5) or (absf(px) <= 1.5 and r <= 15.0) or (absf(py) <= 1.5 and r <= 15.0)
+				_: # relay / counter / particle / camera diamond+bolt
+					draw_fg = (absf(px + py * 0.45) <= 3.5 and py <= 1.0 and py >= -14.0) or (absf(px + py * 0.45 - 2.0) <= 3.5 and py >= -1.0 and py <= 14.0)
+			if draw_fg:
+				img.set_pixel(x, y, fg if kind not in ["light", "sun", "trigger"] else bd)
+
+	var tex := ImageTexture.create_from_image(img)
+	_badge_tex_cache[kind] = tex
+	return tex
 
 func _rebuild_wires_and_tracks(ents: Array, target_pos: Dictionary) -> void:
 	# 1. Payload / Tank 3D Spline Track Lines

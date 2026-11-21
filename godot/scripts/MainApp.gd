@@ -1,6 +1,6 @@
-extends Node3D
+﻿extends Node3D
 
-## Pootis Builder 2.0 — Complete Valve-Grade TF2 Map Creator (Godot 4 Forward+ + Native C++20 GDExtension)
+## Pootis Builder 2.0 â€” Complete Valve-Grade TF2 Map Creator (Godot 4 Forward+ + Native C++20 GDExtension)
 ## Unites ALL 5 Overhaul Phases:
 ##   1. Responsive HiDPI-Aware Floating TF2 HUD + Extensive 7-Tab Settings Menu (AppSettings + SettingsModal)
 ##   2. Real 3D TF2 VPK Game-Asset Icons (Tf2IconCache) + True Drag-and-Drop onto 3D Viewport
@@ -140,6 +140,9 @@ var _ent_search_text: String = ""
 var _insp_tab: int = 0
 var _prop_preview_mesh: MeshInstance3D = null
 var _gizmo_root: Node3D = null
+var _history_entries: Array[Dictionary] = []
+var _history_idx: int = 0
+var _history_drawer_open: bool = false
 var _autosave_accum: float = 0.0
 
 # Orbit / Fly camera state
@@ -185,6 +188,9 @@ var toast_panel: PanelContainer
 var status_toast: Label
 var _toast_ttl: float = 0.0
 var map_title_lbl: Label
+var undo_btn: Button
+var redo_btn: Button
+var history_btn: Button
 var grid_btn: Button
 var sym_btn: Button
 var coach_btn: Button
@@ -386,7 +392,7 @@ func _create_editor_helpers() -> void:
 	_gizmo_root.add_child(gdot)
 
 # ==============================================================================
-# UI CONSTRUCTION (Expanded Current Floating TF2 HUD — 100% Responsive!)
+# UI CONSTRUCTION (Expanded Current Floating TF2 HUD â€” 100% Responsive!)
 # ==============================================================================
 func _init_ui() -> void:
 	hud_layer = CanvasLayer.new()
@@ -552,11 +558,11 @@ func _refresh_context_bar() -> void:
 		add_tag.call("TERRAIN STUDIO")
 		add_chip.call("Radius %du" % int(round(terrain_radius_m * UPM)), false, func(): terrain_radius_m = clampf(terrain_radius_m + 1.0, 1.5, 12.0) if terrain_radius_m < 10.0 else 2.5; _refresh_context_bar())
 		add_chip.call("Push Out (Cliffs)" if terrain_axis_mode == 0 else "Up & Down (Ground)", true, func(): terrain_axis_mode = 1 if terrain_axis_mode == 0 else 0; _refresh_context_bar(); if right_drawer.visible: _open_terrain_studio())
-		add_chip.call("Auto-Sew Seams", false, func(): var n: int = doc.sew_displacements(); doc.record_undo("Sew"); map_sync.sync_all(); _toast("Auto-Sewed %d vertices!" % n))
+		add_chip.call("Auto-Sew Seams", false, func(): var n: int = doc.sew_displacements(); _record_history("Sew"); map_sync.sync_all(); _toast("Auto-Sewed %d vertices!" % n))
 	elif active_tool == "place_prop":
 		context_bar.visible = true
 		add_tag.call("PROP: " + active_prop_mdl.get_file().get_basename().to_upper())
-		add_chip.call("Yaw %d° (R)" % int(prop_yaw_deg), false, func(): prop_yaw_deg = fmod(prop_yaw_deg + 90.0, 360.0); _refresh_context_bar())
+		add_chip.call("Yaw %dÂ° (R)" % int(prop_yaw_deg), false, func(): prop_yaw_deg = fmod(prop_yaw_deg + 90.0, 360.0); _refresh_context_bar())
 		var sk_names := ["Neutral", "RED", "BLU"]
 		add_chip.call("Skin: " + sk_names[clampi(prop_skin, 0, 2)], prop_skin > 0, func(): prop_skin = (prop_skin + 1) % 3; _refresh_context_bar())
 		add_chip.call("Prop Boxes...", false, func(): _open_props_drawer())
@@ -713,7 +719,7 @@ func _refresh_selection_bar() -> void:
 		selection_hbox.add_child(tag)
 		_add_sel_btn("+Pull", func(): _push_selected_top(grid_m))
 		_add_sel_btn("-Push", func(): _push_selected_top(-grid_m))
-		_add_sel_btn("Rot 90°", _rotate_selection)
+		_add_sel_btn("Rot 90Â°", _rotate_selection)
 		_add_sel_btn("Clip", _open_clip_drawer)
 		_add_sel_btn("Verts", func(): _select_tool("vertex"))
 		_add_sel_btn("Hollow", _do_hollow_selected)
@@ -728,7 +734,7 @@ func _refresh_selection_bar() -> void:
 			cls = str(ents[selected_entity]["classname"])
 		tag.text = "ENT #%d: %s" % [selected_entity, cls]
 		selection_hbox.add_child(tag)
-		_add_sel_btn("Rot 90° (R)", _rotate_selection)
+		_add_sel_btn("Rot 90Â° (R)", _rotate_selection)
 		_add_sel_btn("Clone (Ctrl+D)", _duplicate_selection)
 		_add_sel_btn("SmartEdit (Alt+Enter)", _open_inspector_drawer)
 		_add_sel_btn("Delete (Del)", _delete_selection, 2)
@@ -781,16 +787,26 @@ func _build_top_bar() -> void:
 	lhb.add_child(hub_b)
 
 	edit_only_top_nodes.clear()
-	for spec in [
-		{"t": "Save", "fn": _save_current_vmf},
-		{"t": "Undo", "fn": _do_undo},
-		{"t": "Redo", "fn": _do_redo},
-	]:
-		var b := Button.new(); b.text = spec["t"]
-		HudWidgets.style_tf2_button(b, fonts["body"], 11)
-		b.pressed.connect(func(): audio.play("click"); spec["fn"].call())
-		lhb.add_child(b)
-		edit_only_top_nodes.append(b)
+	var save_b := Button.new(); save_b.text = "Save"
+	HudWidgets.style_tf2_button(save_b, fonts["body"], 11)
+	save_b.pressed.connect(func(): _save_current_vmf())
+	lhb.add_child(save_b); edit_only_top_nodes.append(save_b)
+
+	undo_btn = Button.new(); undo_btn.text = "Undo"
+	HudWidgets.style_tf2_button(undo_btn, fonts["body"], 11)
+	undo_btn.pressed.connect(func(): _do_undo())
+	lhb.add_child(undo_btn); edit_only_top_nodes.append(undo_btn)
+
+	redo_btn = Button.new(); redo_btn.text = "Redo"
+	HudWidgets.style_tf2_button(redo_btn, fonts["body"], 11)
+	redo_btn.pressed.connect(func(): _do_redo())
+	lhb.add_child(redo_btn); edit_only_top_nodes.append(redo_btn)
+
+	history_btn = Button.new(); history_btn.text = "History"
+	history_btn.tooltip_text = "Open Map Edit History Timeline (click any step to undo/redo!)"
+	HudWidgets.style_tf2_button(history_btn, fonts["body"], 11)
+	history_btn.pressed.connect(func(): audio.play("click"); _open_history_drawer())
+	lhb.add_child(history_btn); edit_only_top_nodes.append(history_btn)
 
 	var sp1 := Control.new(); sp1.size_flags_horizontal = Control.SIZE_EXPAND_FILL; sp1.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	bar_hb.add_child(sp1)
@@ -1074,7 +1090,7 @@ func _rebuild_bottom_dock() -> void:
 		var short_nm: String = str(box["name"]).get_slice(" &", 0)
 		var tb := Button.new()
 		tb.text = short_nm
-		tb.tooltip_text = "%s — %s" % [str(box["name"]), str(box["subtitle"])]
+		tb.tooltip_text = "%s â€” %s" % [str(box["name"]), str(box["subtitle"])]
 		_style_dock_tab(tb, box["color"], _dock_prop_cat == cid)
 		tb.pressed.connect(func():
 			audio.play("click")
@@ -1143,7 +1159,7 @@ func _rebuild_bottom_dock() -> void:
 
 	if pitems.is_empty():
 		var empty_l := Label.new()
-		empty_l.text = "No saved props yet — click '+' on any prop in Browse All to save favorites!"
+		empty_l.text = "No saved props yet â€” click '+' on any prop in Browse All to save favorites!"
 		empty_l.add_theme_font_override("font", fonts["body"]); empty_l.add_theme_font_size_override("font_size", 12)
 		empty_l.add_theme_color_override("font_color", HudWidgets.COL_TX_MUTED)
 		prow.add_child(empty_l)
@@ -1156,7 +1172,7 @@ func _rebuild_bottom_dock() -> void:
 			var is_sel: bool = (active_tool == "place_prop" and active_prop_mdl == mp)
 			var tex: Texture2D = icon_cache.get_icon(mp) if icon_cache != null else null
 			var card := HudWidgets.DockCardSlot.new(nm, cat_sub, tex, "", is_sel, plip, fonts["body"], {"kind": "prop", "mdl": mp, "name": nm})
-			card.tooltip_text = "%s\n(%s)\nDrag into 3D or Click to stamp  •  Press R to rotate" % [nm, mp]
+			card.tooltip_text = "%s\n(%s)\nDrag into 3D or Click to stamp  â€¢  Press R to rotate" % [nm, mp]
 			if not dock_slot_map.has(mp): dock_slot_map[mp] = []
 			(dock_slot_map[mp] as Array).append(card)
 			card.pressed.connect(func():
@@ -1305,7 +1321,7 @@ func _build_welcome_hub() -> void:
 	title_vb.add_child(title)
 
 	var sub := Label.new()
-	sub.text = "POOTIS BUILDER 2.0  —  All 12 TF2 Gamemodes, %d FGD Entities & %d Official Valve TF2 Maps" % [
+	sub.text = "POOTIS BUILDER 2.0  â€”  All 12 TF2 Gamemodes, %d FGD Entities & %d Official Valve TF2 Maps" % [
 		core.get_fgd_class_count(), core.list_maps().size()
 	]
 	sub.add_theme_font_override("font", fonts["body"]); sub.add_theme_font_size_override("font_size", 12)
@@ -1404,7 +1420,7 @@ func _build_welcome_hub() -> void:
 		g1.add_theme_font_override("font", fonts["heading"]); g1.add_theme_font_size_override("font_size", 12)
 		g1.add_theme_color_override("font_color", HudWidgets.COL_TX); g1.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		gtvb.add_child(g1)
-		var g2 := Label.new(); g2.text = "%s  •  Starter Arena" % str(gm["short"])
+		var g2 := Label.new(); g2.text = "%s  â€¢  Starter Arena" % str(gm["short"])
 		g2.add_theme_font_override("font", fonts["body"]); g2.add_theme_font_size_override("font_size", 10)
 		g2.add_theme_color_override("font_color", HudWidgets.COL_TX_MUTED); g2.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		gtvb.add_child(g2)
@@ -1488,7 +1504,7 @@ func _build_welcome_hub() -> void:
 	rec.add_theme_color_override("font_color", HudWidgets.COL_TX_MUTED)
 	foot.add_child(rec)
 	var vpk_badge := Label.new()
-	vpk_badge.text = "  TF2 VPKs Mounted  •  16,697 Models  •  VAC-Safe  "
+	vpk_badge.text = "  TF2 VPKs Mounted  â€¢  16,697 Models  â€¢  VAC-Safe  "
 	vpk_badge.add_theme_font_override("font", fonts["heading"]); vpk_badge.add_theme_font_size_override("font_size", 11)
 	vpk_badge.add_theme_color_override("font_color", HudWidgets.COL_GREEN)
 	foot.add_child(vpk_badge)
@@ -1526,14 +1542,14 @@ func on_viewport_drop(screen_pos: Vector2, data: Dictionary) -> void:
 		if symmetry != SymmetryMode.OFF:
 			var mpos := Vector3(-pos.x, pos.y, -pos.z if symmetry == SymmetryMode.ROT_180 else pos.z)
 			Tf2GamemodesScript.stamp_preset(doc, preset, mpos, 3 if team == 2 else 2)
-		doc.record_undo("Drop " + pid)
+		_record_history("Drop " + pid)
 		ent_vis.sync_all()
 		audio.play("place")
 		_toast("Dropped %s cleanly onto map at (%du, %du, %du)!" % [pid, int(pos.x * UPM), int(-pos.z * UPM), int(pos.y * UPM)])
 	elif kind == "fgd_entity":
 		var cls: String = str(data.get("cls", active_fgd_entity))
 		var eid: int = doc.add_point_entity(cls, pos, {"angles": "0 0 0"})
-		doc.record_undo("Drop " + cls)
+		_record_history("Drop " + cls)
 		ent_vis.sync_all()
 		if eid >= 0: _select_entity(eid)
 		audio.play("place")
@@ -1545,7 +1561,7 @@ func on_viewport_drop(screen_pos: Vector2, data: Dictionary) -> void:
 		if absf(prop_scale - 1.0) > 0.01:
 			kv["modelscale"] = "%.2f" % prop_scale
 		var eid: int = doc.add_point_entity("prop_static", pos, kv)
-		doc.record_undo("Drop Prop")
+		_record_history("Drop Prop")
 		ent_vis.sync_all()
 		if eid >= 0: _select_entity(eid)
 		audio.play("place")
@@ -1729,6 +1745,7 @@ func _select_tool(sid: String) -> void:
 
 func _clear_drawer(title: String) -> void:
 	_prop_preview_mesh = null
+	_history_drawer_open = (title == "MAP HISTORY TIMELINE")
 	if split_2d_panel.visible:
 		split_2d_panel.visible = false
 		settings.show_2d_split = false
@@ -1803,7 +1820,7 @@ func _open_clip_drawer() -> void:
 	for spec in [
 		{"t": "Slice Along X-Axis (North-South)", "n": Vector3(1, 0, 0), "acc": true},
 		{"t": "Slice Along Z-Axis (East-West)",   "n": Vector3(0, 0, 1), "acc": false},
-		{"t": "Slice 45° Diagonal Corner",        "n": Vector3(1, 0, 1).normalized(), "acc": false},
+		{"t": "Slice 45Â° Diagonal Corner",        "n": Vector3(1, 0, 1).normalized(), "acc": false},
 	]:
 		var b := Button.new(); b.text = spec["t"]
 		HudWidgets.style_tf2_button(b, fonts["heading"], 11, bool(spec["acc"]))
@@ -1831,7 +1848,7 @@ func _open_tie_entity_drawer() -> void:
 		b.pressed.connect(func():
 			var eidx: int = doc.tie_solid_to_entity(selected_solid, cs, kv_d)
 			if eidx >= 0:
-				doc.record_undo("Tie to " + cs); map_sync.sync_all(); ent_vis.sync_all()
+				_record_history("Tie to " + cs); map_sync.sync_all(); ent_vis.sync_all()
 				_select_entity(eidx); audio.play("carve")
 				_toast("Tied solid to %s (#%d)!" % [cs, eidx]); _open_inspector_drawer()
 		)
@@ -1930,14 +1947,14 @@ func _open_compile_drawer() -> void:
 # SOLID / ENTITY EDIT HELPERS
 # ==============================================================================
 func _commit_solid_edit(label: String) -> void:
-	doc.record_undo(label); map_sync.sync_all(); _refresh_selection_bar(); _refresh_2d_views(); audio.play("place")
+	_record_history(label); map_sync.sync_all(); _refresh_selection_bar(); _refresh_2d_views(); audio.play("place")
 
 func _untie_selected_entity() -> void:
 	if selected_entity < 0:
 		return
 	var ids: PackedInt32Array = doc.untie_brush_entity(selected_entity)
 	if not ids.is_empty():
-		doc.record_undo("Move to World")
+		_record_history("Move to World")
 		map_sync.sync_all(); ent_vis.sync_all()
 		_select_solid(ids[0], -1)
 		audio.play("place")
@@ -1953,19 +1970,19 @@ func _do_hollow_selected() -> void:
 		return
 	var ids: PackedInt32Array = doc.make_hollow(selected_solid, -0.5)
 	if not ids.is_empty():
-		doc.record_undo("Make Hollow"); _clear_selection(); map_sync.sync_all(); audio.play("carve")
+		_record_history("Make Hollow"); _clear_selection(); map_sync.sync_all(); audio.play("carve")
 		_toast("Hollowed solid into %d walls (-16u outward shell)!" % ids.size())
 
 func _do_quickhide_selected() -> void:
 	if selected_solid >= 0:
 		doc.set_solid_hidden(selected_solid, true)
-		doc.record_undo("QuickHide Solid")
+		_record_history("QuickHide Solid")
 		_clear_selection(); map_sync.sync_all()
 		_toast("QuickHid solid (press U to Unhide All or Ctrl+Z)")
 
 func _do_unhide_all() -> void:
 	var n: int = doc.unhide_all()
-	if n > 0: doc.record_undo("Unhide All")
+	if n > 0: _record_history("Unhide All")
 	map_sync.sync_all(); ent_vis.sync_all()
 	_toast("Restored %d hidden object(s)!" % n)
 
@@ -1976,7 +1993,7 @@ func _do_clip_selected(normal: Vector3) -> void:
 	var mid: Vector3 = (info["bounds_min"] + info["bounds_max"]) * 0.5
 	var res: int = doc.clip_solid(selected_solid, mid, normal, _clip_keep_mode)
 	if res >= 0:
-		doc.record_undo("Clip Solid"); map_sync.sync_all(); _select_solid(res, -1); audio.play("carve")
+		_record_history("Clip Solid"); map_sync.sync_all(); _select_solid(res, -1); audio.play("carve")
 		_toast("Clipped solid cleanly!")
 
 func _rotate_selection() -> void:
@@ -1991,26 +2008,26 @@ func _rotate_selection() -> void:
 			var y := fposmod((float(parts[1]) if parts.size() > 1 else 0.0) + float(settings.rotate_step_deg), 360.0)
 			var r := float(parts[2]) if parts.size() > 2 else 0.0
 			doc.set_entity_kv(selected_entity, "angles", "%.0f %.0f %.0f" % [p, y, r])
-			doc.record_undo("Rotate Entity"); ent_vis.sync_all(); audio.play("click")
+			_record_history("Rotate Entity"); ent_vis.sync_all(); audio.play("click")
 
 func _duplicate_selection() -> void:
 	if selected_solid >= 0:
 		var nid: int = doc.duplicate_solid(selected_solid, Vector3(grid_m, 0, 0))
-		if nid >= 0: doc.record_undo("Duplicate Solid"); map_sync.sync_all(); _select_solid(nid, -1); audio.play("place")
+		if nid >= 0: _record_history("Duplicate Solid"); map_sync.sync_all(); _select_solid(nid, -1); audio.play("place")
 	elif selected_entity >= 0:
 		var nid: int = doc.duplicate_entity(selected_entity, Vector3(grid_m, 0, 0))
-		if nid >= 0: doc.record_undo("Duplicate Entity"); ent_vis.sync_all(); _select_entity(nid); audio.play("place")
+		if nid >= 0: _record_history("Duplicate Entity"); ent_vis.sync_all(); _select_entity(nid); audio.play("place")
 
 func _delete_selection() -> void:
 	if selected_solid >= 0:
 		var idx := selected_solid
 		if doc.delete_solid(idx):
-			doc.record_undo("Delete Solid"); _clear_selection(); map_sync.sync_all(); audio.play("carve")
+			_record_history("Delete Solid"); _clear_selection(); map_sync.sync_all(); audio.play("delete")
 			_toast("Deleted Solid #%d (Ctrl+Z to Undo)" % idx)
 	elif selected_entity >= 0:
 		var idx := selected_entity
 		if doc.delete_entity(idx):
-			doc.record_undo("Delete Entity"); _clear_selection(); ent_vis.sync_all(); audio.play("carve")
+			_record_history("Delete Entity"); _clear_selection(); ent_vis.sync_all(); audio.play("delete")
 			_toast("Deleted Entity #%d (Ctrl+Z to Undo)" % idx)
 
 func _nudge_selection(delta: Vector3) -> void:
@@ -2021,7 +2038,7 @@ func _nudge_selection(delta: Vector3) -> void:
 		var ents: Array = doc.get_entities()
 		if selected_entity < ents.size():
 			doc.set_entity_pos(selected_entity, ents[selected_entity]["pos"] + delta)
-			doc.record_undo("Nudge Entity"); ent_vis.sync_all()
+			_record_history("Nudge Entity"); ent_vis.sync_all()
 
 # ==============================================================================
 # MAP LOADING, SAVING, COMPILING & PLAYTEST
@@ -2034,8 +2051,9 @@ func _load_gamemode(mode_id: String, biome_override: String = "", show_toast: bo
 	grid_floor.visible = settings.show_grid_floor
 	map_sync.clear_all(); map_sync.sync_all(); ent_vis.sync_all()
 	map_title_lbl.text = "| " + str(meta["map_name"])
+	_reset_history("New %s Map" % mode_id.to_upper())
 	_sync_mode_visibility(); _rebuild_bottom_dock(); _refresh_2d_views()
-	if show_toast: _toast("Created %s starter map — sealed & ready to edit or F5 playtest!" % mode_id.to_upper())
+	if show_toast: _toast("Created %s starter map â€” sealed & ready to edit or F5 playtest!" % mode_id.to_upper())
 
 func _load_official_bsp(map_name: String) -> void:
 	_clear_official_bsp(); _clear_selection()
@@ -2059,7 +2077,7 @@ func _load_official_bsp(map_name: String) -> void:
 	cam_pos = current_bsp_spawn + Vector3(12, 10, 12)
 	_apply_editor_cam()
 	_sync_mode_visibility(); _rebuild_bottom_dock(); _refresh_selection_bar(); overlay_2d.queue_redraw()
-	_toast("Loaded %s (%d props, %d sliding doors, %.2fs) — press F5 to walk inside!" % [
+	_toast("Loaded %s (%d props, %d sliding doors, %.2fs) â€” press F5 to walk inside!" % [
 		map_name, int(res.get("prop_count", 0)), int(res.get("door_count", 0)), float(res.get("load_ms", 0.0)) / 1000.0
 	])
 
@@ -2073,7 +2091,7 @@ func _apply_biome(bkey: String) -> void:
 	var b: Dictionary = Tf2GamemodesScript.get_biome(bkey)
 	active_sky = b["sky"]; doc.set_skyname(active_sky)
 	doc.apply_theme_materials(b["floor"], b["wall"], b["roof"])
-	doc.record_undo("Apply " + b["name"]); _apply_environment_from_biome(bkey); map_sync.sync_all()
+	_record_history("Apply " + b["name"]); _apply_environment_from_biome(bkey); map_sync.sync_all()
 	_toast("Applied %s biome & %s skybox!" % [b["name"], active_sky])
 
 func _apply_environment_from_biome(bkey: String) -> void:
@@ -2088,18 +2106,103 @@ func _save_current_vmf() -> String:
 	var r: Dictionary = doc.save_vmf(path)
 	if r.get("ok", false):
 		doc.clear_dirty()
+		audio.play("save")
 		_toast("Saved " + path.get_file())
 		return path
+	audio.play("warn")
 	_toast("Save failed: " + str(r.get("error", ""))); return ""
 
+func _time_stamp_str() -> String:
+	var dt := Time.get_time_dict_from_system()
+	return "%02d:%02d:%02d" % [int(dt["hour"]), int(dt["minute"]), int(dt["second"])]
+
+func _reset_history(initial_label: String = "Initial Map") -> void:
+	_history_entries.clear()
+	_history_entries.append({"label": initial_label, "time": _time_stamp_str()})
+	_history_idx = 0
+	_update_history_buttons()
+	if _history_drawer_open and right_drawer.visible:
+		_open_history_drawer()
+
+func _record_history(label: String) -> void:
+	doc.record_undo(label)
+	if _history_idx < _history_entries.size() - 1:
+		_history_entries.resize(_history_idx + 1)
+	_history_entries.append({"label": label, "time": _time_stamp_str()})
+	if _history_entries.size() > 64:
+		_history_entries.pop_front()
+	_history_idx = _history_entries.size() - 1
+	_update_history_buttons()
+	if _history_drawer_open and right_drawer.visible:
+		_open_history_drawer()
+
+func _update_history_buttons() -> void:
+	if undo_btn != null:
+		var can_u := (_history_idx > 0)
+		undo_btn.disabled = not can_u
+		undo_btn.tooltip_text = "Undo: %s (Ctrl+Z)" % str(_history_entries[_history_idx]["label"]) if can_u else "Nothing to Undo"
+	if redo_btn != null:
+		var can_r := (_history_idx < _history_entries.size() - 1)
+		redo_btn.disabled = not can_r
+		redo_btn.tooltip_text = "Redo: %s (Ctrl+Y)" % str(_history_entries[_history_idx + 1]["label"]) if can_r else "Nothing to Redo"
+	if history_btn != null:
+		history_btn.text = "History (%d)" % maxi(1, _history_entries.size())
+
+func _open_history_drawer() -> void:
+	_clear_drawer("MAP HISTORY TIMELINE")
+	EditorDrawersScript.build_history_drawer(self, right_drawer_vbox)
+
+func _jump_to_history(target_idx: int) -> void:
+	target_idx = clampi(target_idx, 0, _history_entries.size() - 1)
+	if target_idx == _history_idx:
+		return
+	var moved := false
+	var going_back := (target_idx < _history_idx)
+	while _history_idx > target_idx:
+		if not doc.undo(): break
+		_history_idx -= 1; moved = true
+	while _history_idx < target_idx:
+		if not doc.redo(): break
+		_history_idx += 1; moved = true
+	if moved:
+		_clear_selection(); map_sync.sync_all(); ent_vis.sync_all()
+		_update_history_buttons()
+		audio.play("undo" if going_back else "redo")
+		_toast("Jumped to History #%d: %s" % [_history_idx, str(_history_entries[_history_idx]["label"])])
+		if _history_drawer_open and right_drawer.visible:
+			_open_history_drawer()
+
 func _do_undo() -> void:
-	if doc.undo(): _clear_selection(); map_sync.sync_all(); ent_vis.sync_all(); _toast("Undo")
+	if doc.undo():
+		var undone_lbl: String = str(_history_entries[_history_idx]["label"]) if _history_idx < _history_entries.size() else "Last Edit"
+		_history_idx = maxi(0, _history_idx - 1)
+		_clear_selection(); map_sync.sync_all(); ent_vis.sync_all()
+		_update_history_buttons()
+		audio.play("undo")
+		_toast("Undid: %s (Ctrl+Y to Redo)" % undone_lbl)
+		if _history_drawer_open and right_drawer.visible:
+			_open_history_drawer()
+	else:
+		audio.play("warn")
+		_toast("Nothing to Undo")
 
 func _do_redo() -> void:
-	if doc.redo(): _clear_selection(); map_sync.sync_all(); ent_vis.sync_all(); _toast("Redo")
+	if doc.redo():
+		_history_idx = mini(_history_entries.size() - 1, _history_idx + 1)
+		var redone_lbl: String = str(_history_entries[_history_idx]["label"]) if _history_idx < _history_entries.size() else "Edit"
+		_clear_selection(); map_sync.sync_all(); ent_vis.sync_all()
+		_update_history_buttons()
+		audio.play("redo")
+		_toast("Redid: %s" % redone_lbl)
+		if _history_drawer_open and right_drawer.visible:
+			_open_history_drawer()
+	else:
+		audio.play("warn")
+		_toast("Nothing to Redo")
 
 func _do_auto_seal() -> void:
-	doc.auto_seal_skybox(); doc.record_undo("Auto-Seal Skybox"); compile_ctrl.clear_leak_laser(); map_sync.sync_all()
+	doc.auto_seal_skybox(); _record_history("Auto-Seal Skybox"); compile_ctrl.clear_leak_laser(); map_sync.sync_all()
+	audio.play("save")
 	_toast("Map sealed cleanly with invisible TOOLSSKYBOX shell!")
 
 func _run_compile(fast: bool, vvis: bool, vrad: bool, launch_tf2: bool) -> void:
@@ -2115,11 +2218,13 @@ func _on_compile_status(st: Dictionary) -> void:
 
 func _on_compile_finished(st: Dictionary) -> void:
 	if not str(st.get("leak_file", "")).is_empty():
-		_toast("LEAK DETECTED! Red 3D Leak Laser drawn — open Check (Alt+P) to seal!")
+		audio.play("warn")
+		_toast("LEAK DETECTED! Red 3D Leak Laser drawn â€” open Check (Alt+P) to seal!")
 	elif st.get("succeeded", false):
-		audio.play("success", -8.0)
-		_toast("Compile SUCCEEDED (%.1fs) — 0 leaks!" % float(st.get("elapsed", 0.0)))
+		audio.play("success")
+		_toast("Compile SUCCEEDED (%.1fs) â€” 0 leaks!" % float(st.get("elapsed", 0.0)))
 	else:
+		audio.play("warn")
 		_toast("Compile failed in stage: " + str(st.get("stage", "")))
 
 func _open_file_dialog(kind: String) -> void:
@@ -2157,7 +2262,7 @@ func _import_3d_model_file(path: String) -> void:
 func _cycle_symmetry() -> void:
 	symmetry = (symmetry + 1) % 3
 	sym_plane.visible = (symmetry != SymmetryMode.OFF) and not viewing_bsp
-	var names := ["Sym: Off", "Sym: Mirror", "Sym: 180°"]
+	var names := ["Sym: Off", "Sym: Mirror", "Sym: 180Â°"]
 	sym_btn.text = names[symmetry]; _toast("Symmetry Mode: " + names[symmetry])
 
 func _toggle_2d_view() -> void:
@@ -2183,6 +2288,7 @@ func _enter_playtest() -> void:
 				yaw = rad_to_deg(atan2(-to_mid.x, -to_mid.y))
 				break
 	door_ctrl.reset_all_closed()
+	ent_vis.set_playtest_mode(true)
 	editor_cam.current = false
 	player.spawn_at(sp, yaw, ents)
 	player.set_tf2_class(settings.default_playtest_class)
@@ -2194,6 +2300,7 @@ func _enter_playtest() -> void:
 
 func _exit_playtest() -> void:
 	player.set_active(false); editor_cam.current = true; playtest_hud.visible = false
+	ent_vis.set_playtest_mode(false)
 	door_ctrl.reset_all_closed()
 	sym_plane.visible = (symmetry != SymmetryMode.OFF) and not viewing_bsp
 	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
@@ -2216,17 +2323,17 @@ func _input(event: InputEvent) -> void:
 				_mmb_panning = false
 			elif mb.button_index == MOUSE_BUTTON_LEFT:
 				if _dragging_vertex:
-					_dragging_vertex = false; doc.record_undo("Move Vertex"); _refresh_selection_bar()
+					_dragging_vertex = false; _record_history("Move Vertex"); _refresh_selection_bar()
 				if _dragging_face:
-					_dragging_face = false; doc.record_undo("Push/Pull Face"); _refresh_selection_bar()
+					_dragging_face = false; _record_history("Push/Pull Face"); _refresh_selection_bar()
 				if _dragging_move:
-					_dragging_move = false; doc.record_undo("Move Selection"); _refresh_selection_bar()
+					_dragging_move = false; _record_history("Move Selection"); _refresh_selection_bar()
 				if _drawing_box:
 					_finish_drag_box()
 				if _terrain_sculpting:
 					_terrain_sculpting = false
 					if _terrain_changed:
-						map_sync.sync_all(); doc.record_undo("Sculpt Terrain"); _terrain_changed = false
+						map_sync.sync_all(); _record_history("Sculpt Terrain"); _terrain_changed = false
 	elif event is InputEventKey and event.pressed and event.keycode == KEY_ESCAPE:
 		if _is_typing_in_ui():
 			get_viewport().gui_release_focus()
@@ -2373,7 +2480,7 @@ func _finish_drag_box() -> void:
 	if sid >= 0:
 		if symmetry != SymmetryMode.OFF:
 			doc.mirror_solid_x(sid, symmetry == SymmetryMode.ROT_180)
-		doc.record_undo("Draw Box"); map_sync.sync_all(); _select_solid(sid, -1); audio.play("place")
+		_record_history("Draw Box"); map_sync.sync_all(); _select_solid(sid, -1); audio.play("place")
 
 func _ray_plane_point(screen_pos: Vector2, plane_y: float) -> Vector3:
 	var ro := editor_cam.project_ray_origin(screen_pos)
@@ -2442,7 +2549,7 @@ func _pick_scene_object(ro: Vector3, rd: Vector3) -> Dictionary:
 
 func _handle_left_click(screen_pos: Vector2, shift_held: bool = false, alt_held: bool = false) -> void:
 	if viewing_bsp:
-		_toast("Viewing official %s — click 'Walk Inside (F5)' below!" % current_bsp_name); return
+		_toast("Viewing official %s â€” click 'Walk Inside (F5)' below!" % current_bsp_name); return
 	var ro := editor_cam.project_ray_origin(screen_pos); var rd := editor_cam.project_ray_normal(screen_pos)
 
 	if active_tool == "vertex":
@@ -2494,7 +2601,7 @@ func _handle_left_click(screen_pos: Vector2, shift_held: bool = false, alt_held:
 					active_material = pm; audio.play("click"); _toast("Eyedropper picked: " + active_material)
 			elif active_tool == "paint":
 				doc.set_face_material(sidx, fidx, active_material)
-				doc.record_undo("Paint Face"); map_sync.sync_solid(sidx); audio.play("place")
+				_record_history("Paint Face"); map_sync.sync_solid(sidx); audio.play("place")
 			else:
 				audio.play("click")
 			if right_drawer.visible: _open_materials_drawer()
@@ -2506,14 +2613,14 @@ func _handle_left_click(screen_pos: Vector2, shift_held: bool = false, alt_held:
 	if active_tool == "wall" and hover_valid:
 		if not _wall_chain_active:
 			_wall_chain_active = true; _wall_chain_start = hover_pos
-			_toast("Wall Chain started — click next corner (RMB or Esc to finish)")
+			_toast("Wall Chain started â€” click next corner (RMB or Esc to finish)")
 		else:
 			var b: Dictionary = Tf2GamemodesScript.get_biome(active_biome)
 			var wmat: String = active_material if not active_material.is_empty() else str(b["wall"])
 			var wid: int = doc.add_wall_segment(_wall_chain_start, hover_pos, wall_height_m, wall_thick_m, wmat)
 			if wid >= 0:
 				if symmetry != SymmetryMode.OFF: doc.mirror_solid_x(wid, symmetry == SymmetryMode.ROT_180)
-				doc.record_undo("Draw Wall"); map_sync.sync_all(); _select_solid(wid, -1); audio.play("place")
+				_record_history("Draw Wall"); map_sync.sync_all(); _select_solid(wid, -1); audio.play("place")
 				_wall_chain_start = hover_pos
 		return
 
@@ -2524,7 +2631,7 @@ func _place_tool_at(pos: Vector3) -> void:
 	var b: Dictionary = Tf2GamemodesScript.get_biome(active_biome)
 	if active_tool == "place_fgd_entity":
 		var eid: int = doc.add_point_entity(active_fgd_entity, pos, {"angles": "0 0 0"})
-		doc.record_undo("Place " + active_fgd_entity); ent_vis.sync_all()
+		_record_history("Place " + active_fgd_entity); ent_vis.sync_all()
 		if eid >= 0: _select_entity(eid)
 		audio.play("place"); return
 	if active_tool == "place_prop":
@@ -2533,7 +2640,7 @@ func _place_tool_at(pos: Vector3) -> void:
 		if absf(prop_scale - 1.0) > 0.01:
 			kv["modelscale"] = "%.2f" % prop_scale
 		var eid: int = doc.add_point_entity("prop_static", pos, kv)
-		doc.record_undo("Place Prop"); ent_vis.sync_all()
+		_record_history("Place Prop"); ent_vis.sync_all()
 		if eid >= 0: _select_entity(eid)
 		audio.play("place"); return
 
@@ -2554,7 +2661,7 @@ func _place_tool_at(pos: Vector3) -> void:
 		if symmetry != SymmetryMode.OFF:
 			for sid in created_solids:
 				if sid >= 0: doc.mirror_solid_x(sid, symmetry == SymmetryMode.ROT_180)
-		doc.record_undo("Place " + active_tool); map_sync.sync_all()
+		_record_history("Place " + active_tool); map_sync.sync_all()
 		if not created_solids.is_empty() and created_solids[0] >= 0: _select_solid(created_solids[0], -1)
 		audio.play("place")
 	elif stage == Stage.GAMEPLAY:
@@ -2566,10 +2673,10 @@ func _place_tool_at(pos: Vector3) -> void:
 			var mpos := Vector3(-pos.x, pos.y, -pos.z if symmetry == SymmetryMode.ROT_180 else pos.z)
 			var mteam := (3 if team == 2 else 2) if preset in ["spawn", "intel", "resupply"] else team
 			Tf2GamemodesScript.stamp_preset(doc, preset, mpos, mteam)
-		doc.record_undo("Place " + active_tool); ent_vis.sync_all(); audio.play("place")
+		_record_history("Place " + active_tool); ent_vis.sync_all(); audio.play("place")
 	elif stage == Stage.STYLE and active_tool == "light":
 		Tf2GamemodesScript.stamp_preset(doc, "light", pos, 2)
-		doc.record_undo("Place Light"); ent_vis.sync_all(); audio.play("place")
+		_record_history("Place Light"); ent_vis.sync_all(); audio.play("place")
 
 func _do_terrain_sculpt_stroke() -> void:
 	var n: int = doc.sculpt_terrain_ex(hover_pos, terrain_radius_m, terrain_strength_m * 0.18, terrain_mode, terrain_axis_mode)
@@ -2749,7 +2856,7 @@ func draw_viewport_2d_overlay(canvas: Control) -> void:
 		var top_world := ghost_mesh.position + Vector3(0, sz.y * 0.5 + 0.5, 0)
 		if not editor_cam.is_position_behind(top_world):
 			var sp := editor_cam.unproject_position(top_world)
-			var txt := "%dx%dx%du — %s" % [int(round(sz.x * UPM)), int(round(sz.z * UPM)), h_u, callout["text"]]
+			var txt := "%dx%dx%du â€” %s" % [int(round(sz.x * UPM)), int(round(sz.z * UPM)), h_u, callout["text"]]
 			var f: Font = fonts["heading"]
 			var tsz := f.get_string_size(txt, HORIZONTAL_ALIGNMENT_LEFT, -1, 12)
 			var r := Rect2(sp - Vector2(tsz.x * 0.5 + 8, 22), Vector2(tsz.x + 16, 22))
@@ -2859,6 +2966,20 @@ func _setup_auto_shot(idx: int) -> void:
 			_show_welcome_hub(false); _load_gamemode("koth", "badlands", false); set_stage(Stage.GAMEPLAY)
 			_dock_ent_cat = "doors"; _dock_ent_page = 0; _rebuild_bottom_dock(); _open_fgd_entity_drawer()
 			cam_pos = Vector3(20, 14, 24); cam_yaw = 0.65; cam_pitch = -0.42; _apply_editor_cam()
+		"v5_icons_and_history":
+			_show_welcome_hub(false); _load_gamemode("koth", "badlands", false); set_stage(Stage.GAMEPLAY)
+			doc.add_point_entity("logic_relay", Vector3(-4.0, 0.2, 4.0), {"targetname": "door_relay"})
+			_record_history("Place Logic Relay")
+			doc.add_point_entity("trigger_hurt", Vector3(0.0, 0.2, 5.5), {"targetname": "lava_pit"})
+			_record_history("Place Kill / Hurt Pit")
+			doc.add_point_entity("ambient_generic", Vector3(4.0, 0.2, 4.0), {"targetname": "wind_sfx"})
+			_record_history("Place Ambient Sound")
+			doc.add_point_entity("info_particle_system", Vector3(2.0, 0.2, 1.5), {"targetname": "sparks_fx"})
+			_record_history("Place Particle FX")
+			ent_vis.sync_all()
+			_open_history_drawer()
+			cam_pos = Vector3(9.0, 7.5, 13.5); editor_cam.look_at_from_position(cam_pos, Vector3(0.5, 1.2, 3.5), Vector3.UP)
+			cam_yaw = editor_cam.rotation.y; cam_pitch = editor_cam.rotation.x
 	if not viewing_bsp and not settings_modal.visible:
 		_update_hover(get_viewport().get_visible_rect().size * Vector2(0.42, 0.52))
 
