@@ -26,6 +26,7 @@ var selection_box: MeshInstance3D
 var hover_box: MeshInstance3D
 
 var _ent_bounds: Dictionary = {} # ent_idx -> [bmin: Vector3, bmax: Vector3]
+var _ent_nodes: Dictionary = {}  # ent_idx -> Node3D (for O(1) incremental sync without rebuilding entire scene!)
 var _badge_tex_cache: Dictionary = {} # kind -> ImageTexture
 var _editor_only_nodes: Array[Node3D] = []
 
@@ -76,6 +77,7 @@ func clear_all() -> void:
 	if track_mesh != null:
 		track_mesh.mesh = null
 	_ent_bounds.clear()
+	_ent_nodes.clear()
 	_editor_only_nodes.clear()
 	selected_entity = -1
 	hovered_entity = -1
@@ -103,6 +105,7 @@ func sync_all() -> void:
 	wires_mesh.mesh = null
 	track_mesh.mesh = null
 	_ent_bounds.clear()
+	_ent_nodes.clear()
 	_editor_only_nodes.clear()
 
 	var ents: Array = doc.get_entities()
@@ -116,13 +119,51 @@ func sync_all() -> void:
 		var tname: String = str(kv.get("targetname", ""))
 		if not tname.is_empty():
 			target_pos[tname] = pos
-		_spawn_entity_node(i, e, pos)
+		var spawned := _spawn_entity_node(i, e, pos)
+		if spawned != null:
+			_ent_nodes[i] = spawned
 
 	_rebuild_wires_and_tracks(ents, target_pos)
 	if selected_entity >= ents.size():
 		selected_entity = -1
 	if hovered_entity >= ents.size():
 		hovered_entity = -1
+	_rebuild_highlight_boxes()
+
+## Fast O(1) incremental single-entity update + optional spring pop-in animation!
+func sync_entity(idx: int, animate_pop: bool = false) -> void:
+	if doc == null or idx < 0:
+		return
+	var ents: Array = doc.get_entities()
+	if idx >= ents.size():
+		sync_all()
+		return
+	if _ent_nodes.has(idx):
+		var old_n: Node3D = _ent_nodes[idx]
+		if is_instance_valid(old_n):
+			old_n.queue_free()
+		_ent_nodes.erase(idx)
+	_ent_bounds.erase(idx)
+	var e: Dictionary = ents[idx]
+	var pos: Vector3 = e["pos"]
+	if e.get("is_brush", false):
+		pos = (e["bounds_min"] + e["bounds_max"]) * 0.5
+	var spawned := _spawn_entity_node(idx, e, pos)
+	if spawned != null:
+		_ent_nodes[idx] = spawned
+		if animate_pop and is_inside_tree():
+			spawned.scale = Vector3(0.05, 0.05, 0.05)
+			var tw := create_tween()
+			tw.set_ease(Tween.EASE_OUT).set_trans(Tween.TRANS_BACK)
+			tw.tween_property(spawned, "scale", Vector3.ONE, 0.22)
+	if str(e["classname"]) == "path_track" or not (e.get("connections", []) as Array).is_empty():
+		var target_pos := {}
+		for i in range(ents.size()):
+			var oe: Dictionary = ents[i]
+			var tn: String = str(oe["kv"].get("targetname", ""))
+			if not tn.is_empty():
+				target_pos[tn] = (oe["bounds_min"] + oe["bounds_max"]) * 0.5 if oe.get("is_brush", false) else oe["pos"]
+		_rebuild_wires_and_tracks(ents, target_pos)
 	_rebuild_highlight_boxes()
 
 func set_selection(ent_idx: int) -> void:
@@ -174,7 +215,7 @@ func _make_wire_box(bmin: Vector3, bmax: Vector3, col: Color, pad_val: float = 0
 	im.surface_end()
 	return im
 
-func _spawn_entity_node(idx: int, e: Dictionary, pos: Vector3) -> void:
+func _spawn_entity_node(idx: int, e: Dictionary, pos: Vector3) -> Node3D:
 	var cls: String = str(e["classname"])
 	var kv: Dictionary = e["kv"]
 	var is_brush: bool = e.get("is_brush", false)
@@ -193,7 +234,7 @@ func _spawn_entity_node(idx: int, e: Dictionary, pos: Vector3) -> void:
 
 	if not mdl_path.is_empty() and mdl_path.to_lower().ends_with(".mdl") and assets != null:
 		if not show_props and cls.begins_with("prop_"):
-			return
+			return null
 		var mesh: ArrayMesh = assets.get_model_mesh(mdl_path)
 		if mesh != null:
 			var mi := MeshInstance3D.new()
@@ -206,14 +247,14 @@ func _spawn_entity_node(idx: int, e: Dictionary, pos: Vector3) -> void:
 			var bmin := pos + aabb.position
 			var bmax := pos + aabb.position + aabb.size
 			_ent_bounds[idx] = [bmin, bmax]
-			return
+			return holder
 
 	# 2. Brush Entities (func_door, trigger_*, func_respawnroom, func_capturezone, func_upgradestation, func_detail)
 	if is_brush:
 		var is_trig := cls.begins_with("trigger_") or cls == "func_respawnroom" or cls == "func_capturezone" or cls == "func_nobuild"
 		if (not show_volumes or not show_triggers) and is_trig:
 			ents_root.add_child(holder)
-			return
+			return holder
 		var bmin: Vector3 = e["bounds_min"]
 		var bmax: Vector3 = e["bounds_max"]
 		_ent_bounds[idx] = [bmin, bmax]
@@ -289,7 +330,7 @@ func _spawn_entity_node(idx: int, e: Dictionary, pos: Vector3) -> void:
 				var spd := maxf(4.0, float(str(kv.get("speed", "320"))) / 32.0)
 				var trav := maxf(2.4, absf(mdir.x) * sz.x + absf(mdir.y) * sz.y + absf(mdir.z) * sz.z - 0.15)
 				door_ctrl.register_door(ab, pos, mdir, trav, spd, maxf(4.5, sz.length() * 0.8 + 2.0), str(kv.get("targetname", "")))
-			return
+			return ab
 
 		if built_real_mesh != null:
 			# Solid world-textured brush entity (func_detail, func_wall, etc.) — also add static collision for F5!
@@ -306,7 +347,7 @@ func _spawn_entity_node(idx: int, e: Dictionary, pos: Vector3) -> void:
 				sb.add_child(cs)
 			holder.add_child(sb)
 			ents_root.add_child(holder)
-			return
+			return holder
 
 		var mat := StandardMaterial3D.new()
 		mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
@@ -332,7 +373,7 @@ func _spawn_entity_node(idx: int, e: Dictionary, pos: Vector3) -> void:
 		_editor_only_nodes.append(mi)
 		mi.visible = not playtest_mode
 		ents_root.add_child(holder)
-		return
+		return holder
 
 	# 3. Team Spawn Beacon (Real ABS 3D Engineer Model when available, else 83u Heavy Reference!)
 	if cls == "info_player_teamspawn":
@@ -360,7 +401,7 @@ func _spawn_entity_node(idx: int, e: Dictionary, pos: Vector3) -> void:
 			holder.add_child(ring)
 			ents_root.add_child(holder)
 			_ent_bounds[idx] = [pos + Vector3(-0.75, 0.0, -0.75), pos + Vector3(0.75, 2.55, 0.75)]
-			return
+			return holder
 		var cyl := MeshInstance3D.new()
 		var cm := CylinderMesh.new()
 		cm.top_radius = 0.62
@@ -378,12 +419,12 @@ func _spawn_entity_node(idx: int, e: Dictionary, pos: Vector3) -> void:
 		holder.add_child(cyl)
 		ents_root.add_child(holder)
 		_ent_bounds[idx] = [pos + Vector3(-0.75, 0.0, -0.75), pos + Vector3(0.75, 2.6, 0.75)]
-		return
+		return holder
 
 	# 4. Real Godot OmniLight3D + glowing bulb for TF2 point lights!
 	if cls == "light" or cls == "light_spot":
 		if not show_lights:
-			return
+			return null
 		var lcol := _parse_light_color(str(kv.get("_light", "255 240 210 300")))
 		var omni := OmniLight3D.new()
 		omni.light_color = lcol
@@ -406,7 +447,7 @@ func _spawn_entity_node(idx: int, e: Dictionary, pos: Vector3) -> void:
 		bulb.visible = not playtest_mode
 		ents_root.add_child(holder)
 		_ent_bounds[idx] = [pos - Vector3(0.45, 0.45, 0.45), pos + Vector3(0.45, 1.15, 0.45)]
-		return
+		return holder
 
 	# 5. Path Track node (yellow rail beacon + billboard icon)
 	if cls == "path_track":
@@ -424,13 +465,15 @@ func _spawn_entity_node(idx: int, e: Dictionary, pos: Vector3) -> void:
 		node_m.visible = not playtest_mode
 		ents_root.add_child(holder)
 		_ent_bounds[idx] = [pos - Vector3(0.45, 0.45, 0.45), pos + Vector3(0.45, 1.15, 0.45)]
-		return
+		return holder
 
 	# 6. EVERY OTHER ENTITY gets a crisp, color-coded 3D Billboard Icon + Label so NO entity is ever invisible!
 	if show_logic_markers:
 		_attach_entity_billboard_icon(holder, cls, kv, Vector3(0, 0.78, 0))
 		ents_root.add_child(holder)
 		_ent_bounds[idx] = [pos + Vector3(-0.55, 0.0, -0.55), pos + Vector3(0.55, 1.45, 0.55)]
+		return holder
+	return null
 
 func _attach_entity_billboard_icon(holder: Node3D, cls: String, kv: Dictionary, offset: Vector3) -> void:
 	var ic: Dictionary = Tf2CatalogScript.get_entity_icon_spec(cls)

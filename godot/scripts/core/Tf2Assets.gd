@@ -112,13 +112,23 @@ func get_material(mat_path: String, triplanar := false, is_prop := false) -> Sta
 	_mat_cache[key] = mat
 	return mat
 
+func has_cached_model(mdl_path: String) -> bool:
+	return _mesh_cache.has(mdl_path.to_lower())
+
 func get_model_mesh(mdl_path: String) -> ArrayMesh:
 	var key := mdl_path.to_lower()
 	if _mesh_cache.has(key):
 		return _mesh_cache[key]
 
 	var d: Dictionary = core.read_model_data(mdl_path)
-	if not d.get("ok", false):
+	return build_model_from_raw(mdl_path, d)
+
+func build_model_from_raw(mdl_path: String, d: Dictionary) -> ArrayMesh:
+	var key := mdl_path.to_lower()
+	if _mesh_cache.has(key):
+		return _mesh_cache[key]
+	if d == null or not d.get("ok", false):
+		_mesh_cache[key] = null
 		return null
 
 	var mesh := ArrayMesh.new()

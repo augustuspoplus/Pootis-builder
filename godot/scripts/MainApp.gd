@@ -90,6 +90,10 @@ var _drag_anchor: Vector3 = Vector3.ZERO
 var _drag_accum: float = 0.0
 var _dragging_move: bool = false
 var _move_last_pos: Vector3 = Vector3.ZERO
+var _dragging_gizmo: bool = false
+var _gizmo_axis: Vector3 = Vector3.ZERO
+var _gizmo_origin: Vector3 = Vector3.ZERO
+var _gizmo_accum: float = 0.0
 var _dragging_vertex: bool = false
 var _drag_vert_idx: int = -1
 var _drag_vert_last: Vector3 = Vector3.ZERO
@@ -127,6 +131,7 @@ var _prop_browse_all: bool = false
 var _prop_active_cat: String = ""
 var _prop_favorites_only: bool = false
 var _prop_favorites: Array[String] = []
+var _dock_build_cat: String = "shapes"
 var _dock_prop_cat: String = "winter"
 var _dock_prop_page: int = 0
 var _dock_ent_cat: String = "objectives"
@@ -562,7 +567,7 @@ func _refresh_context_bar() -> void:
 	elif active_tool == "place_prop":
 		context_bar.visible = true
 		add_tag.call("PROP: " + active_prop_mdl.get_file().get_basename().to_upper())
-		add_chip.call("Yaw %dÂ° (R)" % int(prop_yaw_deg), false, func(): prop_yaw_deg = fmod(prop_yaw_deg + 90.0, 360.0); _refresh_context_bar())
+		add_chip.call("Yaw %d° (R)" % int(prop_yaw_deg), false, func(): prop_yaw_deg = fmod(prop_yaw_deg + 90.0, 360.0); _refresh_context_bar())
 		var sk_names := ["Neutral", "RED", "BLU"]
 		add_chip.call("Skin: " + sk_names[clampi(prop_skin, 0, 2)], prop_skin > 0, func(): prop_skin = (prop_skin + 1) % 3; _refresh_context_bar())
 		add_chip.call("Prop Boxes...", false, func(): _open_props_drawer())
@@ -627,34 +632,31 @@ func _rebuild_left_rail() -> void:
 	for ch in left_rail_panel.get_children():
 		ch.queue_free()
 	var vb := VBoxContainer.new()
-	vb.add_theme_constant_override("separation", 5)
+	vb.add_theme_constant_override("separation", 6)
 	left_rail_panel.add_child(vb)
 
+	# Sleek, non-duplicated 5-Tool Core Transform Rail (Move, Push/Pull, Rotate, Clip, Vertex!)
 	var items := [
-		{"id": "select",   "title": "Select & Move",     "key": "1",       "desc": "Pick solids/entities, drag faces to push/pull, or inspect properties."},
-		{"id": "floor",    "title": "Draw Box / Floor",  "key": "2",       "desc": "Click and drag to draw a solid floor slab, crate, or cover block."},
-		{"id": "wall",     "title": "Wall Chain Tool",   "key": "3",       "desc": "Click corners point-to-point to chain angled walls cleanly."},
-		{"id": "clip",     "title": "Clip / Slice",      "key": "Shift+X", "desc": "Slice selected brush cleanly along a plane to create angles & ramps."},
-		{"id": "vertex",   "title": "Vertex Edit",       "key": "Shift+V", "desc": "Drag glowing corner handles (hold Shift for vertical up/down)."},
-		{"id": "hollow",   "title": "Make Hollow",       "key": "Ctrl+H",  "desc": "Turn the selected solid block into an instant hollow room (-16u)."},
-		{"id": "carve",    "title": "Carve Doorway",     "key": "8",       "desc": "Punch a clean 112u TF2 doorway straight through any wall."},
-		{"id": "terrain",  "title": "Terrain & Cliffs",  "key": "9",       "desc": "Stamp Canyon Cliffs, Hills, Mesas, sculpt terrain & paint blends."},
-		{"id": "entities", "title": "All 452 Entities",  "key": "Shift+E", "desc": "Browse and place every Valve TF2 + ABS FGD entity class."},
-		{"id": "hide",     "title": "QuickHide",         "key": "H / U",   "desc": "Hide selected brush out of your way (press U to unhide all)."},
+		{"id": "select",    "title": "Select & Move",    "key": "1",       "desc": "Pick solids/entities and drag the 3D RGB arrows to move cleanly on grid."},
+		{"id": "push_pull", "title": "Push / Pull Face", "key": "2",       "desc": "Click & drag any face handle out or in like SketchUp/TrenchBroom."},
+		{"id": "rotate",    "title": "Rotate 90°",       "key": "R",       "desc": "Rotate the selected brush, prop, or entity by 90° instantly."},
+		{"id": "clip",      "title": "Clip / Slice",     "key": "Shift+X", "desc": "Slice selected brush cleanly along a plane to create angles & ramps."},
+		{"id": "vertex",    "title": "Vertex Edit",      "key": "Shift+V", "desc": "Drag glowing corner handles (hold Shift for vertical up/down)."},
 	]
 	for idx in range(items.size()):
 		var it: Dictionary = items[idx]
 		var tid: String = it["id"]
-		var is_act := (active_tool == tid)
+		var is_act := (active_tool == tid) or (tid == "push_pull" and active_tool == "select" and selected_solid >= 0 and false)
 		var b := Button.new()
-		b.custom_minimum_size = Vector2(44, 42)
+		b.custom_minimum_size = Vector2(46, 44)
 		HudWidgets.style_tf2_button(b, fonts["heading"], 10, is_act)
 
 		var vic := HudWidgets.VectorToolIcon.new(tid, is_act, HudWidgets.COL_ACC)
 		vic.set_anchors_preset(Control.PRESET_FULL_RECT)
 		b.add_child(vic)
+		HudWidgets.attach_spring_anim(b, 1.09)
 
-		var row_y: float = 68.0 + float(idx) * 47.0
+		var row_y: float = 68.0 + float(idx) * 50.0
 		var t_title: String = it["title"]
 		var t_key: String = "[" + str(it["key"]) + "]"
 		var t_desc: String = it["desc"]
@@ -675,9 +677,8 @@ func _rebuild_left_rail() -> void:
 			if tool_hover_card != null:
 				tool_hover_card.visible = false
 			if tid == "clip": _open_clip_drawer()
-			elif tid == "hollow": _do_hollow_selected()
-			elif tid == "entities": _open_fgd_entity_drawer()
-			elif tid == "hide": _do_quickhide_selected()
+			elif tid == "rotate": _rotate_selection()
+			elif tid == "push_pull": _select_tool("select"); _toast("Push / Pull Mode: Drag any yellow face arrow on the selected brush!")
 			else: _select_tool(tid)
 		)
 		vb.add_child(b)
@@ -719,7 +720,7 @@ func _refresh_selection_bar() -> void:
 		selection_hbox.add_child(tag)
 		_add_sel_btn("+Pull", func(): _push_selected_top(grid_m))
 		_add_sel_btn("-Push", func(): _push_selected_top(-grid_m))
-		_add_sel_btn("Rot 90Â°", _rotate_selection)
+		_add_sel_btn("Rot 90°", _rotate_selection)
 		_add_sel_btn("Clip", _open_clip_drawer)
 		_add_sel_btn("Verts", func(): _select_tool("vertex"))
 		_add_sel_btn("Hollow", _do_hollow_selected)
@@ -734,7 +735,7 @@ func _refresh_selection_bar() -> void:
 			cls = str(ents[selected_entity]["classname"])
 		tag.text = "ENT #%d: %s" % [selected_entity, cls]
 		selection_hbox.add_child(tag)
-		_add_sel_btn("Rot 90Â° (R)", _rotate_selection)
+		_add_sel_btn("Rot 90° (R)", _rotate_selection)
 		_add_sel_btn("Clone (Ctrl+D)", _duplicate_selection)
 		_add_sel_btn("SmartEdit (Alt+Enter)", _open_inspector_drawer)
 		_add_sel_btn("Delete (Del)", _delete_selection, 2)
@@ -941,26 +942,76 @@ func _rebuild_bottom_dock() -> void:
 		return
 
 	# ==========================================================================
-	# 1. BUILD MODE: Sleek 1-row Geometry & Architecture Dock
+	# 1. BUILD MODE: Multi-Box Architecture, Cutouts, Prefabs & Terrain Dock!
 	# ==========================================================================
 	if stage == Stage.BUILD:
-		bottom_dock.offset_top = -104
-		var frame := HudWidgets.HudFrame.new(HudWidgets.COL_LIP_AMB, 10.0, true)
-		bottom_dock.add_child(frame)
-		var hb := HBoxContainer.new(); hb.alignment = BoxContainer.ALIGNMENT_CENTER; hb.add_theme_constant_override("separation", 6)
-		frame.add_child(hb)
-		var slots := [
-			{"id": "select",   "piece": "Pull",     "lbl": "Select/Pull", "tool": true, "tkind": "Pull"},
-			{"id": "floor",    "piece": "Floor",    "lbl": "Drag Box"},
-			{"id": "wall",     "piece": "Wall",     "lbl": "Wall Chain"},
-			{"id": "building", "piece": "Building", "lbl": "Building"},
-			{"id": "ramp",     "piece": "Ramp",     "lbl": "Ramp"},
-			{"id": "stairs",   "piece": "Stairs",   "lbl": "Stairs"},
-			{"id": "arch",     "piece": "Arch",     "lbl": "Arch"},
-			{"id": "carve",    "piece": "Door",     "lbl": "Carve"},
-			{"id": "terrain",  "piece": "Terrain",  "lbl": "Cliff/Terr",  "tool": true, "tkind": "Terrain"},
-			{"id": "import3d", "piece": "Model",    "lbl": "Import 3D",   "icon": "crate"},
+		bottom_dock.offset_top = -148
+		var b_tabs := [
+			{"id": "shapes",  "name": "1. Core Shapes",    "col": HudWidgets.COL_ACC},
+			{"id": "cutouts", "name": "2. Cutouts & Edit", "col": HudWidgets.COL_CYAN},
+			{"id": "prefabs", "name": "3. TF2 Prefabs",    "col": HudWidgets.COL_GREEN},
+			{"id": "terrain", "name": "4. Terrain & Cliffs","col": Color(0.84, 0.56, 0.34, 1.0)},
 		]
+		var b_lip := HudWidgets.COL_LIP_AMB
+		for bt in b_tabs:
+			if str(bt["id"]) == _dock_build_cat:
+				b_lip = bt["col"]
+		var frame := HudWidgets.HudFrame.new(b_lip, 11.0, true)
+		bottom_dock.add_child(frame)
+		var bvb := VBoxContainer.new(); bvb.add_theme_constant_override("separation", 6)
+		frame.add_child(bvb)
+
+		var tab_row := HBoxContainer.new(); tab_row.alignment = BoxContainer.ALIGNMENT_CENTER; tab_row.add_theme_constant_override("separation", 6)
+		bvb.add_child(tab_row)
+		for bt in b_tabs:
+			var bid: String = str(bt["id"])
+			var tb := Button.new(); tb.text = str(bt["name"])
+			_style_dock_tab(tb, bt["col"], _dock_build_cat == bid)
+			tb.pressed.connect(func(): audio.play("click"); _dock_build_cat = bid; _rebuild_bottom_dock())
+			tab_row.add_child(tb)
+
+		var hb := HBoxContainer.new(); hb.alignment = BoxContainer.ALIGNMENT_CENTER; hb.add_theme_constant_override("separation", 6)
+		bvb.add_child(hb)
+
+		var slots: Array = []
+		if _dock_build_cat == "shapes":
+			slots = [
+				{"id": "floor",    "piece": "Floor",    "lbl": "Draw Box"},
+				{"id": "wall",     "piece": "Wall",     "lbl": "Wall Chain"},
+				{"id": "ramp",     "piece": "Ramp",     "lbl": "Ramp"},
+				{"id": "stairs",   "piece": "Stairs",   "lbl": "Stairs"},
+				{"id": "arch",     "piece": "Arch",     "lbl": "Arch"},
+				{"id": "pillar",   "piece": "Box",      "lbl": "Pillar"},
+				{"id": "import3d", "piece": "Model",    "lbl": "Import 3D", "icon": "crate"},
+			]
+		elif _dock_build_cat == "cutouts":
+			slots = [
+				{"id": "carve",    "piece": "Door",     "lbl": "Carve Door"},
+				{"id": "carve_win","piece": "Wall",     "lbl": "Carve Window"},
+				{"id": "act_hollow","piece": "Box",     "lbl": "Make Hollow"},
+				{"id": "act_clone","piece": "Floor",    "lbl": "Duplicate"},
+				{"id": "act_tie",  "piece": "Building", "lbl": "Tie Entity"},
+				{"id": "act_hide", "piece": "Pull",     "lbl": "QuickHide", "tool": true, "tkind": "Pull"},
+			]
+		elif _dock_build_cat == "prefabs":
+			slots = [
+				{"id": "building",       "piece": "Building", "lbl": "Barn Shed"},
+				{"id": "prefab_spawn",   "piece": "Building", "lbl": "Spawn Room",  "icon": "resupply"},
+				{"id": "prefab_balcony", "piece": "Stairs",   "lbl": "Sniper Deck"},
+				{"id": "prefab_mid",     "piece": "Floor",    "lbl": "Mid Platform","icon": "cap_point"},
+				{"id": "prefab_cover",   "piece": "Box",      "lbl": "Crate Cover", "icon": "crate"},
+				{"id": "prefab_bridge",  "piece": "Ramp",     "lbl": "Catwalk"},
+			]
+		else:
+			slots = [
+				{"id": "terrain",        "piece": "Terrain",  "lbl": "Sculpt Studio", "tool": true, "tkind": "Terrain"},
+				{"id": "stamp_cliff",    "piece": "Terrain",  "lbl": "Canyon Cliff",  "tool": true, "tkind": "Terrain"},
+				{"id": "stamp_hill",     "piece": "Floor",    "lbl": "Rolling Hill"},
+				{"id": "stamp_mesa",     "piece": "Box",      "lbl": "Mesa Plateau"},
+				{"id": "stamp_crater",   "piece": "Ramp",     "lbl": "Crater Basin"},
+				{"id": "act_sew",        "piece": "Pull",     "lbl": "Auto-Sew",      "tool": true, "tkind": "Pull"},
+			]
+
 		for sl in slots:
 			var sid: String = sl["id"]
 			var is_act := (active_tool == sid)
@@ -971,10 +1022,25 @@ func _rebuild_bottom_dock() -> void:
 				int(sl.get("team", 0)), bool(sl.get("tool", false)), str(sl.get("tkind", "")),
 				fonts["body"], {}
 			)
+			HudWidgets.attach_spring_anim(slot_btn, 1.07)
 			if not ikey.is_empty():
 				if not dock_slot_map.has(ikey): dock_slot_map[ikey] = []
 				(dock_slot_map[ikey] as Array).append(slot_btn)
-			slot_btn.pressed.connect(func(): audio.play("click"); _select_tool(sid))
+			slot_btn.pressed.connect(func():
+				audio.play("click")
+				if sid == "act_hollow": _do_hollow_selected()
+				elif sid == "act_clone": _duplicate_selection()
+				elif sid == "act_tie": _open_tie_entity_drawer()
+				elif sid == "act_hide": _do_quickhide_selected()
+				elif sid == "act_sew":
+					var n: int = doc.sew_displacements()
+					_record_history("Auto-Sew Seams"); map_sync.sync_all(); audio.play("carve")
+					_toast("Auto-Sewed %d displacement vertices!" % n)
+				elif sid.begins_with("stamp_"):
+					_stamp_terrain_quick(sid.trim_prefix("stamp_"))
+				else:
+					_select_tool(sid)
+			)
 			hb.add_child(slot_btn)
 		return
 
@@ -1041,6 +1107,7 @@ func _rebuild_bottom_dock() -> void:
 			var tex: Texture2D = icon_cache.get_icon(ikey) if (itype == "mdl" and icon_cache != null) else null
 			var vec_ic: String = ikey if itype != "mdl" else ""
 			var card := HudWidgets.DockCardSlot.new(nm, cls, tex, vec_ic, is_act, lip_col, fonts["body"], drag_d)
+			HudWidgets.attach_spring_anim(card, 1.06)
 			card.tooltip_text = "%s  (%s)\n%s\nDrag into 3D or Click to place!" % [nm, cls, desc]
 			if itype == "mdl":
 				if not dock_slot_map.has(ikey): dock_slot_map[ikey] = []
@@ -1172,6 +1239,7 @@ func _rebuild_bottom_dock() -> void:
 			var is_sel: bool = (active_tool == "place_prop" and active_prop_mdl == mp)
 			var tex: Texture2D = icon_cache.get_icon(mp) if icon_cache != null else null
 			var card := HudWidgets.DockCardSlot.new(nm, cat_sub, tex, "", is_sel, plip, fonts["body"], {"kind": "prop", "mdl": mp, "name": nm})
+			HudWidgets.attach_spring_anim(card, 1.06)
 			card.tooltip_text = "%s\n(%s)\nDrag into 3D or Click to stamp  â€¢  Press R to rotate" % [nm, mp]
 			if not dock_slot_map.has(mp): dock_slot_map[mp] = []
 			(dock_slot_map[mp] as Array).append(card)
@@ -1550,8 +1618,12 @@ func on_viewport_drop(screen_pos: Vector2, data: Dictionary) -> void:
 		var cls: String = str(data.get("cls", active_fgd_entity))
 		var eid: int = doc.add_point_entity(cls, pos, {"angles": "0 0 0"})
 		_record_history("Drop " + cls)
-		ent_vis.sync_all()
-		if eid >= 0: _select_entity(eid)
+		if eid >= 0:
+			ent_vis.sync_entity(eid, true)
+			_select_entity(eid)
+		else:
+			ent_vis.sync_all()
+		_spawn_place_fx(pos, HudWidgets.COL_CYAN)
 		audio.play("place")
 		_toast("Dropped TF2 entity %s at (%du, %du, %du)!" % [cls, int(pos.x * UPM), int(-pos.z * UPM), int(pos.y * UPM)])
 	elif kind == "prop":
@@ -1562,8 +1634,12 @@ func on_viewport_drop(screen_pos: Vector2, data: Dictionary) -> void:
 			kv["modelscale"] = "%.2f" % prop_scale
 		var eid: int = doc.add_point_entity("prop_static", pos, kv)
 		_record_history("Drop Prop")
-		ent_vis.sync_all()
-		if eid >= 0: _select_entity(eid)
+		if eid >= 0:
+			ent_vis.sync_entity(eid, true)
+			_select_entity(eid)
+		else:
+			ent_vis.sync_all()
+		_spawn_place_fx(pos, HudWidgets.COL_ACC)
 		audio.play("place")
 		_toast("Dropped 3D TF2 prop: " + mdl.get_file())
 
@@ -1749,10 +1825,60 @@ func _clear_drawer(title: String) -> void:
 	if split_2d_panel.visible:
 		split_2d_panel.visible = false
 		settings.show_2d_split = false
+	var was_hidden := not right_drawer.visible
 	right_drawer_title.text = title
 	for ch in right_drawer_vbox.get_children():
 		ch.queue_free()
 	right_drawer.visible = true
+	if was_hidden and is_inside_tree():
+		right_drawer.modulate = Color(1, 1, 1, 0)
+		var tw := create_tween()
+		tw.set_ease(Tween.EASE_OUT).set_trans(Tween.TRANS_CUBIC)
+		tw.tween_property(right_drawer, "modulate", Color.WHITE, 0.16)
+
+## Tactile expanding amber/cyan ground ring whenever a brush, prefab, prop, or entity is placed!
+func _spawn_place_fx(pos: Vector3, col: Color = HudWidgets.COL_ACC) -> void:
+	if not is_inside_tree() or DisplayServer.get_name() == "headless":
+		return
+	var ring := MeshInstance3D.new()
+	var tm := TorusMesh.new(); tm.inner_radius = 0.72; tm.outer_radius = 0.92
+	ring.mesh = tm
+	var mat := StandardMaterial3D.new()
+	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	mat.albedo_color = Color(col.r, col.g, col.b, 0.90)
+	ring.material_override = mat
+	ring.position = pos + Vector3(0, 0.12, 0)
+	ring.scale = Vector3(0.25, 1.0, 0.25)
+	add_child(ring)
+	var tw := create_tween().set_parallel(true)
+	tw.set_ease(Tween.EASE_OUT).set_trans(Tween.TRANS_CUBIC)
+	tw.tween_property(ring, "scale", Vector3(2.4, 1.0, 2.4), 0.28)
+	tw.tween_property(mat, "albedo_color:a", 0.0, 0.28)
+	tw.chain().tween_callback(ring.queue_free)
+
+func _stamp_terrain_quick(kind: String) -> void:
+	var p: Vector3 = hover_pos if hover_valid else Vector3(0, 0, -6)
+	if kind == "cliff":
+		var cid: int = doc.make_cliff_wall(p + Vector3(-8, 0, 0), p + Vector3(8, 0, 0), cliff_height_m, 2.5, cliff_power, "NATURE/BLENDROCKWALLDIRT001", 1.2)
+		if cid >= 0:
+			terrain_axis_mode = 0
+			_record_history("Stamp Canyon Cliff"); map_sync.sync_all(); _select_solid(cid, -1)
+			_spawn_place_fx(p, HudWidgets.COL_ACC); audio.play("place")
+			_toast("Stamped Canyon Cliff! Switch to Sculpt Studio to shape it.")
+	else:
+		var sid: int = doc.make_terrain_patch(p + Vector3(-8, -1, -8), p + Vector3(8, 0, 8), 3, Tf2GamemodesScript.get_biome(active_biome)["floor"])
+		if sid >= 0:
+			if kind == "hill":
+				doc.sculpt_terrain(p, 7.5, 2.6, 0, 1); doc.sculpt_terrain(p, 6.0, 0.8, 2, 1)
+			elif kind == "mesa":
+				doc.sculpt_terrain(p, 6.8, 3.2, 0, 1); doc.sculpt_terrain(p, 4.8, 3.0, 3, 1)
+			elif kind == "crater":
+				doc.sculpt_terrain(p, 6.5, 2.4, 1, 1)
+			terrain_axis_mode = 1
+			_record_history("Stamp " + kind.capitalize()); map_sync.sync_all(); _select_solid(sid, -1)
+			_spawn_place_fx(p, HudWidgets.COL_GREEN); audio.play("place")
+			_toast("Stamped %s displacement!" % kind.capitalize())
 
 # Modular Drawer Bridges (delegating to EditorDrawers.gd!)
 func _open_materials_drawer() -> void:
@@ -1820,7 +1946,7 @@ func _open_clip_drawer() -> void:
 	for spec in [
 		{"t": "Slice Along X-Axis (North-South)", "n": Vector3(1, 0, 0), "acc": true},
 		{"t": "Slice Along Z-Axis (East-West)",   "n": Vector3(0, 0, 1), "acc": false},
-		{"t": "Slice 45Â° Diagonal Corner",        "n": Vector3(1, 0, 1).normalized(), "acc": false},
+		{"t": "Slice 45° Diagonal Corner",        "n": Vector3(1, 0, 1).normalized(), "acc": false},
 	]:
 		var b := Button.new(); b.text = spec["t"]
 		HudWidgets.style_tf2_button(b, fonts["heading"], 11, bool(spec["acc"]))
@@ -2262,7 +2388,7 @@ func _import_3d_model_file(path: String) -> void:
 func _cycle_symmetry() -> void:
 	symmetry = (symmetry + 1) % 3
 	sym_plane.visible = (symmetry != SymmetryMode.OFF) and not viewing_bsp
-	var names := ["Sym: Off", "Sym: Mirror", "Sym: 180Â°"]
+	var names := ["Sym: Off", "Sym: Mirror", "Sym: 180°"]
 	sym_btn.text = names[symmetry]; _toast("Symmetry Mode: " + names[symmetry])
 
 func _toggle_2d_view() -> void:
@@ -2322,6 +2448,8 @@ func _input(event: InputEvent) -> void:
 			elif mb.button_index == MOUSE_BUTTON_MIDDLE:
 				_mmb_panning = false
 			elif mb.button_index == MOUSE_BUTTON_LEFT:
+				if _dragging_gizmo:
+					_dragging_gizmo = false; _record_history("Move Axis"); _refresh_selection_bar(); _update_3d_gizmo()
 				if _dragging_vertex:
 					_dragging_vertex = false; _record_history("Move Vertex"); _refresh_selection_bar()
 				if _dragging_face:
@@ -2422,6 +2550,7 @@ func _unhandled_input(event: InputEvent) -> void:
 
 	if event is InputEventMouseMotion:
 		if pie_wheel.visible: pie_wheel.update_pointer(event.position); return
+		if _dragging_gizmo: _update_gizmo_drag(event.position); return
 		if _dragging_vertex: _update_vertex_drag(event.position, event.shift_pressed); return
 		if _dragging_face: _update_face_drag(event.position); return
 		if _dragging_move: _update_move_drag(event.position); return
@@ -2498,6 +2627,40 @@ func _project_ray_onto_axis(ro: Vector3, rd: Vector3, origin: Vector3, axis: Vec
 	var denom := a * c - b * b
 	return 0.0 if absf(denom) < 0.0001 else (b * e - c * d) / denom
 
+func _hit_test_gizmo_axis(ro: Vector3, rd: Vector3) -> Vector3:
+	if _gizmo_root == null or not _gizmo_root.visible:
+		return Vector3.ZERO
+	var orig := _gizmo_root.position
+	var best_ax := Vector3.ZERO
+	var best_dist := 0.36
+	for ax: Vector3 in [Vector3.RIGHT, Vector3.UP, Vector3.BACK]:
+		var t := clampf(_project_ray_onto_axis(ro, rd, orig, ax), 0.15, 2.15)
+		var pt_on_ax := orig + ax * t
+		var s := maxf(0.0, (pt_on_ax - ro).dot(rd))
+		var pt_on_ray := ro + rd * s
+		var d := pt_on_ax.distance_to(pt_on_ray)
+		if d < best_dist:
+			best_dist = d
+			best_ax = ax
+	return best_ax
+
+func _update_gizmo_drag(screen_pos: Vector2) -> void:
+	var ro := editor_cam.project_ray_origin(screen_pos); var rd := editor_cam.project_ray_normal(screen_pos)
+	var snapped_t := snappedf(_project_ray_onto_axis(ro, rd, _gizmo_origin, _gizmo_axis), grid_m)
+	var step := snapped_t - _gizmo_accum
+	if absf(step) < grid_m * 0.5:
+		return
+	var delta := _gizmo_axis * step
+	if selected_solid >= 0:
+		doc.translate_solid(selected_solid, delta)
+		map_sync.sync_solid(selected_solid)
+		_refresh_2d_views()
+	elif selected_entity >= 0:
+		doc.translate_entity(selected_entity, delta)
+		ent_vis.sync_entity(selected_entity, false)
+	_gizmo_accum = snapped_t
+	_update_3d_gizmo()
+
 func _update_face_drag(screen_pos: Vector2) -> void:
 	var ro := editor_cam.project_ray_origin(screen_pos); var rd := editor_cam.project_ray_normal(screen_pos)
 	var snapped_t := snappedf(_project_ray_onto_axis(ro, rd, _drag_anchor, _drag_normal), grid_m)
@@ -2564,6 +2727,13 @@ func _handle_left_click(screen_pos: Vector2, shift_held: bool = false, alt_held:
 		return
 
 	if active_tool == "select":
+		# 1) Test interactive draggable 3D RGB Transform Gizmo arrows first!
+		if selected_solid >= 0 or selected_entity >= 0:
+			var g_ax := _hit_test_gizmo_axis(ro, rd)
+			if g_ax != Vector3.ZERO:
+				_dragging_gizmo = true; _gizmo_axis = g_ax; _gizmo_origin = _gizmo_root.position
+				_gizmo_accum = snappedf(_project_ray_onto_axis(ro, rd, _gizmo_origin, _gizmo_axis), grid_m)
+				audio.play("click"); return
 		if selected_solid >= 0:
 			var h: Dictionary = map_sync.hit_test_face_handle(ro, rd)
 			if not h.is_empty():
@@ -2631,8 +2801,13 @@ func _place_tool_at(pos: Vector3) -> void:
 	var b: Dictionary = Tf2GamemodesScript.get_biome(active_biome)
 	if active_tool == "place_fgd_entity":
 		var eid: int = doc.add_point_entity(active_fgd_entity, pos, {"angles": "0 0 0"})
-		_record_history("Place " + active_fgd_entity); ent_vis.sync_all()
-		if eid >= 0: _select_entity(eid)
+		_record_history("Place " + active_fgd_entity)
+		if eid >= 0:
+			ent_vis.sync_entity(eid, true)
+			_select_entity(eid)
+		else:
+			ent_vis.sync_all()
+		_spawn_place_fx(pos, HudWidgets.COL_CYAN)
 		audio.play("place"); return
 	if active_tool == "place_prop":
 		var yaw_val: float = randf_range(0.0, 360.0) if prop_random_yaw else prop_yaw_deg
@@ -2640,8 +2815,13 @@ func _place_tool_at(pos: Vector3) -> void:
 		if absf(prop_scale - 1.0) > 0.01:
 			kv["modelscale"] = "%.2f" % prop_scale
 		var eid: int = doc.add_point_entity("prop_static", pos, kv)
-		_record_history("Place Prop"); ent_vis.sync_all()
-		if eid >= 0: _select_entity(eid)
+		_record_history("Place Prop")
+		if eid >= 0:
+			ent_vis.sync_entity(eid, true)
+			_select_entity(eid)
+		else:
+			ent_vis.sync_all()
+		_spawn_place_fx(pos, HudWidgets.COL_ACC)
 		audio.play("place"); return
 
 	var created_solids: Array[int] = []
@@ -2650,6 +2830,8 @@ func _place_tool_at(pos: Vector3) -> void:
 			"building":
 				for i in doc.add_building(pos + Vector3(-4, 0, -4), pos + Vector3(4, 0, 4), bld_floors, bld_roof_style, b["wall"], b["accent"], b["roof"], bld_door_side):
 					created_solids.append(i)
+			"pillar":
+				created_solids.append(doc.add_box(pos + Vector3(-1, 0, -1), pos + Vector3(1, wall_height_m, 1), b["accent"]))
 			"ramp": created_solids.append(doc.add_ramp(pos + Vector3(-2, 0, -2), pos + Vector3(2, 2.5, 2), 0, b["accent"]))
 			"stairs":
 				for i in doc.add_stairs(pos + Vector3(-2, 0, -2), pos + Vector3(2, 2.5, 2), 0, 6, b["accent"]): created_solids.append(i)
@@ -2658,11 +2840,45 @@ func _place_tool_at(pos: Vector3) -> void:
 			"carve":
 				if doc.auto_carve_opening(pos + Vector3(-1.75, 0, -1.5), pos + Vector3(1.75, 3.5, 1.5), b["wall"]) > 0:
 					audio.play("carve"); _toast("Carved clean 112u TF2 doorway!")
+			"carve_win":
+				if doc.auto_carve_opening(pos + Vector3(-2.0, 1.5, -1.5), pos + Vector3(2.0, 3.5, 1.5), b["wall"]) > 0:
+					audio.play("carve"); _toast("Carved clean 128x64u TF2 sniper window!")
+			"prefab_spawn":
+				for i in doc.add_building(pos + Vector3(-6, 0, -5), pos + Vector3(6, 0, 5), 1, 0, b["wall"], b["accent"], b["roof"], 2):
+					created_solids.append(i)
+				Tf2GamemodesScript.stamp_preset(doc, "resupply", pos + Vector3(0, 0.1, -3.5), 2)
+				Tf2GamemodesScript.stamp_preset(doc, "spawn", pos + Vector3(-2.5, 0.2, 0), 2)
+				Tf2GamemodesScript.stamp_preset(doc, "spawn", pos + Vector3(2.5, 0.2, 0), 2)
+				ent_vis.sync_all()
+				_toast("Stamped Ready-to-Play TF2 Spawn Room (walls + resupply + 2 spawns)!")
+			"prefab_balcony":
+				created_solids.append(doc.add_box(pos + Vector3(-4, 3.5, -2.5), pos + Vector3(4, 4.0, 2.5), b["accent"]))
+				created_solids.append(doc.add_box(pos + Vector3(-4, 4.0, 2.0), pos + Vector3(4, 5.2, 2.5), b["wall"]))
+				for i in doc.add_stairs(pos + Vector3(4, 0, -2.0), pos + Vector3(8, 3.5, 2.0), 1, 8, b["accent"]):
+					created_solids.append(i)
+				_toast("Stamped TF2 Sniper Deck + Guard Rail + Stairs!")
+			"prefab_mid":
+				created_solids.append(doc.add_box(pos + Vector3(-4, 0, -4), pos + Vector3(4, 1.0, 4), b["accent"]))
+				created_solids.append(doc.add_ramp(pos + Vector3(-6, 0, -2), pos + Vector3(-4, 1.0, 2), 0, b["floor"]))
+				created_solids.append(doc.add_ramp(pos + Vector3(4, 0, -2), pos + Vector3(6, 1.0, 2), 1, b["floor"]))
+				Tf2GamemodesScript.stamp_preset(doc, "cap_point", pos + Vector3(0, 1.05, 0), 0)
+				ent_vis.sync_all()
+				_toast("Stamped Mid Control Point Platform with dual ramps!")
+			"prefab_cover":
+				created_solids.append(doc.add_box(pos + Vector3(-2.0, 0, -1.0), pos + Vector3(0.5, 2.0, 1.0), "DEV/DEV_MEASURECRATE01"))
+				created_solids.append(doc.add_box(pos + Vector3(0.5, 0, -1.5), pos + Vector3(2.5, 1.5, 1.5), "DEV/DEV_MEASURECRATE01"))
+				_toast("Stamped TF2 Crouch/Stand Crate Cover Cluster!")
+			"prefab_bridge":
+				created_solids.append(doc.add_box(pos + Vector3(-6, 3.0, -2), pos + Vector3(6, 3.5, 2), "METAL/METALGRATE011A"))
+				created_solids.append(doc.add_box(pos + Vector3(-6, 3.5, -2), pos + Vector3(6, 4.5, -1.75), b["accent"]))
+				created_solids.append(doc.add_box(pos + Vector3(-6, 3.5, 1.75), pos + Vector3(6, 4.5, 2), b["accent"]))
+				_toast("Stamped Steel Catwalk Bridge!")
 		if symmetry != SymmetryMode.OFF:
 			for sid in created_solids:
 				if sid >= 0: doc.mirror_solid_x(sid, symmetry == SymmetryMode.ROT_180)
 		_record_history("Place " + active_tool); map_sync.sync_all()
 		if not created_solids.is_empty() and created_solids[0] >= 0: _select_solid(created_solids[0], -1)
+		_spawn_place_fx(pos, HudWidgets.COL_ACC)
 		audio.play("place")
 	elif stage == Stage.GAMEPLAY:
 		var preset := active_tool; var team := 2
@@ -2768,6 +2984,8 @@ func _on_pie_action(aid: String) -> void:
 
 func _process(delta: float) -> void:
 	_terrain_sync_accum += delta
+	if icon_cache != null:
+		icon_cache.paused = (_rmb_looking or _mmb_panning or _dragging_face or _dragging_move or _dragging_gizmo or _dragging_vertex or _terrain_sculpting)
 	if _toast_ttl > 0.0:
 		_toast_ttl -= delta
 		if _toast_ttl <= 0.0: toast_panel.visible = false
@@ -2979,6 +3197,19 @@ func _setup_auto_shot(idx: int) -> void:
 			ent_vis.sync_all()
 			_open_history_drawer()
 			cam_pos = Vector3(9.0, 7.5, 13.5); editor_cam.look_at_from_position(cam_pos, Vector3(0.5, 1.2, 3.5), Vector3.UP)
+			cam_yaw = editor_cam.rotation.y; cam_pitch = editor_cam.rotation.x
+		"v6_turbine_editor":
+			_show_welcome_hub(false); _clear_official_bsp(); _clear_selection()
+			doc.load_vmf(repo_root.path_join("godot/maps/ctf_turbine_rebuilt.vmf"))
+			active_sky = doc.get_skyname(); we.environment.sky = assets.get_sky(active_sky)
+			map_sync.clear_all(); map_sync.sync_all(); ent_vis.sync_all()
+			map_title_lbl.text = "| ctf_turbine_rebuilt"
+			_dock_build_cat = "shapes"; set_stage(Stage.BUILD); _select_solid(4, 0)
+			cam_pos = Vector3(-13.5, 5.2, 11.5); editor_cam.look_at_from_position(cam_pos, Vector3(5.0, 1.5, -2.5), Vector3.UP)
+			cam_yaw = editor_cam.rotation.y; cam_pitch = editor_cam.rotation.x
+		"v6_turbine_prefabs":
+			_show_welcome_hub(false); _dock_build_cat = "prefabs"; set_stage(Stage.BUILD); _select_solid(4, 0)
+			cam_pos = Vector3(-13.5, 5.2, 11.5); editor_cam.look_at_from_position(cam_pos, Vector3(5.0, 1.5, -2.5), Vector3.UP)
 			cam_yaw = editor_cam.rotation.y; cam_pitch = editor_cam.rotation.x
 	if not viewing_bsp and not settings_modal.visible:
 		_update_hover(get_viewport().get_visible_rect().size * Vector2(0.42, 0.52))

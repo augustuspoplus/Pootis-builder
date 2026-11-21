@@ -85,6 +85,45 @@ static func style_tf2_button(btn: Button, font: Font, font_size: int = 13, accen
 	btn.add_theme_color_override("font_color", Color(0.11, 0.08, 0.05) if accent else COL_TX)
 	btn.add_theme_color_override("font_hover_color", Color(0.08, 0.05, 0.02) if accent else Color.WHITE)
 
+## Smooth tactile spring hover/click micro-animation for dock cards and tool rail icons!
+static func attach_spring_anim(ctrl: Control, hover_scale: float = 1.07) -> void:
+	if ctrl.has_meta("_spring_bound"):
+		return
+	ctrl.set_meta("_spring_bound", true)
+	var update_piv := func() -> void:
+		ctrl.pivot_offset = ctrl.size * 0.5
+	ctrl.resized.connect(update_piv)
+	ctrl.call_deferred("set_pivot_offset", ctrl.custom_minimum_size * 0.5)
+	ctrl.mouse_entered.connect(func():
+		if not ctrl.is_inside_tree(): return
+		ctrl.pivot_offset = ctrl.size * 0.5
+		ctrl.z_index = 4
+		var tw := ctrl.create_tween()
+		tw.set_ease(Tween.EASE_OUT).set_trans(Tween.TRANS_BACK)
+		tw.tween_property(ctrl, "scale", Vector2(hover_scale, hover_scale), 0.14)
+	)
+	ctrl.mouse_exited.connect(func():
+		if not ctrl.is_inside_tree(): return
+		ctrl.z_index = 0
+		var tw := ctrl.create_tween()
+		tw.set_ease(Tween.EASE_OUT).set_trans(Tween.TRANS_CUBIC)
+		tw.tween_property(ctrl, "scale", Vector2.ONE, 0.12)
+	)
+	if ctrl is BaseButton:
+		var bb := ctrl as BaseButton
+		bb.button_down.connect(func():
+			if not ctrl.is_inside_tree(): return
+			var tw := ctrl.create_tween()
+			tw.set_ease(Tween.EASE_OUT).set_trans(Tween.TRANS_CUBIC)
+			tw.tween_property(ctrl, "scale", Vector2(0.93, 0.93), 0.07)
+		)
+		bb.button_up.connect(func():
+			if not ctrl.is_inside_tree(): return
+			var tw := ctrl.create_tween()
+			tw.set_ease(Tween.EASE_OUT).set_trans(Tween.TRANS_BACK)
+			tw.tween_property(ctrl, "scale", Vector2(hover_scale, hover_scale) if ctrl.get_rect().has_point(ctrl.get_local_mouse_position()) else Vector2.ONE, 0.14)
+		)
+
 static func jump_threshold_callout(height_u: int) -> Dictionary:
 	if height_u <= 18:
 		return {"text": "%du â€” Walkable Step (<=18u)" % height_u, "color": COL_GREEN}
@@ -834,6 +873,20 @@ class VectorToolIcon extends Control:
 				draw_arc(c + Vector2(0, s * 0.45), s * 1.05, deg_to_rad(220), deg_to_rad(320), 16, col, 2.0)
 				draw_arc(c + Vector2(0, -s * 0.45), s * 1.05, deg_to_rad(40), deg_to_rad(140), 16, col, 2.0)
 				draw_circle(c, s * 0.34, col)
+			"push_pull": # SketchUp-style Face Extrude
+				draw_colored_polygon(PackedVector2Array([
+					c + Vector2(-s * 0.85, s * 0.35), c + Vector2(s * 0.85, s * 0.35),
+					c + Vector2(s * 0.55, s * 0.85), c + Vector2(-s * 0.55, s * 0.85),
+				]), mut)
+				draw_line(c + Vector2(0, s * 0.45), c + Vector2(0, -s * 0.78), col, 2.6)
+				draw_colored_polygon(PackedVector2Array([
+					c + Vector2(0, -s * 1.0), c + Vector2(-s * 0.52, -s * 0.32), c + Vector2(s * 0.52, -s * 0.32),
+				]), col)
+			"rotate": # Crisp Circular Rotate Arrow
+				draw_arc(c, s * 0.78, deg_to_rad(-40), deg_to_rad(245), 22, col, 2.5)
+				draw_colored_polygon(PackedVector2Array([
+					c + Vector2(s * 0.88, -s * 0.58), c + Vector2(s * 0.30, -s * 0.55), c + Vector2(s * 0.72, -s * 0.05),
+				]), col)
 			"raise":
 				draw_line(c + Vector2(0, s * 0.85), c + Vector2(0, -s * 0.75), col, 2.4)
 				draw_polyline(PackedVector2Array([c + Vector2(-s * 0.55, -s * 0.2), c + Vector2(0, -s * 0.8), c + Vector2(s * 0.55, -s * 0.2)]), col, 2.4)

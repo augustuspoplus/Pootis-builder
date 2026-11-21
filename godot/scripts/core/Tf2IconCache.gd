@@ -44,6 +44,7 @@ const ICON_SPECS := {
 
 var assets: RefCounted
 var icon_size: int = 160
+var paused: bool = false         # Paused during camera orbit/drag so editor FPS stays rock-solid!
 var _cache: Dictionary = {}      # key -> Texture2D
 var _failed: Dictionary = {}     # key -> true (negative cache so missing models are never re-queued!)
 var _queue: Array = []           # [{key, mdl, rot, pitch}]
@@ -51,6 +52,10 @@ var _queued_keys: Dictionary = {}
 var _studio: Dictionary = {}
 var _active_job: Dictionary = {}
 var _wait_frames: int = 0
+var _cooldown_frames: int = 0
+var _worker_task_id: int = -1
+var _worker_raw_result: Dictionary = {}
+var _worker_mutex := Mutex.new()
 
 func setup(p_assets: RefCounted, p_size: int = 160) -> void:
 	assets = p_assets
@@ -118,10 +123,46 @@ func queue_model_icon(key: String, mdl_path: String, rot_deg: Vector3 = Vector3(
 func _process(_delta: float) -> void:
 	if assets == null or _studio.is_empty():
 		return
+	if paused and _active_job.is_empty():
+		return
+	if _cooldown_frames > 0:
+		_cooldown_frames -= 1
+		return
 	if _active_job.is_empty():
 		if _queue.is_empty():
 			return
 		_active_job = _queue.pop_front()
+		var mdl_path := str(_active_job["mdl"])
+		if assets.has_cached_model(mdl_path):
+			_worker_task_id = -1
+			_active_job["stage"] = "mount"
+		else:
+			# Offload VPK/MDL/VTX/VVD parsing to background WorkerThreadPool so main thread NEVER stalls!
+			_active_job["stage"] = "decode"
+			var core_ref: Object = assets.core
+			_worker_task_id = WorkerThreadPool.add_task(func():
+				var raw: Dictionary = core_ref.read_model_data(mdl_path) if core_ref != null else {}
+				_worker_mutex.lock()
+				_worker_raw_result = raw
+				_worker_mutex.unlock()
+			)
+		return
+
+	if str(_active_job.get("stage", "")) == "decode":
+		if _worker_task_id != -1 and not WorkerThreadPool.is_task_completed(_worker_task_id):
+			return
+		if _worker_task_id != -1:
+			WorkerThreadPool.wait_for_task_completion(_worker_task_id)
+			_worker_task_id = -1
+		_worker_mutex.lock()
+		var raw_d := _worker_raw_result
+		_worker_raw_result = {}
+		_worker_mutex.unlock()
+		assets.build_model_from_raw(str(_active_job["mdl"]), raw_d)
+		_active_job["stage"] = "mount"
+		return
+
+	if str(_active_job.get("stage", "")) == "mount":
 		var mesh: ArrayMesh = assets.get_model_mesh(str(_active_job["mdl"]))
 		if mesh == null:
 			_failed[str(_active_job["key"])] = true
@@ -141,6 +182,7 @@ func _process(_delta: float) -> void:
 		var pr := deg_to_rad(float(_active_job["pitch"]))
 		cam.look_at_from_position(Vector3(0.0, sin(pr) * dist, cos(pr) * dist), Vector3.ZERO, Vector3.UP)
 		_wait_frames = 0
+		_active_job["stage"] = "capture"
 		return
 
 	_wait_frames += 1
@@ -155,3 +197,4 @@ func _process(_delta: float) -> void:
 			icon_ready.emit(key, tex)
 		_queued_keys.erase(key)
 		_active_job.clear()
+		_cooldown_frames = 2

@@ -583,12 +583,12 @@ static func build_props_drawer(app: Node3D, vbox: VBoxContainer) -> void:
 	sr_row.add_child(sc_minus); sr_row.add_child(sc_lbl); sr_row.add_child(sc_plus)
 
 	var rot_b := Button.new()
-	rot_b.text = "Yaw: %dÂ° (R)" % int(app.prop_yaw_deg)
+	rot_b.text = "Yaw: %d° (R)" % int(app.prop_yaw_deg)
 	rot_b.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	HudWidgets.style_tf2_button(rot_b, fonts["body"], 10)
 	rot_b.pressed.connect(func():
 		app.prop_yaw_deg = fmod(app.prop_yaw_deg + 90.0, 360.0)
-		rot_b.text = "Yaw: %dÂ° (R)" % int(app.prop_yaw_deg)
+		rot_b.text = "Yaw: %d° (R)" % int(app.prop_yaw_deg)
 		app.audio.play("click")
 	)
 	sr_row.add_child(rot_b)
