@@ -4898,6 +4898,17 @@ func _setup_auto_shot(idx: int) -> void:
 			set_stage(Stage.GAMEPLAY); _open_gamemode_wizard()
 			cam_pos = Vector3(-13.5, 6.2, 12.0); editor_cam.look_at_from_position(cam_pos, Vector3(4.0, 1.5, -2.0), Vector3.UP)
 			cam_yaw = editor_cam.rotation.y; cam_pitch = editor_cam.rotation.x
+		"v16_foundry_mini":
+			_show_welcome_hub(false); _clear_official_bsp(); _clear_selection()
+			doc.load_vmf(repo_root.path_join("godot/maps/cp_foundry_mini.vmf"))
+			active_gamemode = "cp"
+			map_sync.clear_all(); map_sync.sync_all(); ent_vis.sync_all()
+			set_stage(Stage.STYLE); right_drawer.visible = false
+			_set_lighting_mode(1)
+			minimap_enabled = true; diag_popover.visible = false; _sync_mode_visibility()
+			cam_pos = Vector3(-17.0, 9.0, 13.5); editor_cam.look_at_from_position(cam_pos, Vector3(3.0, 1.8, -1.5), Vector3.UP)
+			cam_yaw = editor_cam.rotation.y; cam_pitch = editor_cam.rotation.x
+			_refresh_2d_views(true)
 	if not viewing_bsp and not settings_modal.visible:
 		_update_hover(get_viewport().get_visible_rect().size * Vector2(0.42, 0.52))
 
