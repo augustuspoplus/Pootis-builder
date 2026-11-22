@@ -162,6 +162,8 @@ func _collect_candidates(query: String) -> Array[Dictionary]:
 		{"tag": "TOOL",   "col": HudWidgets.COL_GREEN,"title": "Auto-Seal Skybox Shell",                   "sub": "Wrap entire map cleanly in TOOLSSKYBOX (0 leaks)", "kind": "cmd", "id": "seal"},
 		{"tag": "TOOL",   "col": HudWidgets.COL_GREEN,"title": "Check Map for Problems (Alt+P)",           "sub": "Run leak, spawn, lighting & gamemode diagnostics", "kind": "cmd", "id": "check"},
 		{"tag": "TOOL",   "col": HudWidgets.COL_GREEN,"title": "Toggle Split 2D Blueprint Views",          "sub": "Top (X/Y) & Side (X/Z) elevation with jump guides", "kind": "cmd", "id": "split2d"},
+		{"tag": "TOOL",   "col": HudWidgets.COL_CYAN, "title": "Toggle Interactive 2D Mini-Map Radar (M)", "sub": "Live corner TF2 map radar — click anywhere to jump camera", "kind": "cmd", "id": "minimap"},
+		{"tag": "TOOL",   "col": HudWidgets.COL_ACC,  "title": "Toggle Live Map Diagnostics Popover",      "sub": "View solids, entities, lights, VPK cache & 1-click Auto-Seal", "kind": "cmd", "id": "diagnostics"},
 		{"tag": "ACTION", "col": HudWidgets.COL_TX,   "title": "Settings & UI Scale (Ctrl+,)",             "sub": "Display scaling 100%-225%, graphics, keybinds, compilers", "kind": "cmd", "id": "settings"},
 		{"tag": "PLAY",   "col": HudWidgets.COL_RED,  "title": "Walk Inside Map / Playtest (F5)",          "sub": "First-person TF2 movement, rocket jumping & sliding doors", "kind": "cmd", "id": "playtest"},
 	]
@@ -322,6 +324,8 @@ func _run_item(it: Dictionary) -> void:
 			"seal": app._do_auto_seal()
 			"check": app._open_check_problems_drawer()
 			"split2d": app._toggle_split_2d()
+			"minimap": app._toggle_minimap()
+			"diagnostics": app._toggle_diagnostics_popover()
 			"settings": app.settings_modal.open_modal()
 			"playtest": app.set_stage(app.Stage.PLAYTEST)
 	elif kind == "vmf":

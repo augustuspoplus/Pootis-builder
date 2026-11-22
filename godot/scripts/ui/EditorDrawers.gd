@@ -1852,8 +1852,10 @@ static func build_viewport_menu_drawer(app: Node3D, vbox: VBoxContainer) -> void
 	v3.add_child(g3)
 	for act in [
 		{"t": "Scene Outliner (O)",   "fn": func(): app._open_outliner_drawer()},
+		{"t": "Mini-Map Radar (M)",   "fn": func(): app._toggle_minimap()},
 		{"t": "Split 2D Blueprints",  "fn": func(): app._toggle_split_2d()},
 		{"t": "VisGroups & Layers",   "fn": func(): app._open_visgroups_drawer()},
+		{"t": "Map Diagnostics",      "fn": func(): app._toggle_diagnostics_popover()},
 		{"t": "Zen Viewport (Tab)",   "fn": func(): app._toggle_zen_mode()},
 		{"t": "Focus Selection (F)",  "fn": func(): app._focus_camera_on_selection()},
 		{"t": "Top-Down 2D (Space)",  "fn": func(): app._toggle_2d_view()},

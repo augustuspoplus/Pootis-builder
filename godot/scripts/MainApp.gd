@@ -1,6 +1,6 @@
 ﻿extends Node3D
 
-## Pootis Builder 2.0 â€” Complete Valve-Grade TF2 Map Creator (Godot 4 Forward+ + Native C++20 GDExtension)
+## Pootis Builder 2.0 — Complete Valve-Grade TF2 Map Creator (Godot 4 Forward+ + Native C++20 GDExtension)
 ## Unites ALL 5 Overhaul Phases:
 ##   1. Responsive HiDPI-Aware Floating TF2 HUD + Extensive 7-Tab Settings Menu (AppSettings + SettingsModal)
 ##   2. Real 3D TF2 VPK Game-Asset Icons (Tf2IconCache) + True Drag-and-Drop onto 3D Viewport
@@ -235,6 +235,11 @@ var bp_side: Control
 var status_pill: PanelContainer
 var status_lbl_top: Label
 var status_lbl_bot: Label
+var minimap_panel: PanelContainer
+var minimap_view: Control
+var minimap_enabled: bool = false
+var diag_popover: PanelContainer
+var diag_vbox: VBoxContainer
 var playtest_hud: Control
 var playtest_lbl: Label
 var toast_wrap: CenterContainer
@@ -468,7 +473,7 @@ func _create_editor_helpers() -> void:
 	_gizmo_root.add_child(gdot)
 
 # ==============================================================================
-# UI CONSTRUCTION (Expanded Current Floating TF2 HUD â€” 100% Responsive!)
+# UI CONSTRUCTION (Expanded Current Floating TF2 HUD — 100% Responsive!)
 # ==============================================================================
 func _init_ui() -> void:
 	hud_layer = CanvasLayer.new()
@@ -491,6 +496,8 @@ func _init_ui() -> void:
 	_build_selection_bar()
 	_build_bottom_dock()
 	_build_status_pill()
+	_build_diagnostics_popover()
+	_build_minimap_overlay()
 	_build_right_drawer()
 	_build_split_2d_pane()
 	_build_playtest_hud()
@@ -523,7 +530,7 @@ func _init_ui() -> void:
 	hud_layer.add_child(zen_pill)
 
 	# Apply global TF2 theme directly onto CanvasLayer control roots (CanvasLayer breaks Window.theme inheritance!)
-	for ctrl in [top_bar, context_bar, left_rail_panel, tool_hover_card, bottom_dock, selection_bar, right_drawer, split_2d_panel, welcome_panel, settings_modal, command_palette]:
+	for ctrl in [top_bar, context_bar, left_rail_panel, tool_hover_card, bottom_dock, selection_bar, minimap_panel, diag_popover, right_drawer, split_2d_panel, welcome_panel, settings_modal, command_palette]:
 		if ctrl is Control:
 			(ctrl as Control).theme = ui_theme
 
@@ -562,20 +569,24 @@ func _build_toast_pill() -> void:
 	toast_panel.add_child(status_toast)
 
 func _build_status_pill() -> void:
-	# Compact 2-line bottom-left telemetry pill (never collides with centered dock!)
+	# Compact 2-line bottom-left telemetry pill with clickable Diagnostics toggle!
 	status_pill = HudWidgets.HudFrame.new(HudWidgets.COL_LIP_AMB, 8.0, true)
 	status_pill.set_anchors_preset(Control.PRESET_BOTTOM_LEFT)
 	status_pill.offset_left = 12
 	status_pill.offset_bottom = -12
 	status_pill.offset_top = -56
-	status_pill.offset_right = 235
-	status_pill.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	status_pill.offset_right = 236
 	hud_layer.add_child(status_pill)
 
+	var hb := HBoxContainer.new()
+	hb.add_theme_constant_override("separation", 6)
+	status_pill.add_child(hb)
+
 	var vb := VBoxContainer.new()
+	vb.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	vb.add_theme_constant_override("separation", 1)
 	vb.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	status_pill.add_child(vb)
+	hb.add_child(vb)
 
 	status_lbl_top = Label.new()
 	status_lbl_top.text = "XYZ: 0u, 0u, 0u"
@@ -590,6 +601,114 @@ func _build_status_pill() -> void:
 	status_lbl_bot.add_theme_font_size_override("font_size", 10)
 	status_lbl_bot.add_theme_color_override("font_color", HudWidgets.COL_GREEN)
 	vb.add_child(status_lbl_bot)
+
+	var db := Button.new()
+	db.text = "Info"
+	db.tooltip_text = "Open Live Map Diagnostics & Telemetry"
+	HudWidgets.style_tf2_button(db, fonts["heading"], 9)
+	db.pressed.connect(func(): audio.play("click"); _toggle_diagnostics_popover())
+	hb.add_child(db)
+
+func _build_diagnostics_popover() -> void:
+	diag_popover = HudWidgets.HudFrame.new(HudWidgets.COL_CYAN, 9.0, true)
+	diag_popover.set_anchors_preset(Control.PRESET_BOTTOM_LEFT)
+	diag_popover.offset_left = 74
+	diag_popover.offset_right = 408
+	diag_popover.offset_bottom = -168
+	diag_popover.offset_top = -352
+	diag_popover.visible = false
+	hud_layer.add_child(diag_popover)
+
+	diag_vbox = VBoxContainer.new()
+	diag_vbox.add_theme_constant_override("separation", 5)
+	diag_popover.add_child(diag_vbox)
+
+func _toggle_diagnostics_popover() -> void:
+	if diag_popover == null: return
+	diag_popover.visible = not diag_popover.visible
+	if diag_popover.visible:
+		_refresh_diagnostics_popover()
+
+func _refresh_diagnostics_popover() -> void:
+	if diag_vbox == null or not diag_popover.visible:
+		return
+	for ch in diag_vbox.get_children():
+		ch.queue_free()
+	var hdr := HBoxContainer.new(); diag_vbox.add_child(hdr)
+	var tl := Label.new(); tl.text = "LIVE MAP DIAGNOSTICS"; tl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	tl.add_theme_font_override("font", fonts["heading"]); tl.add_theme_font_size_override("font_size", 12)
+	tl.add_theme_color_override("font_color", HudWidgets.COL_CYAN); hdr.add_child(tl)
+	var xb := Button.new(); xb.text = "X"; HudWidgets.style_tf2_button(xb, fonts["heading"], 9)
+	xb.pressed.connect(func(): diag_popover.visible = false); hdr.add_child(xb)
+
+	var scnt: int = doc.get_solid_count()
+	var ents: Array = doc.get_entities()
+	var l_cnt := 0; var p_cnt := 0; var sp_cnt := 0
+	for e in ents:
+		var cls := str(e.get("classname", ""))
+		if cls.begins_with("light"): l_cnt += 1
+		elif cls.begins_with("prop_"): p_cnt += 1
+		elif cls == "info_player_teamspawn": sp_cnt += 1
+	var sealed: bool = doc.is_map_sealed()
+	var rows := [
+		["Map / Mode:", "%s (%s)" % [doc.get_map_name(), active_gamemode.to_upper()], HudWidgets.COL_ACC],
+		["Brushes / Props:", "%d solids | %d props" % [scnt, p_cnt], HudWidgets.COL_TX],
+		["Entities:", "%d total | %d lights | %d spawns" % [ents.size(), l_cnt, sp_cnt], HudWidgets.COL_TX],
+		["VPK Cache:", "%d mats | %d 3D models" % [assets._mat_cache.size(), assets._mesh_cache.size()], HudWidgets.COL_TX_MUTED],
+		["Seal Status:", "SEALED (0 Leaks)" if sealed else "OPEN VOID (Needs Seal!)", HudWidgets.COL_GREEN if sealed else HudWidgets.COL_RED],
+	]
+	for r in rows:
+		var rhb := HBoxContainer.new(); diag_vbox.add_child(rhb)
+		var k := Label.new(); k.text = str(r[0]); k.custom_minimum_size = Vector2(96, 0)
+		k.add_theme_font_override("font", fonts["body"]); k.add_theme_font_size_override("font_size", 10)
+		k.add_theme_color_override("font_color", HudWidgets.COL_TX_MUTED); rhb.add_child(k)
+		var v := Label.new(); v.text = str(r[1]); v.size_flags_horizontal = Control.SIZE_EXPAND_FILL; v.clip_text = true
+		v.add_theme_font_override("font", fonts["mono"]); v.add_theme_font_size_override("font_size", 10)
+		v.add_theme_color_override("font_color", r[2]); rhb.add_child(v)
+
+	var brow := HBoxContainer.new(); brow.add_theme_constant_override("separation", 5); diag_vbox.add_child(brow)
+	var sb := Button.new(); sb.text = "Auto-Seal"; sb.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	HudWidgets.style_tf2_button(sb, fonts["heading"], 10, not sealed)
+	sb.pressed.connect(func(): _do_auto_seal(); _refresh_diagnostics_popover())
+	brow.add_child(sb)
+	var cb := Button.new(); cb.text = "Alt+P Check"; cb.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	HudWidgets.style_tf2_button(cb, fonts["body"], 10, false, 3)
+	cb.pressed.connect(func(): diag_popover.visible = false; _open_check_problems_drawer())
+	brow.add_child(cb)
+
+func _build_minimap_overlay() -> void:
+	minimap_panel = HudWidgets.HudFrame.new(HudWidgets.COL_CYAN, 8.0, true)
+	minimap_panel.set_anchors_preset(Control.PRESET_TOP_RIGHT)
+	minimap_panel.offset_right = -12
+	minimap_panel.offset_left = -228
+	minimap_panel.offset_top = 66
+	minimap_panel.offset_bottom = 266
+	minimap_panel.visible = false
+	hud_layer.add_child(minimap_panel)
+
+	minimap_view = Blueprint2DScript.new()
+	minimap_view.minimap_mode = true
+	minimap_view.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	minimap_view.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	minimap_view.setup(doc, fonts["mono"], 0)
+	minimap_view.world_clicked.connect(func(wxz: Vector2):
+		cam_pos = Vector3(wxz.x, maxf(cam_pos.y, 11.0), wxz.y + 8.0)
+		editor_cam.look_at_from_position(cam_pos, Vector3(wxz.x, 1.5, wxz.y), Vector3.UP)
+		cam_yaw = editor_cam.rotation.y; cam_pitch = editor_cam.rotation.x
+		_refresh_2d_views(false)
+		audio.play("click")
+		_toast("Radar jumped camera to (%du, %du)" % [int(round(wxz.x * UPM)), int(round(wxz.y * UPM))])
+	)
+	minimap_panel.add_child(minimap_view)
+
+func _toggle_minimap() -> void:
+	minimap_enabled = not minimap_enabled
+	_sync_mode_visibility()
+	if minimap_enabled:
+		_refresh_2d_views(true)
+		_toast("Interactive 2D Mini-Map Radar ON (M) — click anywhere on radar to jump camera!")
+	else:
+		_toast("Mini-Map Radar hidden (Press M to reopen)")
 
 func _build_context_bar() -> void:
 	context_bar_wrap = CenterContainer.new()
@@ -1460,9 +1579,9 @@ func _rebuild_bottom_dock() -> void:
 			)
 			row.add_child(card)
 
-		var next_b := Button.new(); next_b.text = ">"; next_b.custom_minimum_size = Vector2(28, 82)
+		var next_b := Button.new(); next_b.text = ">\n%d/%d" % [_dock_ent_page + 1, total_pages]; next_b.custom_minimum_size = Vector2(36, 82)
 		next_b.disabled = (_dock_ent_page >= total_pages - 1)
-		HudWidgets.style_tf2_button(next_b, fonts["heading"], 14)
+		HudWidgets.style_tf2_button(next_b, fonts["mono"], 10)
 		next_b.pressed.connect(func(): audio.play("click"); _dock_ent_page = mini(total_pages - 1, _dock_ent_page + 1); _rebuild_bottom_dock())
 		row.add_child(next_b)
 		return
@@ -1506,7 +1625,7 @@ func _rebuild_bottom_dock() -> void:
 		var short_nm: String = str(box["name"]).get_slice(" &", 0)
 		var tb := Button.new()
 		tb.text = short_nm
-		tb.tooltip_text = "%s â€” %s" % [str(box["name"]), str(box["subtitle"])]
+		tb.tooltip_text = "%s — %s" % [str(box["name"]), str(box["subtitle"])]
 		_style_dock_tab(tb, box["color"], _dock_prop_cat == cid)
 		tb.pressed.connect(func():
 			audio.play("click")
@@ -1576,7 +1695,7 @@ func _rebuild_bottom_dock() -> void:
 
 	if pitems.is_empty():
 		var empty_l := Label.new()
-		empty_l.text = "No saved props yet â€” click '+' on any prop in Browse All to save favorites!"
+		empty_l.text = "No saved props yet — click '+' on any prop in Browse All to save favorites!"
 		empty_l.add_theme_font_override("font", fonts["body"]); empty_l.add_theme_font_size_override("font_size", 12)
 		empty_l.add_theme_color_override("font_color", HudWidgets.COL_TX_MUTED)
 		prow.add_child(empty_l)
@@ -1590,7 +1709,7 @@ func _rebuild_bottom_dock() -> void:
 			var tex: Texture2D = icon_cache.get_icon(mp) if icon_cache != null else null
 			var card := HudWidgets.DockCardSlot.new(nm, cat_sub, tex, "", is_sel, plip, fonts["body"], {"kind": "prop", "mdl": mp, "name": nm})
 			HudWidgets.attach_spring_anim(card, 1.06)
-			card.tooltip_text = "%s\n(%s)\nDrag into 3D or Click to stamp  â€¢  Press R to rotate" % [nm, mp]
+			card.tooltip_text = "%s\n(%s)\nDrag into 3D or Click to stamp  |  Press R to rotate" % [nm, mp]
 			if not dock_slot_map.has(mp): dock_slot_map[mp] = []
 			(dock_slot_map[mp] as Array).append(card)
 			card.pressed.connect(func():
@@ -1603,9 +1722,9 @@ func _rebuild_bottom_dock() -> void:
 			)
 			prow.add_child(card)
 
-	var pnext := Button.new(); pnext.text = ">"; pnext.custom_minimum_size = Vector2(28, 82)
+	var pnext := Button.new(); pnext.text = ">\n%d/%d" % [_dock_prop_page + 1, p_pages]; pnext.custom_minimum_size = Vector2(36, 82)
 	pnext.disabled = (_dock_prop_page >= p_pages - 1)
-	HudWidgets.style_tf2_button(pnext, fonts["heading"], 14)
+	HudWidgets.style_tf2_button(pnext, fonts["mono"], 10)
 	pnext.pressed.connect(func(): audio.play("click"); _dock_prop_page = mini(p_pages - 1, _dock_prop_page + 1); _rebuild_bottom_dock())
 	prow.add_child(pnext)
 
@@ -1873,10 +1992,14 @@ func _toggle_split_2d() -> void:
 func _refresh_2d_views(geo_changed: bool = false) -> void:
 	if bp_top != null:
 		if geo_changed: bp_top.mark_geometry_dirty()
-		if split_2d_panel.visible: bp_top.refresh(selected_solid, cam_pos)
+		if split_2d_panel.visible: bp_top.refresh(selected_solid, cam_pos, false, cam_yaw)
 	if bp_side != null:
 		if geo_changed: bp_side.mark_geometry_dirty()
-		if split_2d_panel.visible: bp_side.refresh(selected_solid, cam_pos)
+		if split_2d_panel.visible: bp_side.refresh(selected_solid, cam_pos, false, cam_yaw)
+	if minimap_view != null:
+		if geo_changed: minimap_view.mark_geometry_dirty()
+		if minimap_panel != null and minimap_panel.visible:
+			minimap_view.refresh(selected_solid, cam_pos, false, cam_yaw)
 
 func _track_recent_material(mp: String) -> void:
 	if mp.is_empty(): return
@@ -1911,12 +2034,15 @@ func _sync_mode_visibility() -> void:
 	bottom_dock.visible = (stage != Stage.PLAYTEST) and not zen_mode
 	if zen_pill != null:
 		zen_pill.visible = is_edit and zen_mode
+	if minimap_panel != null:
+		minimap_panel.visible = show_hud and minimap_enabled and not split_2d_panel.visible and not right_drawer.visible
 	for n in edit_only_top_nodes:
 		if is_instance_valid(n):
 			n.visible = is_edit
 	if not show_hud:
 		split_2d_panel.visible = false
 		right_drawer.visible = false
+		if diag_popover != null: diag_popover.visible = false
 		if context_bar != null: context_bar.visible = false
 		if selection_bar != null: selection_bar.visible = false
 		if tool_hover_card != null: tool_hover_card.visible = false
@@ -2101,6 +2227,8 @@ func _clear_drawer(title: String) -> void:
 	for ch in right_drawer_vbox.get_children():
 		ch.queue_free()
 	right_drawer.visible = true
+	if minimap_panel != null:
+		minimap_panel.visible = false
 	if was_hidden and is_inside_tree():
 		right_drawer.modulate = Color(1, 1, 1, 0)
 		var tw := create_tween()
@@ -2919,7 +3047,7 @@ func _load_gamemode(mode_id: String, biome_override: String = "", show_toast: bo
 	map_title_lbl.text = "| " + str(meta["map_name"])
 	_reset_history("New %s Map" % mode_id.to_upper())
 	_sync_mode_visibility(); _rebuild_bottom_dock(); _refresh_2d_views()
-	if show_toast: _toast("Created %s starter map â€” sealed & ready to edit or F5 playtest!" % mode_id.to_upper())
+	if show_toast: _toast("Created %s starter map — sealed & ready to edit or F5 playtest!" % mode_id.to_upper())
 
 func _load_official_bsp(map_name: String) -> void:
 	_clear_official_bsp(); _clear_selection()
@@ -2943,7 +3071,7 @@ func _load_official_bsp(map_name: String) -> void:
 	cam_pos = current_bsp_spawn + Vector3(12, 10, 12)
 	_apply_editor_cam()
 	_sync_mode_visibility(); _rebuild_bottom_dock(); _refresh_selection_bar(); overlay_2d.queue_redraw()
-	_toast("Loaded %s (%d props, %d sliding doors, %.2fs) â€” press F5 to walk inside!" % [
+	_toast("Loaded %s (%d props, %d sliding doors, %.2fs) — press F5 to walk inside!" % [
 		map_name, int(res.get("prop_count", 0)), int(res.get("door_count", 0)), float(res.get("load_ms", 0.0)) / 1000.0
 	])
 
@@ -3259,10 +3387,10 @@ func _on_compile_status(st: Dictionary) -> void:
 func _on_compile_finished(st: Dictionary) -> void:
 	if not str(st.get("leak_file", "")).is_empty():
 		audio.play("warn")
-		_toast("LEAK DETECTED! Red 3D Leak Laser drawn â€” open Check (Alt+P) to seal!")
+		_toast("LEAK DETECTED! Red 3D Leak Laser drawn — open Check (Alt+P) to seal!")
 	elif st.get("succeeded", false):
 		audio.play("success")
-		_toast("Compile SUCCEEDED (%.1fs) â€” 0 leaks!" % float(st.get("elapsed", 0.0)))
+		_toast("Compile SUCCEEDED (%.1fs) — 0 leaks!" % float(st.get("elapsed", 0.0)))
 	else:
 		audio.play("warn")
 		_toast("Compile failed in stage: " + str(st.get("stage", "")))
@@ -3489,6 +3617,7 @@ func _unhandled_input(event: InputEvent) -> void:
 			elif event.keycode == KEY_BRACKETLEFT: _step_grid(-1)
 			elif event.keycode == KEY_BRACKETRIGHT: _step_grid(1)
 			elif event.keycode == KEY_O and not event.ctrl_pressed and not event.alt_pressed: _open_outliner_drawer()
+			elif event.keycode == KEY_M and not event.ctrl_pressed and not event.alt_pressed: _toggle_minimap()
 			elif event.keycode == KEY_F and not event.ctrl_pressed and not event.alt_pressed: _focus_camera_on_selection()
 			elif event.ctrl_pressed and event.keycode in [KEY_1, KEY_2, KEY_3, KEY_4]:
 				_save_camera_bookmark(event.keycode - KEY_0)
@@ -3704,7 +3833,7 @@ func _pick_scene_object(ro: Vector3, rd: Vector3) -> Dictionary:
 
 func _handle_left_click(screen_pos: Vector2, shift_held: bool = false, alt_held: bool = false) -> void:
 	if viewing_bsp:
-		_toast("Viewing official %s â€” click 'Walk Inside (F5)' below!" % current_bsp_name); return
+		_toast("Viewing official %s — click 'Walk Inside (F5)' below!" % current_bsp_name); return
 	var ro := editor_cam.project_ray_origin(screen_pos); var rd := editor_cam.project_ray_normal(screen_pos)
 
 	if active_tool == "wire_io":
@@ -4556,6 +4685,18 @@ func _setup_auto_shot(idx: int) -> void:
 			active_tool = "spline_path"; _open_spline_drawer(); _refresh_context_bar()
 			cam_pos = Vector3(15.0, 11.5, 17.0); editor_cam.look_at_from_position(cam_pos, Vector3(-1.0, 1.5, -1.0), Vector3.UP)
 			cam_yaw = editor_cam.rotation.y; cam_pitch = editor_cam.rotation.x
+		"v14_minimap":
+			_set_lighting_mode(0); _show_welcome_hub(false); _clear_official_bsp(); _clear_selection()
+			doc.load_vmf(repo_root.path_join("godot/maps/ctf_turbine_rebuilt.vmf"))
+			active_gamemode = "ctf"
+			map_sync.clear_all(); map_sync.sync_all(); ent_vis.sync_all()
+			set_stage(Stage.STYLE); right_drawer.visible = false
+			_dock_prop_cat = "winter"; _dock_prop_page = 0; _rebuild_bottom_dock()
+			minimap_enabled = true; _sync_mode_visibility()
+			diag_popover.visible = true; _refresh_diagnostics_popover()
+			cam_pos = Vector3(-13.5, 6.2, 12.0); editor_cam.look_at_from_position(cam_pos, Vector3(4.0, 1.5, -2.0), Vector3.UP)
+			cam_yaw = editor_cam.rotation.y; cam_pitch = editor_cam.rotation.x
+			_refresh_2d_views(true)
 	if not viewing_bsp and not settings_modal.visible:
 		_update_hover(get_viewport().get_visible_rect().size * Vector2(0.42, 0.52))
 

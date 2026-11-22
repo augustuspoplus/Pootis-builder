@@ -6,17 +6,21 @@ extends Control
 ## Mode 1 = SIDE (X/Z) Elevation (dedicated vertical fit + floor-relative 48u/128u/192u TF2 Jump Guides!)
 
 signal solid_clicked(solid_idx: int)
+signal world_clicked(world_xz: Vector2)
 
 const UPM := 32.0
 var doc: Object
 var font: Font
 var mode: int = 0 # 0=TOP (X/Z in Godot), 1=SIDE (X/Y in Godot)
+var minimap_mode: bool = false
 var selected_solid: int = -1
 var camera_pos: Vector3 = Vector3.ZERO
+var camera_yaw: float = 0.0
 var _zoom: float = 1.0
 var _pan_px: Vector2 = Vector2.ZERO
 var _panning: bool = false
 var _last_solid_rects: Array = [] # [{idx, rect}]
+var _last_xform: Dictionary = {} # {cx, cv, ox, oy, sc_x, sc_y}
 var _geo_dirty: bool = true
 var _cached_solids: Array = []
 var _cached_ents: Array = []
@@ -36,11 +40,12 @@ func mark_geometry_dirty() -> void:
 	_geo_dirty = true
 	queue_redraw()
 
-func refresh(p_sel_solid: int, p_cam_pos: Vector3, geo_changed: bool = false) -> void:
+func refresh(p_sel_solid: int, p_cam_pos: Vector3, geo_changed: bool = false, p_cam_yaw: float = 0.0) -> void:
 	if geo_changed:
 		_geo_dirty = true
 	selected_solid = p_sel_solid
 	camera_pos = p_cam_pos
+	camera_yaw = p_cam_yaw
 	queue_redraw()
 
 func _rebuild_geo_cache() -> void:
@@ -82,6 +87,12 @@ func _gui_input(event: InputEvent) -> void:
 		elif mb.button_index == MOUSE_BUTTON_MIDDLE or mb.button_index == MOUSE_BUTTON_RIGHT:
 			_panning = mb.pressed; accept_event()
 		elif mb.button_index == MOUSE_BUTTON_LEFT and mb.pressed:
+			if minimap_mode and not _last_xform.is_empty():
+				var wx: float = float(_last_xform["cx"]) + (mb.position.x - float(_last_xform["ox"])) / maxf(0.001, float(_last_xform["sc_x"]))
+				var wz: float = float(_last_xform["cv"]) + (mb.position.y - float(_last_xform["oy"])) / maxf(0.001, float(_last_xform["sc_y"]))
+				world_clicked.emit(Vector2(wx, wz))
+				accept_event()
+				return
 			if mb.double_click:
 				_zoom = 1.0; _pan_px = Vector2.ZERO; queue_redraw(); accept_event(); return
 			var best_idx := -1
@@ -140,6 +151,7 @@ func _draw() -> void:
 	var cv := ((mn.z + mx.z) * 0.5) if mode == 0 else ((minf(mn.y, floor_y - 1.0) + maxf(mx.y + 1.5, floor_y + 7.5)) * 0.5)
 	var ox := pad + draw_w * 0.5 + _pan_px.x
 	var oy := 22.0 + draw_h * 0.5 + _pan_px.y
+	_last_xform = {"cx": cx, "cv": cv, "ox": ox, "oy": oy, "sc_x": sc_x, "sc_y": sc_y}
 
 	var to_px := func(wx: float, wv: float) -> Vector2:
 		if mode == 0:
@@ -218,11 +230,18 @@ func _draw() -> void:
 				draw_circle(pt, 3.0, Color(0.32, 0.86, 0.45))
 			elif cls.begins_with("item_ammopack"):
 				draw_circle(pt, 3.0, Color(0.92, 0.68, 0.25))
-		var cp: Vector2 = to_px.call(camera_pos.x, camera_pos.z)
-		draw_circle(cp.clamp(Vector2(6, 24), size - Vector2(6, 6)), 4.2, Color(0.20, 0.94, 1.0))
+		var cp: Vector2 = to_px.call(camera_pos.x, camera_pos.z).clamp(Vector2(6, 24), size - Vector2(6, 6))
+		if minimap_mode:
+			var fwd := Vector2(-sin(camera_yaw), -cos(camera_yaw)).normalized()
+			var left_ray := fwd.rotated(-0.46) * 20.0
+			var right_ray := fwd.rotated(0.46) * 20.0
+			draw_colored_polygon(PackedVector2Array([cp, cp + left_ray, cp + right_ray]), Color(0.20, 0.94, 1.0, 0.28))
+			draw_line(cp, cp + left_ray, Color(0.20, 0.94, 1.0, 0.72), 1.2)
+			draw_line(cp, cp + right_ray, Color(0.20, 0.94, 1.0, 0.72), 1.2)
+		draw_circle(cp, 4.2, Color(0.20, 0.94, 1.0))
 
 	# Header label
 	draw_rect(Rect2(0, 0, w, 20), Color(0.06, 0.07, 0.08, 0.94), true)
 	if font != null:
-		var title := "TOP (X/Y) — Span: %du (Click/Wheel/RMB)" % int(round(span_x * UPM)) if mode == 0 else "SIDE (X/Z) — Floor-Relative TF2 Jump Guides"
-		draw_string(font, Vector2(6, 14), title, HORIZONTAL_ALIGNMENT_LEFT, -1, 10, Color(0.92, 0.62, 0.26))
+		var title := "RADAR (M) — Click to Jump" if minimap_mode else ("TOP (X/Y) — Span: %du (Click/Wheel/RMB)" % int(round(span_x * UPM)) if mode == 0 else "SIDE (X/Z) — Floor-Relative TF2 Jump Guides")
+		draw_string(font, Vector2(6, 14), title, HORIZONTAL_ALIGNMENT_LEFT, -1, 10, Color(0.20, 0.94, 1.0) if minimap_mode else Color(0.92, 0.62, 0.26))

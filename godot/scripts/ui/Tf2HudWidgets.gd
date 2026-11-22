@@ -1,7 +1,7 @@
 ﻿class_name Tf2HudWidgets
 extends RefCounted
 
-## Milestone 11 â€” Valve-Grade TF2 In-Game HUD Widgets for Godot 4.
+## Milestone 11 — Valve-Grade TF2 In-Game HUD Widgets for Godot 4.
 ## Authentic TF2 palette (warm charcoal #1D1916 + 4px amber lip #CF7336 + cream text #F0E6D2),
 ## official Valve TF2 fonts (tf2build.ttf / tf2secondary.ttf), isometric 3D piece icons,
 ## RED/BLU team crests, and the Q Voice-Menu Radial Pie Wheel!
