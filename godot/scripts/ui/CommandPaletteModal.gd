@@ -163,6 +163,8 @@ func _collect_candidates(query: String) -> Array[Dictionary]:
 		{"tag": "TOOL",   "col": HudWidgets.COL_GREEN,"title": "Check Map for Problems (Alt+P)",           "sub": "Run leak, spawn, lighting & gamemode diagnostics", "kind": "cmd", "id": "check"},
 		{"tag": "TOOL",   "col": HudWidgets.COL_GREEN,"title": "Toggle Split 2D Blueprint Views",          "sub": "Top (X/Y) & Side (X/Z) elevation with jump guides", "kind": "cmd", "id": "split2d"},
 		{"tag": "TOOL",   "col": HudWidgets.COL_CYAN, "title": "Toggle Interactive 2D Mini-Map Radar (M)", "sub": "Live corner TF2 map radar — click anywhere to jump camera", "kind": "cmd", "id": "minimap"},
+		{"tag": "TOOL",   "col": Color(0.96, 0.36, 0.32), "title": "3D Sniper Sightline & Cover Heat-Rays (Alt+S)", "sub": "Cast 360 deg Green/Amber/Red sightline rays to catch OP >2048u sightlines", "kind": "cmd", "id": "sightlines"},
+		{"tag": "STUDIO", "col": HudWidgets.COL_ACC,  "title": "Smart Gamemode Logic Studio (CTF / KOTH / 5CP)", "sub": "Checklist + 1-click Valve CTF Intel, KOTH & 5CP entity wiring", "kind": "cmd", "id": "gamemode_studio"},
 		{"tag": "TOOL",   "col": HudWidgets.COL_ACC,  "title": "Toggle Live Map Diagnostics Popover",      "sub": "View solids, entities, lights, VPK cache & 1-click Auto-Seal", "kind": "cmd", "id": "diagnostics"},
 		{"tag": "ACTION", "col": HudWidgets.COL_TX,   "title": "Settings & UI Scale (Ctrl+,)",             "sub": "Display scaling 100%-225%, graphics, keybinds, compilers", "kind": "cmd", "id": "settings"},
 		{"tag": "PLAY",   "col": HudWidgets.COL_RED,  "title": "Walk Inside Map / Playtest (F5)",          "sub": "First-person TF2 movement, rocket jumping & sliding doors", "kind": "cmd", "id": "playtest"},
@@ -325,6 +327,8 @@ func _run_item(it: Dictionary) -> void:
 			"check": app._open_check_problems_drawer()
 			"split2d": app._toggle_split_2d()
 			"minimap": app._toggle_minimap()
+			"sightlines": app._toggle_sightline_analyzer()
+			"gamemode_studio": app.set_stage(app.Stage.GAMEPLAY); app._open_gamemode_wizard()
 			"diagnostics": app._toggle_diagnostics_popover()
 			"settings": app.settings_modal.open_modal()
 			"playtest": app.set_stage(app.Stage.PLAYTEST)

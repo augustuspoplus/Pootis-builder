@@ -1853,12 +1853,12 @@ static func build_viewport_menu_drawer(app: Node3D, vbox: VBoxContainer) -> void
 	for act in [
 		{"t": "Scene Outliner (O)",   "fn": func(): app._open_outliner_drawer()},
 		{"t": "Mini-Map Radar (M)",   "fn": func(): app._toggle_minimap()},
+		{"t": "Sniper Sightlines (Alt+S)", "fn": func(): app._toggle_sightline_analyzer()},
 		{"t": "Split 2D Blueprints",  "fn": func(): app._toggle_split_2d()},
 		{"t": "VisGroups & Layers",   "fn": func(): app._open_visgroups_drawer()},
 		{"t": "Map Diagnostics",      "fn": func(): app._toggle_diagnostics_popover()},
 		{"t": "Zen Viewport (Tab)",   "fn": func(): app._toggle_zen_mode()},
 		{"t": "Focus Selection (F)",  "fn": func(): app._focus_camera_on_selection()},
-		{"t": "Top-Down 2D (Space)",  "fn": func(): app._toggle_2d_view()},
 	]:
 		var b := Button.new(); b.text = str(act["t"]); b.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 		HudWidgets.style_tf2_button(b, fonts["body"], 10)
@@ -2059,3 +2059,85 @@ static func build_spline_drawer(app: Node3D, vbox: VBoxContainer) -> void:
 		app._toast("Finished spline chain — click anywhere to start a new one!")
 	)
 	row.add_child(fin_b)
+
+# ==============================================================================
+# 16. SMART TF2 GAMEMODE LOGIC STUDIO (CTF / KOTH / 5CP / A/D — Milestone 35)
+# ==============================================================================
+static func build_gamemode_wizard_drawer(app: Node3D, vbox: VBoxContainer) -> void:
+	var fonts: Dictionary = app.fonts
+	var mode: String = str(app.active_gamemode)
+	var ents: Array = app.doc.get_entities()
+
+	var red_sp := 0; var blu_sp := 0; var has_rules := false; var has_koth := false
+	var has_cp_master := false; var cp_cnt := 0; var red_flag := 0; var blu_flag := 0
+	var red_cap := 0; var blu_cap := 0
+	for e in ents:
+		var cls := str(e.get("classname", ""))
+		var kv: Dictionary = e.get("kv", {})
+		var team := str(kv.get("TeamNum", "0"))
+		if cls == "info_player_teamspawn":
+			if team == "2": red_sp += 1
+			elif team == "3": blu_sp += 1
+		elif cls == "tf_gamerules": has_rules = true
+		elif cls == "tf_logic_koth": has_koth = true
+		elif cls == "team_control_point_master": has_cp_master = true
+		elif cls == "team_control_point": cp_cnt += 1
+		elif cls == "item_teamflag":
+			if team == "2": red_flag += 1
+			elif team == "3": blu_flag += 1
+		elif cls == "func_capturezone":
+			if team == "2": red_cap += 1
+			elif team == "3": blu_cap += 1
+
+	var c1 := HudWidgets.make_section_card("1. %s GAMEMODE LOGIC CHECKLIST" % mode.to_upper(), fonts, HudWidgets.COL_CYAN)
+	vbox.add_child(c1["panel"])
+	var v1: VBoxContainer = c1["vbox"]
+
+	var add_chk := func(ok: bool, lbl_txt: String) -> void:
+		var l := _lbl(("[OK] " if ok else "[MISSING] ") + lbl_txt, fonts["mono"], 10, HudWidgets.COL_GREEN if ok else HudWidgets.COL_ACC)
+		v1.add_child(l)
+
+	add_chk.call(has_rules, "tf_gamerules (Global TF2 Rules)")
+	add_chk.call(red_sp >= 1 and blu_sp >= 1, "Team Spawns: %d RED / %d BLU" % [red_sp, blu_sp])
+	if mode == "ctf":
+		add_chk.call(red_flag >= 1 and blu_flag >= 1, "Intelligence Briefcases: %d RED / %d BLU" % [red_flag, blu_flag])
+		add_chk.call(red_cap >= 1 and blu_cap >= 1, "Capture Zones: %d RED / %d BLU" % [red_cap, blu_cap])
+	elif mode == "koth":
+		add_chk.call(has_koth, "tf_logic_koth (3:00 King of the Hill Timer)")
+		add_chk.call(cp_cnt >= 1, "Mid Control Point (%d found)" % cp_cnt)
+	else:
+		add_chk.call(has_cp_master, "team_control_point_master (CP Chain Logic)")
+		add_chk.call(cp_cnt >= 3, "Control Points (%d found — 3 or 5 recommended)" % cp_cnt)
+
+	var c2 := HudWidgets.make_section_card("2. ONE-CLICK GAMEMODE ENTITY STAMPS", fonts, HudWidgets.COL_ACC)
+	vbox.add_child(c2["panel"])
+	var v2: VBoxContainer = c2["vbox"]
+	v2.add_child(_lbl("Automatically wires valid Valve TF2 gamemode entities so your map plays immediately in F5 Playtest AND compiled real TF2!", fonts["body"], 10, HudWidgets.COL_TX_MUTED))
+
+	var actions := [
+		{"id": "fix_ctf",    "t": "Stamp Complete CTF Logic\nAdds RED & BLU Intel Briefcases + Capture Zones + Gamerules"},
+		{"id": "fix_koth",   "t": "Stamp Complete KOTH Logic\nAdds tf_logic_koth + Mid Control Point + Trigger Capture Area"},
+		{"id": "fix_5cp",    "t": "Stamp Symmetrical 3CP Chain\nAdds CP Master + BLU Base / Mid / RED Base Control Points"},
+		{"id": "fix_spawns", "t": "Stamp RED & BLU Spawn Kits\nAdds 4 RED + 4 BLU Team Spawns + Resupply Cabinets"},
+	]
+	for act in actions:
+		var aid: String = str(act["id"])
+		var is_rec := (mode == "ctf" and aid == "fix_ctf") or (mode == "koth" and aid == "fix_koth") or ((mode == "cp" or mode == "ad") and aid == "fix_5cp")
+		var b := Button.new()
+		b.text = str(act["t"])
+		b.alignment = HORIZONTAL_ALIGNMENT_LEFT
+		b.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		HudWidgets.style_tf2_button(b, fonts["body"], 10, is_rec)
+		b.pressed.connect(func():
+			app.audio.play("place")
+			app._apply_gamemode_wizard_stamp(aid)
+			app._open_gamemode_wizard()
+		)
+		v2.add_child(b)
+
+	var test_b := Button.new()
+	test_b.text = "Test Objective Live in F5 Playtest!"
+	test_b.custom_minimum_size = Vector2(0, 36)
+	HudWidgets.style_tf2_button(test_b, fonts["heading"], 11, false, 3)
+	test_b.pressed.connect(func(): app.audio.play("click"); app.set_stage(app.Stage.PLAYTEST))
+	v2.add_child(test_b)

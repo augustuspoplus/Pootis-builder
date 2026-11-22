@@ -71,6 +71,10 @@ var _cart_heal_accum: float = 0.0
 var _cart_finished: bool = false
 var _cap_points: Array = [] # [{pos, name, progress, captured}]
 var _active_cap_idx: int = -1
+var _ctf_flags: Array = [] # [{pos, team, name}]
+var _ctf_zones: Array = [] # [{min, max, pos, team, is_brush}]
+var _carrying_flag_idx: int = -1
+var _ctf_caps: int = 0
 var _rollout_split_s: float = -1.0
 var _objective_positions: Array[Vector3] = []
 
@@ -182,6 +186,10 @@ func get_telemetry() -> Dictionary:
 		"cart_pushing": _cart_pushing,
 		"cap_progress": cap_pct,
 		"cap_label": cap_lbl,
+		"ctf_carrying": _carrying_flag_idx >= 0,
+		"ctf_carrying_team": str(_ctf_flags[_carrying_flag_idx]["team"]) if (_carrying_flag_idx >= 0 and _carrying_flag_idx < _ctf_flags.size()) else "",
+		"ctf_caps": _ctf_caps,
+		"ctf_flag_count": _ctf_flags.size(),
 		"pos_u": (global_position if is_inside_tree() else position) * UPM,
 	}
 
@@ -458,6 +466,10 @@ func _build_sandbox_triggers(entities: Array) -> void:
 	_cart_finished = false
 	_cap_points.clear()
 	_active_cap_idx = -1
+	_ctf_flags.clear()
+	_ctf_zones.clear()
+	_carrying_flag_idx = -1
+	_ctf_caps = 0
 	_objective_positions.clear()
 
 	var targets := {}
@@ -510,7 +522,15 @@ func _build_sandbox_triggers(entities: Array) -> void:
 			_cap_points.append({"pos": e["pos"], "name": cp_nm, "progress": 0.0, "captured": false})
 			_objective_positions.append(e["pos"])
 		elif cls == "item_teamflag":
+			var fteam := "RED" if str(e["kv"].get("TeamNum", "2")) == "2" else "BLU"
+			_ctf_flags.append({"pos": e["pos"], "team": fteam, "name": str(e["kv"].get("targetname", fteam + " Intel"))})
 			_objective_positions.append(e["pos"])
+		elif cls == "func_capturezone":
+			var zteam := "RED" if str(e["kv"].get("TeamNum", "2")) == "2" else "BLU"
+			var is_b: bool = bool(e.get("is_brush", false))
+			var zmin: Vector3 = e.get("bounds_min", (e["pos"] as Vector3) - Vector3(3, 1, 3))
+			var zmax: Vector3 = e.get("bounds_max", (e["pos"] as Vector3) + Vector3(3, 4, 3))
+			_ctf_zones.append({"min": zmin, "max": zmax, "pos": (zmin + zmax) * 0.5, "team": zteam, "is_brush": is_b})
 
 func _sample_track(dist_m: float) -> Dictionary:
 	if _track_pts.size() < 2:
@@ -592,3 +612,42 @@ func _process_triggers(delta: float = 0.016) -> void:
 					cp["captured"] = true
 					objective_event.emit("CAPTURED: %s!" % str(cp["name"]))
 			break
+
+	# 4. Live CTF Intelligence Briefcase Pickup & Capture Simulation!
+	if not _ctf_flags.is_empty():
+		if _carrying_flag_idx < 0:
+			for fi in range(_ctf_flags.size()):
+				var fl: Dictionary = _ctf_flags[fi]
+				if gp.distance_to(fl["pos"]) <= (96.0 / UPM):
+					_carrying_flag_idx = fi
+					objective_event.emit("PICKED UP %s INTELLIGENCE! Return to capture zone!" % str(fl["team"]))
+					pickup_collected.emit("intel")
+					break
+		else:
+			var cfl: Dictionary = _ctf_flags[_carrying_flag_idx]
+			var fpos: Vector3 = cfl["pos"]
+			var fteam: String = str(cfl["team"])
+			var scored := false
+			for zn in _ctf_zones:
+				var zteam: String = str(zn["team"])
+				if zteam == fteam and _ctf_zones.size() > 1:
+					continue
+				var in_zone := false
+				if bool(zn["is_brush"]):
+					var mn: Vector3 = zn["min"]; var mx: Vector3 = zn["max"]
+					in_zone = (p.x >= mn.x - 1.0 and p.x <= mx.x + 1.0 and p.y >= mn.y - 1.0 and p.y <= mx.y + 1.5 and p.z >= mn.z - 1.0 and p.z <= mx.z + 1.0)
+				else:
+					in_zone = gp.distance_to(zn["pos"]) <= (140.0 / UPM)
+				if in_zone and (zn["pos"] as Vector3).distance_to(fpos) > 3.0:
+					scored = true
+					break
+			# Fallback if user placed two item_teamflags without func_capturezone: return to opposite flag!
+			if not scored and _ctf_zones.is_empty():
+				for oi in range(_ctf_flags.size()):
+					if oi != _carrying_flag_idx and gp.distance_to(_ctf_flags[oi]["pos"]) <= (112.0 / UPM):
+						scored = true
+						break
+			if scored:
+				_ctf_caps += 1
+				_carrying_flag_idx = -1
+				objective_event.emit("INTELLIGENCE CAPTURED! (%d/3)" % _ctf_caps)

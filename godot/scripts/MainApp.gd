@@ -140,6 +140,11 @@ var spline_width_m: float = 0.5  # 16u (or 96u for catwalk)
 var spline_chain_active: bool = false
 var spline_last_pt: Vector3 = Vector3.ZERO
 var spline_seg_count: int = 0
+var sightline_root: Node3D = null
+var sightline_active: bool = false
+var sightline_origin: Vector3 = Vector3(0, 2.35, 0)
+var sightline_max_u: int = 0
+var sightline_op_count: int = 0
 var _payload_track_idx: int = 0
 var _payload_prev_ent: int = -1
 var mvm_start_cash: int = 800
@@ -818,6 +823,12 @@ func _refresh_context_bar() -> void:
 		add_tag.call("PAYLOAD TRACK SPLINE")
 		add_chip.call("Click A -> B -> C to Link path_track Nodes", true, func(): _open_payload_studio())
 		add_chip.call("Done (1)", false, func(): _select_tool("select"))
+	elif active_tool == "sightline" or sightline_active:
+		context_bar.visible = true
+		add_tag.call("SNIPER SIGHTLINES (ALT+S)")
+		add_chip.call("Max: %du  |  OP >2048u Rays: %d" % [sightline_max_u, sightline_op_count], sightline_op_count > 0, func(): pass)
+		add_chip.call("Click 3D Floor/Balcony to Move Probe", false, func(): active_tool = "sightline")
+		add_chip.call("Hide Rays (Alt+S)", false, func(): _toggle_sightline_analyzer())
 	else:
 		context_bar.visible = false
 
@@ -1522,6 +1533,11 @@ func _rebuild_bottom_dock() -> void:
 			HudWidgets.style_tf2_button(pl_b, fonts["heading"], 9, true)
 			pl_b.pressed.connect(func(): audio.play("click"); _open_payload_studio())
 			tabs.add_child(pl_b)
+		else:
+			var gm_b := Button.new(); gm_b.text = "%s Studio" % active_gamemode.to_upper()
+			HudWidgets.style_tf2_button(gm_b, fonts["heading"], 9, true)
+			gm_b.pressed.connect(func(): audio.play("click"); _open_gamemode_wizard())
+			tabs.add_child(gm_b)
 
 		# Bottom Row: < Prev | 8 Gamemode-Filtered Entity Cards with Icons | > Next
 		var items: Array[Dictionary] = []
@@ -2863,6 +2879,149 @@ func _open_spline_drawer() -> void:
 	_clear_drawer("3D SPLINE PATH & FENCE BUILDER")
 	EditorDrawersScript.build_spline_drawer(self, right_drawer_vbox)
 
+func _open_gamemode_wizard() -> void:
+	_clear_drawer("%s GAMEMODE LOGIC STUDIO" % active_gamemode.to_upper())
+	EditorDrawersScript.build_gamemode_wizard_drawer(self, right_drawer_vbox)
+
+func _apply_gamemode_wizard_stamp(aid: String) -> void:
+	var ents: Array = doc.get_entities()
+	var has_rules := false
+	for e in ents:
+		if str(e.get("classname", "")) == "tf_gamerules":
+			has_rules = true; break
+	if not has_rules:
+		doc.add_point_entity("tf_gamerules", Vector3(0, 6.0, 0), {"targetname": "gamerules"})
+	if aid == "fix_ctf":
+		active_gamemode = "ctf"
+		Tf2GamemodesScript.stamp_preset(doc, "intel", Vector3(-16, 0.2, 0), 2)
+		Tf2GamemodesScript.stamp_preset(doc, "intel", Vector3(16, 0.2, 0), 3)
+		doc.add_brush_entity("func_capturezone", Vector3(-18.5, 0.0, -2.5), Vector3(-13.5, 3.5, 2.5), "TOOLS/TOOLSTRIGGER", {"TeamNum": "2"})
+		doc.add_brush_entity("func_capturezone", Vector3(13.5, 0.0, -2.5), Vector3(18.5, 3.5, 2.5), "TOOLS/TOOLSTRIGGER", {"TeamNum": "3"})
+		_record_history("Stamp CTF Logic"); ent_vis.sync_all()
+		_toast("Stamped complete CTF Logic (RED & BLU Intel Briefcases + Capture Zones + Gamerules)!")
+	elif aid == "fix_koth":
+		active_gamemode = "koth"
+		doc.add_point_entity("tf_logic_koth", Vector3(0, 6.5, 0), {"timer_length": "180", "unlock_point": "30"})
+		doc.add_point_entity("team_control_point_master", Vector3(0, 7.2, 0), {})
+		Tf2GamemodesScript.stamp_preset(doc, "cap_point", Vector3(0, 0.2, 0), 0)
+		_record_history("Stamp KOTH Logic"); ent_vis.sync_all()
+		_toast("Stamped complete KOTH Logic (tf_logic_koth 3:00 timer + Mid Control Point)!")
+	elif aid == "fix_5cp":
+		active_gamemode = "cp"
+		doc.add_point_entity("team_control_point_master", Vector3(0, 7.2, 0), {})
+		Tf2GamemodesScript.stamp_preset(doc, "cap_point", Vector3(-14, 0.2, 0), 2)
+		Tf2GamemodesScript.stamp_preset(doc, "cap_point", Vector3(0, 0.2, 0), 0)
+		Tf2GamemodesScript.stamp_preset(doc, "cap_point", Vector3(14, 0.2, 0), 3)
+		_record_history("Stamp 3CP Chain"); ent_vis.sync_all()
+		_toast("Stamped Symmetrical 3CP Chain (BLU Base / Mid / RED Base + CP Master)!")
+	elif aid == "fix_spawns":
+		for i in range(4):
+			var oz := (float(i) - 1.5) * 2.2
+			doc.add_point_entity("info_player_teamspawn", Vector3(-18.0, 0.2, oz), {"TeamNum": "2", "angles": "0 0 0"})
+			doc.add_point_entity("info_player_teamspawn", Vector3(18.0, 0.2, oz), {"TeamNum": "3", "angles": "0 180 0"})
+		Tf2GamemodesScript.stamp_preset(doc, "resupply", Vector3(-19.5, 0.0, 0.0), 2)
+		Tf2GamemodesScript.stamp_preset(doc, "resupply", Vector3(19.5, 0.0, 0.0), 3)
+		_record_history("Stamp Team Spawns"); ent_vis.sync_all()
+		_toast("Stamped 4 RED + 4 BLU Team Spawns & Resupply Cabinets!")
+
+func _toggle_sightline_analyzer() -> void:
+	sightline_active = not sightline_active
+	if sightline_active:
+		var orig := Vector3(0.0, 2.35, 0.0)
+		if selected_solid >= 0:
+			var si: Dictionary = doc.get_solid_info(selected_solid)
+			if si.get("valid", false):
+				var mid: Vector3 = (si["bounds_min"] + si["bounds_max"]) * 0.5
+				orig = Vector3(mid.x, (si["bounds_max"] as Vector3).y + 2.35, mid.z)
+		elif selected_entity >= 0:
+			var ents: Array = doc.get_entities()
+			if selected_entity < ents.size():
+				orig = (ents[selected_entity]["pos"] as Vector3) + Vector3(0, 2.35, 0)
+		active_tool = "sightline"
+		_rebuild_sightline_rays(orig)
+		_refresh_context_bar()
+		audio.play("click")
+		_toast("3D Sniper Sightline Probe ON (Max %du, %d OP >2048u rays) — Click anywhere to move probe!" % [sightline_max_u, sightline_op_count])
+	else:
+		if sightline_root != null:
+			sightline_root.visible = false
+		if active_tool == "sightline":
+			active_tool = "select"
+		_refresh_context_bar()
+		_toast("Sniper Sightline Heat-Rays hidden (Alt+S to toggle)")
+
+func _rebuild_sightline_rays(origin: Vector3) -> Dictionary:
+	sightline_origin = origin
+	if sightline_root == null:
+		sightline_root = Node3D.new()
+		sightline_root.name = "SniperSightlineRays"
+		add_child(sightline_root)
+	for ch in sightline_root.get_children():
+		ch.queue_free()
+	sightline_root.visible = true
+
+	var ray_count := 36
+	var max_dist_m := 96.0 # 3072u cap
+	sightline_max_u = 0
+	sightline_op_count = 0
+	var amber_cnt := 0
+	var green_cnt := 0
+
+	# Draw glowing cyan Sniper Eye Vantage Sphere at origin
+	var sp_mi := MeshInstance3D.new()
+	var sph := SphereMesh.new(); sph.radius = 0.38; sph.height = 0.76
+	sp_mi.mesh = sph; sp_mi.position = origin
+	var sp_mat := StandardMaterial3D.new()
+	sp_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	sp_mat.albedo_color = HudWidgets.COL_CYAN
+	sp_mi.material_override = sp_mat
+	sightline_root.add_child(sp_mi)
+
+	var im := ImmediateMesh.new()
+	var line_mat := StandardMaterial3D.new()
+	line_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	line_mat.vertex_color_use_as_albedo = true
+	line_mat.no_depth_test = false
+	im.surface_begin(Mesh.PRIMITIVE_LINES, line_mat)
+
+	for i in range(ray_count):
+		var ang: float = (TAU * float(i)) / float(ray_count)
+		var dir := Vector3(cos(ang), 0.0, sin(ang)).normalized()
+		var rc: Dictionary = doc.raycast_face(origin, dir)
+		var end_pt := origin + dir * max_dist_m
+		var dist_m := max_dist_m
+		if rc.get("hit", false):
+			end_pt = rc["hit_pos"]
+			dist_m = origin.distance_to(end_pt)
+		var dist_u := int(round(dist_m * UPM))
+		sightline_max_u = maxi(sightline_max_u, dist_u)
+		var col: Color
+		if dist_u > 2048:
+			col = Color(1.0, 0.22, 0.18, 1.0)
+			sightline_op_count += 1
+		elif dist_u > 1024:
+			col = Color(1.0, 0.74, 0.18, 1.0)
+			amber_cnt += 1
+		else:
+			col = Color(0.26, 0.90, 0.44, 1.0)
+			green_cnt += 1
+		im.surface_set_color(col)
+		im.surface_add_vertex(origin)
+		im.surface_set_color(col)
+		im.surface_add_vertex(end_pt)
+		# Vertical tick marker at hit endpoint for high visibility!
+		im.surface_set_color(col)
+		im.surface_add_vertex(end_pt - Vector3(0, 0.35, 0))
+		im.surface_set_color(col)
+		im.surface_add_vertex(end_pt + Vector3(0, 0.35, 0))
+
+	im.surface_end()
+	var lines_mi := MeshInstance3D.new()
+	lines_mi.mesh = im
+	lines_mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	sightline_root.add_child(lines_mi)
+	return {"max_u": sightline_max_u, "red": sightline_op_count, "amber": amber_cnt, "green": green_cnt}
+
 func _place_spline_segment(p0: Vector3, p1: Vector3) -> Array[int]:
 	var created: Array[int] = []
 	var delta := p1 - p0
@@ -3576,6 +3735,7 @@ func _unhandled_input(event: InputEvent) -> void:
 				elif active_tool == "wire_io": _wire_io_src = -1; active_tool = "select"; overlay_2d.queue_redraw(); _toast("Cancelled Visual 3D Wiring")
 				elif _clip_3d_active: _clip_3d_active = false; if _clip_plane_mesh != null: _clip_plane_mesh.visible = false
 				elif spline_chain_active: spline_chain_active = false; spline_seg_count = 0; _refresh_context_bar(); _toast("Finished spline path chain")
+				elif sightline_active: _toggle_sightline_analyzer()
 				elif _wall_chain_active: _wall_chain_active = false; ghost_mesh.visible = false; _toast("Finished wall chain")
 				elif _drawing_box: _drawing_box = false; ghost_mesh.visible = false
 				elif selected_solid >= 0 or selected_entity >= 0: _clear_selection()
@@ -3612,6 +3772,7 @@ func _unhandled_input(event: InputEvent) -> void:
 			elif event.keycode == KEY_E and event.shift_pressed: _open_fgd_entity_drawer()
 			elif event.keycode == KEY_A and event.shift_pressed: set_stage(Stage.STYLE); _open_materials_drawer()
 			elif event.keycode == KEY_P and event.alt_pressed: _open_check_problems_drawer()
+			elif event.keycode == KEY_S and event.alt_pressed: _toggle_sightline_analyzer()
 			elif (event.keycode == KEY_ENTER or event.keycode == KEY_KP_ENTER) and event.alt_pressed: _open_inspector_drawer()
 			elif event.keycode == KEY_DELETE: _delete_selection()
 			elif event.keycode == KEY_BRACKETLEFT: _step_grid(-1)
@@ -3963,6 +4124,13 @@ func _handle_left_click(screen_pos: Vector2, shift_held: bool = false, alt_held:
 					_toast("Sliced solid along your custom 3D cut plane!")
 			_clip_3d_active = false
 			if _clip_plane_mesh != null: _clip_plane_mesh.visible = false
+		return
+
+	if active_tool == "sightline" and hover_valid:
+		_rebuild_sightline_rays(hover_pos + Vector3(0, 2.35, 0))
+		_refresh_context_bar()
+		audio.play("click")
+		_toast("Moved Sniper Sightline Probe: Max %du (%d OP >2048u rays)" % [sightline_max_u, sightline_op_count])
 		return
 
 	if active_tool == "floor" and hover_valid:
@@ -4346,8 +4514,15 @@ func _process(delta: float) -> void:
 		]
 		var cart_p: float = float(t.get("cart_progress", -1.0))
 		var cap_p: float = float(t.get("cap_progress", -1.0))
+		var ctf_carry: bool = bool(t.get("ctf_carrying", false))
+		var ctf_caps: int = int(t.get("ctf_caps", 0))
+		var ctf_flags: int = int(t.get("ctf_flag_count", 0))
 		if playtest_obj_bar != null and playtest_obj_lbl != null:
-			if cap_p >= 0.0:
+			if ctf_carry:
+				playtest_obj_lbl.visible = true; playtest_obj_bar.visible = true
+				playtest_obj_lbl.text = "CARRYING %s INTELLIGENCE — RETURN TO BASE!  |  CAPTURES: %d / 3" % [str(t.get("ctf_carrying_team", "")), ctf_caps]
+				playtest_obj_bar.value = clampf(float(ctf_caps) / 3.0 * 100.0, 15.0, 100.0)
+			elif cap_p >= 0.0:
 				playtest_obj_lbl.visible = true; playtest_obj_bar.visible = true
 				playtest_obj_lbl.text = "%s: %d%%" % [str(t.get("cap_label", "CONTROL POINT")).to_upper(), int(round(cap_p * 100.0))]
 				playtest_obj_bar.value = cap_p * 100.0
@@ -4355,6 +4530,10 @@ func _process(delta: float) -> void:
 				playtest_obj_lbl.visible = true; playtest_obj_bar.visible = true
 				playtest_obj_lbl.text = ("PUSHING PAYLOAD CART: %d%% (+10 HP/s)" if bool(t.get("cart_pushing", false)) else "PAYLOAD PROGRESS: %d%% (Walk close to push!)") % int(round(cart_p * 100.0))
 				playtest_obj_bar.value = cart_p * 100.0
+			elif ctf_flags > 0:
+				playtest_obj_lbl.visible = true; playtest_obj_bar.visible = true
+				playtest_obj_lbl.text = "CTF INTELLIGENCE CAPTURES: %d / 3  (Walk over enemy briefcase to steal!)" % ctf_caps
+				playtest_obj_bar.value = clampf(float(ctf_caps) / 3.0 * 100.0, 0.0, 100.0)
 			else:
 				playtest_obj_lbl.visible = false; playtest_obj_bar.visible = false
 		overlay_2d.queue_redraw()
@@ -4697,6 +4876,28 @@ func _setup_auto_shot(idx: int) -> void:
 			cam_pos = Vector3(-13.5, 6.2, 12.0); editor_cam.look_at_from_position(cam_pos, Vector3(4.0, 1.5, -2.0), Vector3.UP)
 			cam_yaw = editor_cam.rotation.y; cam_pitch = editor_cam.rotation.x
 			_refresh_2d_views(true)
+		"v15_sightlines":
+			_set_lighting_mode(0); _show_welcome_hub(false); _clear_official_bsp(); _clear_selection()
+			doc.load_vmf(repo_root.path_join("godot/maps/ctf_turbine_rebuilt.vmf"))
+			active_gamemode = "ctf"
+			map_sync.clear_all(); map_sync.sync_all(); ent_vis.sync_all()
+			set_stage(Stage.BUILD); right_drawer.visible = false
+			minimap_enabled = false; diag_popover.visible = false; _sync_mode_visibility()
+			sightline_active = true; active_tool = "sightline"
+			_rebuild_sightline_rays(Vector3(0.0, 2.35, 0.0))
+			_refresh_context_bar()
+			cam_pos = Vector3(-13.5, 7.5, 13.0); editor_cam.look_at_from_position(cam_pos, Vector3(2.0, 1.8, -1.0), Vector3.UP)
+			cam_yaw = editor_cam.rotation.y; cam_pitch = editor_cam.rotation.x
+		"v15_gamemode_wizard":
+			_set_lighting_mode(0); _show_welcome_hub(false); _clear_official_bsp(); _clear_selection()
+			doc.load_vmf(repo_root.path_join("godot/maps/ctf_turbine_rebuilt.vmf"))
+			active_gamemode = "ctf"
+			map_sync.clear_all(); map_sync.sync_all(); ent_vis.sync_all()
+			if sightline_root != null: sightline_root.visible = false
+			sightline_active = false
+			set_stage(Stage.GAMEPLAY); _open_gamemode_wizard()
+			cam_pos = Vector3(-13.5, 6.2, 12.0); editor_cam.look_at_from_position(cam_pos, Vector3(4.0, 1.5, -2.0), Vector3.UP)
+			cam_yaw = editor_cam.rotation.y; cam_pitch = editor_cam.rotation.x
 	if not viewing_bsp and not settings_modal.visible:
 		_update_hover(get_viewport().get_visible_rect().size * Vector2(0.42, 0.52))
 
