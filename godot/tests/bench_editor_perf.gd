@@ -90,5 +90,21 @@ func _initialize() -> void:
 	var ray_ms := float(Time.get_ticks_usec() - t0) / 1000.0
 	print("  [PASS] 100x C++ raycast_face (268 solids, %d hits): %.2f ms (%.4f ms/pick)" % [hits, ray_ms, ray_ms / 100.0])
 
+	# 6. Milestone 33: O(dirty) Incremental sync_all(false) after adding 1 new brush on 268-solid map!
+	doc.add_box(Vector3(10, 0, 10), Vector3(12, 2, 12), "BRICK/BRICKWALL001")
+	t0 = Time.get_ticks_usec()
+	map_sync.sync_all(false)
+	var dirty_sync_ms := float(Time.get_ticks_usec() - t0) / 1000.0
+	print("  [PASS] O(dirty) sync_all(false) (+1 solid on 268-solid map): %.2f ms (%.1fx faster than full sync_all!)" % [
+		dirty_sync_ms, full_sync_ms / maxf(0.05, dirty_sync_ms)
+	])
+
+	# 7. Milestone 33: Pooled Entity Hover Wireframe Switching (100 hovers across entities)
+	t0 = Time.get_ticks_usec()
+	for i in range(100):
+		ent_vis.set_hover(i % maxi(1, ents.size()))
+	var ehov_ms := float(Time.get_ticks_usec() - t0) / 1000.0
+	print("  [PASS] 100x Pooled Entity Hover Wireframes: %.2f ms (%.4f ms/hover)" % [ehov_ms, ehov_ms / 100.0])
+
 	print("=== Performance Benchmark Complete: ALL PASS ===")
 	quit(0)

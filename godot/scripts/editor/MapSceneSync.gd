@@ -40,6 +40,7 @@ var face_handles_root: Node3D
 var vertex_handles_root: Node3D
 
 var _solid_nodes: Dictionary = {} # solid_idx -> Node3D
+var _solid_sigs: Dictionary = {}  # solid_idx -> String signature for O(dirty) sync_all()!
 var _tool_mat_cache: Dictionary = {}
 var _wvt_mat_cache: Dictionary = {}
 var _wvt_shader: Shader
@@ -96,14 +97,29 @@ func clear_all() -> void:
 		if is_instance_valid(n):
 			n.queue_free()
 	_solid_nodes.clear()
+	_solid_sigs.clear()
 	selected_solid = -1
+	selected_solids_group.clear()
 	selected_face = -1
 	hovered_solid = -1
 	if hover_box != null:
-		hover_box.mesh = null
+		hover_box.visible = false
 	_rebuild_selection_visuals()
 
-func sync_all() -> void:
+func _solid_signature(info: Dictionary) -> String:
+	if not info.get("valid", false) or bool(info.get("hidden", false)):
+		return "HIDDEN"
+	var b0: Vector3 = info["bounds_min"]
+	var b1: Vector3 = info["bounds_max"]
+	return "%.3f,%.3f,%.3f|%.3f,%.3f,%.3f|%s|%d|%d|%d" % [
+		b0.x, b0.y, b0.z, b1.x, b1.y, b1.z, str(info.get("material", "")),
+		1 if bool(info.get("is_skybox", false)) else 0,
+		1 if show_skybox_shell else 0,
+		1 if show_clips else 0
+	]
+
+## Smart O(dirty) sync_all: skips untouched world brushes unless force=true!
+func sync_all(force: bool = false) -> void:
 	if doc == null:
 		return
 	var count: int = doc.get_solid_count()
@@ -116,8 +132,18 @@ func sync_all() -> void:
 		if is_instance_valid(n):
 			n.queue_free()
 		_solid_nodes.erase(k)
+		_solid_sigs.erase(k)
 	for i in range(count):
+		var info: Dictionary = doc.get_solid_info(i)
+		var sig := _solid_signature(info)
+		var is_disp: bool = bool(info.get("is_disp", false))
+		if not force and not is_disp and _solid_sigs.get(i, "") == sig:
+			if sig == "HIDDEN" and not _solid_nodes.has(i):
+				continue
+			if _solid_nodes.has(i) and is_instance_valid(_solid_nodes[i]) and (_solid_nodes[i] as Node3D).position.is_zero_approx():
+				continue
 		sync_solid(i)
+		_solid_sigs[i] = sig
 	if selected_solid >= count:
 		selected_solid = -1
 		selected_face = -1
@@ -141,6 +167,7 @@ func sync_solid(idx: int, rebuild_collision: bool = true) -> void:
 		return
 	var d: Dictionary = doc.get_solid_mesh_data(idx)
 	var info: Dictionary = doc.get_solid_info(idx)
+	_solid_sigs[idx] = _solid_signature(info)
 	if not d.get("ok", false) or bool(info.get("hidden", false)):
 		if _solid_nodes.has(idx):
 			var old_h: Node = _solid_nodes[idx]

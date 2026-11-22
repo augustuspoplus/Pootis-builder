@@ -149,6 +149,9 @@ func _collect_candidates(query: String) -> Array[Dictionary]:
 		{"tag": "STUDIO", "col": HudWidgets.COL_ACC,  "title": "View & Workspace Studio",                   "sub": "Lighting (F3), Symmetry, Split 2D, VisGroups & Camera Bookmarks", "kind": "cmd", "id": "view_studio"},
 		{"tag": "STUDIO", "col": HudWidgets.COL_GREEN,"title": "Smart TF2 Room & Layout Generator",         "sub": "1-click complete RED/BLU Spawn Rooms, Hallways, Sniper Decks & Mid Arenas", "kind": "cmd", "id": "room_kit"},
 		{"tag": "STUDIO", "col": HudWidgets.COL_GREEN,"title": "3D Prop Scatter & Foliage Brush",           "sub": "Click to paint grounded clusters of pines, rocks, crates & consoles", "kind": "cmd", "id": "scatter"},
+		{"tag": "STUDIO", "col": HudWidgets.COL_CYAN, "title": "3D Spline Path / Fence / Catwalk Builder",  "sub": "Click A -> B -> C in 3D to lay aligned fences, guardrails, catwalks & cover", "kind": "cmd", "id": "spline_path"},
+		{"tag": "ACTION", "col": HudWidgets.COL_CYAN, "title": "Drop Selection to Floor (End)",             "sub": "Snap selected solid(s) or entity cleanly flush onto the surface below", "kind": "cmd", "id": "drop_floor"},
+		{"tag": "ACTION", "col": HudWidgets.COL_ACC,  "title": "Auto-Texture Selected Solid (Active Biome)","sub": "Auto-apply biome roof, floor & wall textures by face normal", "kind": "cmd", "id": "auto_biome"},
 		{"tag": "ACTION", "col": HudWidgets.COL_CYAN, "title": "Focus Camera on Selection (F)",             "sub": "Frame the 3D camera smoothly onto the active solid or entity", "kind": "cmd", "id": "focus"},
 		{"tag": "STUDIO", "col": Color(0.74, 0.42, 0.96), "title": "Mann vs. Machine (MvM) Studio",        "sub": "Robot Spawns, Tank Track & Valve .pop Wave Exporter", "kind": "cmd", "id": "mvm_studio"},
 		{"tag": "STUDIO", "col": Color(0.98, 0.80, 0.20), "title": "Payload Track Spline Studio",          "sub": "Click-to-chain auto-linked path_track rails & landmarks", "kind": "cmd", "id": "payload_studio"},
@@ -304,6 +307,9 @@ func _run_item(it: Dictionary) -> void:
 			"view_studio": app._open_viewport_menu_drawer()
 			"room_kit": app._open_room_kit_drawer()
 			"scatter": app.set_stage(app.Stage.STYLE); app.active_tool = "scatter_props"; app._open_scatter_drawer()
+			"spline_path": app.set_stage(app.Stage.BUILD); app.active_tool = "spline_path"; app._open_spline_drawer(); app._refresh_context_bar()
+			"drop_floor": app._drop_selection_to_floor()
+			"auto_biome": app._auto_texture_selected_solids()
 			"focus": app._focus_camera_on_selection()
 			"zen": app._toggle_zen_mode()
 			"hub": app._show_welcome_hub(true)

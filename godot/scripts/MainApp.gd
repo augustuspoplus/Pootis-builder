@@ -134,6 +134,12 @@ var scatter_radius_m: float = 6.0 # 192u
 var scatter_count: int = 5
 var scatter_rand_yaw: bool = true
 var scatter_rand_scale: bool = true
+var spline_preset: String = "fence"
+var spline_height_m: float = 2.0 # 64u
+var spline_width_m: float = 0.5  # 16u (or 96u for catwalk)
+var spline_chain_active: bool = false
+var spline_last_pt: Vector3 = Vector3.ZERO
+var spline_seg_count: int = 0
 var _payload_track_idx: int = 0
 var _payload_prev_ent: int = -1
 var mvm_start_cash: int = 800
@@ -666,6 +672,33 @@ func _refresh_context_bar() -> void:
 		add_tag.call("VERTEX EDIT")
 		add_chip.call("Grid %du" % GRID_STEPS[grid_idx], false, func(): _step_grid(1, true); _refresh_context_bar())
 		add_chip.call("Done (1)", true, func(): _select_tool("select"))
+	elif active_tool == "spline_path":
+		context_bar.visible = true
+		add_tag.call("SPLINE: " + spline_preset.to_upper())
+		for sp_id in ["fence", "guardrail", "catwalk", "barrier"]:
+			var sid: String = sp_id
+			add_chip.call(sid.capitalize(), spline_preset == sid, func(): spline_preset = sid; _refresh_context_bar(); if right_drawer.visible: _open_spline_drawer())
+		add_chip.call("Finish Chain (Esc)", spline_chain_active, func(): spline_chain_active = false; spline_seg_count = 0; _refresh_context_bar())
+	elif active_tool == "clip_3d":
+		context_bar.visible = true
+		add_tag.call("3D CLIP PLANE (SHIFT+X)")
+		add_chip.call("Point A -> Click B to Slice" if _clip_3d_active else "Click Point A on Grid", true, func(): pass)
+		add_chip.call("Cancel (Esc)", false, func(): _clip_3d_active = false; if _clip_plane_mesh != null: _clip_plane_mesh.visible = false; _select_tool("select"))
+	elif active_tool == "wire_io":
+		context_bar.visible = true
+		add_tag.call("3D I/O WIRING (SHIFT+W)")
+		add_chip.call("Click Target Entity to Wire" if _wire_io_src >= 0 else "Click Source Entity", true, func(): pass)
+		add_chip.call("Cancel (Esc)", false, func(): _wire_io_src = -1; overlay_2d.queue_redraw(); _select_tool("select"))
+	elif active_tool == "scatter_props":
+		context_bar.visible = true
+		add_tag.call("PROP SCATTER: " + scatter_kit.replace("_", " ").to_upper())
+		add_chip.call("Click Ground/Cliff to Stamp %d Props" % scatter_count, true, func(): _open_scatter_drawer())
+		add_chip.call("Done (1)", false, func(): _select_tool("select"))
+	elif active_tool == "payload_track":
+		context_bar.visible = true
+		add_tag.call("PAYLOAD TRACK SPLINE")
+		add_chip.call("Click A -> B -> C to Link path_track Nodes", true, func(): _open_payload_studio())
+		add_chip.call("Done (1)", false, func(): _select_tool("select"))
 	else:
 		context_bar.visible = false
 
@@ -829,6 +862,7 @@ func _refresh_selection_bar() -> void:
 		selection_hbox.add_child(tag)
 		_add_sel_btn("+Pull", func(): _push_selected_top(grid_m))
 		_add_sel_btn("-Push", func(): _push_selected_top(-grid_m))
+		_add_sel_btn("Drop", _drop_selection_to_floor)
 		_add_sel_btn("Rot 90°", _rotate_selection)
 		_add_sel_btn("Mirror BLU/RED", _mirror_selection_to_enemy, 3)
 		_add_sel_btn("Clip", _open_clip_drawer)
@@ -847,6 +881,7 @@ func _refresh_selection_bar() -> void:
 		tag.text = "ENT #%d: %s" % [selected_entity, cls]
 		selection_hbox.add_child(tag)
 		_add_sel_btn("Wire 3D (Shift+W)", func(): _start_visual_3d_wire(selected_entity), 3)
+		_add_sel_btn("Drop (End)", _drop_selection_to_floor)
 		_add_sel_btn("Rot 90° (R)", _rotate_selection)
 		_add_sel_btn("Clone (Ctrl+D)", _duplicate_selection)
 		_add_sel_btn("SmartEdit (Alt+Enter)", _open_inspector_drawer)
@@ -1219,13 +1254,14 @@ func _rebuild_bottom_dock() -> void:
 		var slots: Array = []
 		if _dock_build_cat == "shapes":
 			slots = [
-				{"id": "floor",    "piece": "Floor",    "lbl": "Draw Box"},
-				{"id": "wall",     "piece": "Wall",     "lbl": "Wall Chain"},
-				{"id": "ramp",     "piece": "Ramp",     "lbl": "Ramp"},
-				{"id": "stairs",   "piece": "Stairs",   "lbl": "Stairs"},
-				{"id": "arch",     "piece": "Arch",     "lbl": "Arch"},
-				{"id": "pillar",   "piece": "Box",      "lbl": "Pillar"},
-				{"id": "import3d", "piece": "Model",    "lbl": "Import 3D", "icon": "crate"},
+				{"id": "floor",       "piece": "Floor",    "lbl": "Draw Box"},
+				{"id": "wall",        "piece": "Wall",     "lbl": "Wall Chain"},
+				{"id": "spline_path", "piece": "Wall",     "lbl": "Spline Path"},
+				{"id": "ramp",        "piece": "Ramp",     "lbl": "Ramp"},
+				{"id": "stairs",      "piece": "Stairs",   "lbl": "Stairs"},
+				{"id": "arch",        "piece": "Arch",     "lbl": "Arch"},
+				{"id": "pillar",      "piece": "Box",      "lbl": "Pillar"},
+				{"id": "import3d",    "piece": "Model",    "lbl": "Import 3D", "icon": "crate"},
 			]
 		elif _dock_build_cat == "cutouts":
 			slots = [
@@ -2047,6 +2083,7 @@ func _select_tool(sid: String) -> void:
 	elif sid == "materials": _open_materials_drawer()
 	elif sid == "props": _open_props_drawer()
 	elif sid == "scatter_props": _open_scatter_drawer()
+	elif sid == "spline_path": spline_chain_active = false; spline_seg_count = 0; _open_spline_drawer()
 	elif sid == "sky_sun": _open_sky_sun_drawer()
 	else: right_drawer.visible = false
 	_rebuild_left_rail()
@@ -2615,11 +2652,189 @@ func _do_clip_selected(normal: Vector3) -> void:
 	var mid: Vector3 = (info["bounds_min"] + info["bounds_max"]) * 0.5
 	var res: int = doc.clip_solid(selected_solid, mid, normal, _clip_keep_mode)
 	if res >= 0:
-		_record_history("Clip Solid"); map_sync.sync_all(); _select_solid(res, -1); audio.play("carve")
+		_record_history("Clip Solid"); map_sync.sync_all(true); _select_solid(res, -1); audio.play("carve")
 		_toast("Clipped solid cleanly!")
 
+func _drop_selection_to_floor() -> void:
+	var moved := false
+	if selected_solids.size() > 1:
+		var gmin := Vector3(1e9, 1e9, 1e9); var gmax := Vector3(-1e9, -1e9, -1e9)
+		for sid in selected_solids:
+			var si: Dictionary = doc.get_solid_info(sid)
+			if si.get("valid", false):
+				gmin = gmin.min(si["bounds_min"]); gmax = gmax.max(si["bounds_max"])
+		var mid_xz := Vector3((gmin.x + gmax.x) * 0.5, gmin.y - 0.05, (gmin.z + gmax.z) * 0.5)
+		var rc: Dictionary = doc.raycast_face(mid_xz, Vector3(0, -1, 0))
+		var target_y: float = (rc["hit_pos"] as Vector3).y if rc.get("hit", false) else 0.0
+		var dy: float = target_y - gmin.y
+		if absf(dy) > 0.01:
+			for sid in selected_solids:
+				if doc.translate_solid(sid, Vector3(0, dy, 0)): moved = true
+		if moved:
+			_commit_solid_edit("Drop %d Solids to Floor" % selected_solids.size())
+			_toast("Dropped %d solids flush onto surface (Y=%.0fu)!" % [selected_solids.size(), target_y * UPM])
+	elif selected_solid >= 0:
+		var si: Dictionary = doc.get_solid_info(selected_solid)
+		if si.get("valid", false):
+			var bmin: Vector3 = si["bounds_min"]; var bmax: Vector3 = si["bounds_max"]
+			var probe := Vector3((bmin.x + bmax.x) * 0.5, bmin.y - 0.05, (bmin.z + bmax.z) * 0.5)
+			var rc: Dictionary = doc.raycast_face(probe, Vector3(0, -1, 0))
+			var target_y: float = (rc["hit_pos"] as Vector3).y if rc.get("hit", false) else 0.0
+			var dy: float = target_y - bmin.y
+			if absf(dy) > 0.01 and doc.translate_solid(selected_solid, Vector3(0, dy, 0)):
+				_commit_solid_edit("Drop Solid to Floor")
+				_toast("Dropped Solid #%d flush onto floor (Y=%.0fu)!" % [selected_solid, target_y * UPM])
+			else:
+				_toast("Solid #%d is already resting on the floor!" % selected_solid)
+	elif selected_entity >= 0:
+		var ents: Array = doc.get_entities()
+		if selected_entity < ents.size():
+			var epos: Vector3 = ents[selected_entity]["pos"]
+			var rc: Dictionary = doc.raycast_face(epos + Vector3(0, 0.25, 0), Vector3(0, -1, 0))
+			var target_y: float = (rc["hit_pos"] as Vector3).y if rc.get("hit", false) else 0.0
+			var new_pos := Vector3(epos.x, target_y, epos.z)
+			if epos.distance_to(new_pos) > 0.01:
+				doc.set_entity_pos(selected_entity, new_pos)
+				_record_history("Drop Entity to Floor")
+				ent_vis.sync_entity(selected_entity, false)
+				_update_3d_gizmo(); audio.play("place")
+				_toast("Dropped Entity #%d flush onto floor (Y=%.0fu)!" % [selected_entity, target_y * UPM])
+
+func _auto_texture_selected_solids() -> void:
+	var targets: Array[int] = selected_solids.duplicate() if selected_solids.size() > 1 else ([selected_solid] if selected_solid >= 0 else [])
+	if targets.is_empty():
+		_toast("Select a brush solid first to Auto-Texture with the active biome!")
+		return
+	var b: Dictionary = Tf2GamemodesScript.get_biome(active_biome)
+	var floor_m: String = str(b["floor"])
+	var wall_m: String = str(b["wall"])
+	var roof_m: String = str(b["roof"])
+	var painted := 0
+	for sid in targets:
+		var md: Dictionary = doc.get_solid_mesh_data(sid)
+		if not md.get("ok", false): continue
+		var info: Dictionary = doc.get_solid_info(sid)
+		var bmin: Vector3 = info.get("bounds_min", Vector3.ZERO)
+		var bmax: Vector3 = info.get("bounds_max", Vector3.ZERO)
+		var is_roof_level: bool = bmax.y > 3.5
+		doc.set_solid_material(sid, wall_m)
+		# Paint top/bottom faces specifically via raycast probes or face normals
+		var mid := (bmin + bmax) * 0.5
+		var top_rc: Dictionary = doc.raycast_face(Vector3(mid.x, bmax.y + 0.5, mid.z), Vector3(0, -1, 0))
+		if top_rc.get("hit", false) and int(top_rc["solid_idx"]) == sid:
+			doc.set_face_material(sid, int(top_rc["face_idx"]), roof_m if is_roof_level else floor_m)
+		var bot_rc: Dictionary = doc.raycast_face(Vector3(mid.x, bmin.y - 0.5, mid.z), Vector3(0, 1, 0))
+		if bot_rc.get("hit", false) and int(bot_rc["solid_idx"]) == sid:
+			doc.set_face_material(sid, int(bot_rc["face_idx"]), "TOOLS/TOOLSNODRAW")
+		painted += 1
+	if painted > 0:
+		_commit_solid_edit("Auto-Texture Biome (%d)" % painted, targets)
+		_toast("Auto-textured %d solid(s) with %s biome (wall/floor/roof + nodraw bottom)!" % [painted, str(b["name"])])
+
+func _open_spline_drawer() -> void:
+	_clear_drawer("3D SPLINE PATH & FENCE BUILDER")
+	EditorDrawersScript.build_spline_drawer(self, right_drawer_vbox)
+
+func _place_spline_segment(p0: Vector3, p1: Vector3) -> Array[int]:
+	var created: Array[int] = []
+	var delta := p1 - p0
+	var horiz := Vector3(delta.x, 0.0, delta.z)
+	var dist := horiz.length()
+	if dist < 0.4:
+		return created
+	var dir := horiz / dist
+	var perp := Vector3(-dir.z, 0.0, dir.x)
+	var base_y: float = minf(p0.y, p1.y)
+	var b: Dictionary = Tf2GamemodesScript.get_biome(active_biome)
+
+	if spline_preset == "fence":
+		# Wooden fence wall panel + evenly spaced wooden fence posts!
+		var fh: float = clampf(spline_height_m, 1.0, 3.5)
+		var sid: int = doc.add_wall_segment(p0, p1, fh, 0.25, "WOOD/WOOD_WALL002")
+		if sid >= 0: created.append(sid)
+		var posts := maxi(2, int(round(dist / 3.0)) + 1)
+		for i in range(posts):
+			var t := float(i) / float(posts - 1)
+			var pt := p0.lerp(p1, t)
+			var pid: int = doc.add_box(pt + Vector3(-0.22, 0.0, -0.22), pt + Vector3(0.22, fh + 0.25, 0.22), "WOOD/WOOD_BEAM001")
+			if pid >= 0: created.append(pid)
+	elif spline_preset == "guardrail":
+		# Waist-high industrial steel rail + bottom kickbar + vertical posts
+		var rh: float = 1.25
+		var top_r: int = doc.add_wall_segment(p0 + Vector3(0, rh - 0.14, 0), p1 + Vector3(0, rh - 0.14, 0), 0.16, 0.16, "METAL/IBEAM001B")
+		var mid_r: int = doc.add_wall_segment(p0 + Vector3(0, rh * 0.48, 0), p1 + Vector3(0, rh * 0.48, 0), 0.12, 0.12, "METAL/IBEAM001B")
+		if top_r >= 0: created.append(top_r)
+		if mid_r >= 0: created.append(mid_r)
+		var posts := maxi(2, int(round(dist / 2.5)) + 1)
+		for i in range(posts):
+			var t := float(i) / float(posts - 1)
+			var pt := p0.lerp(p1, t)
+			var pid: int = doc.add_box(pt + Vector3(-0.12, 0.0, -0.12), pt + Vector3(0.12, rh + 0.05, 0.12), "METAL/IBEAM001B")
+			if pid >= 0: created.append(pid)
+	elif spline_preset == "catwalk":
+		# Metal grate elevated walkway + twin safety handrails on both sides!
+		var cw: float = maxf(spline_width_m, 2.5)
+		var deck: int = doc.add_wall_segment(p0, p1, 0.28, cw, "METAL/METALGRATE011A")
+		if deck >= 0: created.append(deck)
+		var half_w := cw * 0.5 - 0.12
+		for side_v in [-1.0, 1.0]:
+			var side: float = float(side_v)
+			var off: Vector3 = perp * (half_w * side)
+			var r_top: int = doc.add_wall_segment(p0 + off + Vector3(0, 1.25, 0), p1 + off + Vector3(0, 1.25, 0), 0.14, 0.14, "METAL/IBEAM001B")
+			var r_mid: int = doc.add_wall_segment(p0 + off + Vector3(0, 0.72, 0), p1 + off + Vector3(0, 0.72, 0), 0.10, 0.10, "METAL/IBEAM001B")
+			if r_top >= 0: created.append(r_top)
+			if r_mid >= 0: created.append(r_mid)
+			var posts := maxi(2, int(round(dist / 3.0)) + 1)
+			for i in range(posts):
+				var pt: Vector3 = p0.lerp(p1, float(i) / float(posts - 1)) + off
+				var pid: int = doc.add_box(pt + Vector3(-0.1, 0.25, -0.1), pt + Vector3(0.1, 1.38, 0.1), "METAL/IBEAM001B")
+				if pid >= 0: created.append(pid)
+	else:
+		# Concrete chest-high combat cover barrier (48u tall)
+		var bh: float = clampf(spline_height_m, 1.25, 2.5)
+		var bw: float = clampf(spline_width_m, 0.5, 1.5)
+		var sid: int = doc.add_wall_segment(p0, p1, bh, bw, "CONCRETE/CONCRETEWALL002")
+		if sid >= 0: created.append(sid)
+		var cap: int = doc.add_wall_segment(p0 + Vector3(0, bh, 0), p1 + Vector3(0, bh, 0), 0.15, bw + 0.12, str(b["trim"]))
+		if cap >= 0: created.append(cap)
+
+	if not created.is_empty():
+		if symmetry != SymmetryMode.OFF:
+			for cid in created.duplicate():
+				doc.mirror_solid_x(cid, symmetry == SymmetryMode.ROT_180)
+		_record_history("Spline " + spline_preset.capitalize())
+		map_sync.sync_all()
+		_refresh_2d_views(true)
+		_spawn_place_fx(p1, HudWidgets.COL_CYAN)
+		audio.play("place")
+	return created
+
 func _rotate_selection() -> void:
-	if selected_solid >= 0:
+	if selected_solids.size() > 1:
+		var deg: float = float(settings.rotate_step_deg)
+		var rad: float = deg_to_rad(deg)
+		var gmin := Vector3(1e9, 1e9, 1e9); var gmax := Vector3(-1e9, -1e9, -1e9)
+		for sid in selected_solids:
+			var si: Dictionary = doc.get_solid_info(sid)
+			if si.get("valid", false):
+				gmin = gmin.min(si["bounds_min"]); gmax = gmax.max(si["bounds_max"])
+		var pivot := (gmin + gmax) * 0.5
+		var rotated := false
+		for sid in selected_solids:
+			var si: Dictionary = doc.get_solid_info(sid)
+			if not si.get("valid", false): continue
+			var c: Vector3 = (si["bounds_min"] + si["bounds_max"]) * 0.5
+			var rel := c - pivot
+			var rot_rel := Vector3(rel.x * cos(rad) - rel.z * sin(rad), rel.y, rel.x * sin(rad) + rel.z * cos(rad))
+			doc.rotate_solid_y(sid, deg)
+			var delta := (pivot + rot_rel) - c
+			if delta.length() > 0.001:
+				doc.translate_solid(sid, delta)
+			rotated = true
+		if rotated:
+			_commit_solid_edit("Rotate %d Solids" % selected_solids.size())
+			_toast("Rotated %d solids %d° around group center!" % [selected_solids.size(), int(deg)])
+	elif selected_solid >= 0:
 		if doc.rotate_solid_y(selected_solid, float(settings.rotate_step_deg)):
 			_commit_solid_edit("Rotate Solid")
 	elif selected_entity >= 0:
@@ -2742,7 +2957,7 @@ func _apply_biome(bkey: String) -> void:
 	var b: Dictionary = Tf2GamemodesScript.get_biome(bkey)
 	active_sky = b["sky"]; doc.set_skyname(active_sky)
 	doc.apply_theme_materials(b["floor"], b["wall"], b["roof"])
-	_record_history("Apply " + b["name"]); _apply_environment_from_biome(bkey); map_sync.sync_all()
+	_record_history("Apply " + b["name"]); _apply_environment_from_biome(bkey); map_sync.sync_all(true)
 	_toast("Applied %s biome & %s skybox!" % [b["name"], active_sky])
 
 func _apply_environment_from_biome(bkey: String) -> void:
@@ -2990,7 +3205,7 @@ func _jump_to_history(target_idx: int) -> void:
 		if not doc.redo(): break
 		_history_idx += 1; moved = true
 	if moved:
-		_clear_selection(); map_sync.sync_all(); ent_vis.sync_all()
+		_clear_selection(); map_sync.sync_all(true); ent_vis.sync_all()
 		_update_history_buttons()
 		audio.play("undo" if going_back else "redo")
 		_toast("Jumped to History #%d: %s" % [_history_idx, str(_history_entries[_history_idx]["label"])])
@@ -3001,7 +3216,7 @@ func _do_undo() -> void:
 	if doc.undo():
 		var undone_lbl: String = str(_history_entries[_history_idx]["label"]) if _history_idx < _history_entries.size() else "Last Edit"
 		_history_idx = maxi(0, _history_idx - 1)
-		_clear_selection(); map_sync.sync_all(); ent_vis.sync_all()
+		_clear_selection(); map_sync.sync_all(true); ent_vis.sync_all()
 		_update_history_buttons()
 		audio.play("undo")
 		_toast("Undid: %s (Ctrl+Y to Redo)" % undone_lbl)
@@ -3015,7 +3230,7 @@ func _do_redo() -> void:
 	if doc.redo():
 		_history_idx = mini(_history_entries.size() - 1, _history_idx + 1)
 		var redone_lbl: String = str(_history_entries[_history_idx]["label"]) if _history_idx < _history_entries.size() else "Edit"
-		_clear_selection(); map_sync.sync_all(); ent_vis.sync_all()
+		_clear_selection(); map_sync.sync_all(true); ent_vis.sync_all()
 		_update_history_buttons()
 		audio.play("redo")
 		_toast("Redid: %s" % redone_lbl)
@@ -3232,6 +3447,7 @@ func _unhandled_input(event: InputEvent) -> void:
 				if stage == Stage.PLAYTEST: set_stage(_prev_stage)
 				elif active_tool == "wire_io": _wire_io_src = -1; active_tool = "select"; overlay_2d.queue_redraw(); _toast("Cancelled Visual 3D Wiring")
 				elif _clip_3d_active: _clip_3d_active = false; if _clip_plane_mesh != null: _clip_plane_mesh.visible = false
+				elif spline_chain_active: spline_chain_active = false; spline_seg_count = 0; _refresh_context_bar(); _toast("Finished spline path chain")
 				elif _wall_chain_active: _wall_chain_active = false; ghost_mesh.visible = false; _toast("Finished wall chain")
 				elif _drawing_box: _drawing_box = false; ghost_mesh.visible = false
 				elif selected_solid >= 0 or selected_entity >= 0: _clear_selection()
@@ -3279,6 +3495,7 @@ func _unhandled_input(event: InputEvent) -> void:
 			elif event.alt_pressed and event.keycode in [KEY_1, KEY_2, KEY_3, KEY_4]:
 				_jump_camera_bookmark(event.keycode - KEY_0)
 			elif event.keycode == KEY_R and not event.ctrl_pressed: _rotate_selection()
+			elif event.keycode == KEY_END: _drop_selection_to_floor()
 			elif event.keycode == KEY_H and not event.ctrl_pressed: _do_quickhide_selected()
 			elif event.keycode == KEY_U and not event.ctrl_pressed: _do_unhide_all()
 			elif event.keycode == KEY_SPACE: _toggle_2d_view()
@@ -3612,12 +3829,48 @@ func _handle_left_click(screen_pos: Vector2, shift_held: bool = false, alt_held:
 				var nrm := Vector3(-edge.z, 0.0, edge.x).normalized()
 				var res: int = doc.clip_solid(selected_solid, _clip_3d_pt_a, nrm, _clip_keep_mode)
 				if res >= 0:
-					_record_history("3D Clip Solid"); map_sync.sync_all(); _select_solid(res, -1)
+					_record_history("3D Clip Solid"); map_sync.sync_all(true); _select_solid(res, -1)
 					_spawn_place_fx(hover_pos, HudWidgets.COL_CYAN); audio.play("carve")
 					_toast("Sliced solid along your custom 3D cut plane!")
 			_clip_3d_active = false
 			if _clip_plane_mesh != null: _clip_plane_mesh.visible = false
 		return
+
+	if active_tool == "floor" and hover_valid:
+		_drawing_box = true; _box_start = hover_pos; return
+
+	if active_tool == "wall" and hover_valid:
+		if not _wall_chain_active:
+			_wall_chain_active = true; _wall_chain_start = hover_pos
+			_toast("Wall Chain started — click next corner (RMB or Esc to finish)")
+		else:
+			var b: Dictionary = Tf2GamemodesScript.get_biome(active_biome)
+			var wmat: String = active_material if not active_material.is_empty() else str(b["wall"])
+			var wid: int = doc.add_wall_segment(_wall_chain_start, hover_pos, wall_height_m, wall_thick_m, wmat)
+			if wid >= 0:
+				if symmetry != SymmetryMode.OFF: doc.mirror_solid_x(wid, symmetry == SymmetryMode.ROT_180)
+				_record_history("Draw Wall"); map_sync.sync_all(); _select_solid(wid, -1); audio.play("place")
+				_wall_chain_start = hover_pos
+		return
+
+	if active_tool == "spline_path" and hover_valid:
+		if not spline_chain_active:
+			spline_chain_active = true; spline_last_pt = hover_pos; spline_seg_count = 0
+			_spawn_place_fx(hover_pos, HudWidgets.COL_CYAN); audio.play("click")
+			_refresh_context_bar()
+			if right_drawer.visible: _open_spline_drawer()
+			_toast("Spline %s started — click next corner point (Esc to finish)" % spline_preset.capitalize())
+		else:
+			var seg_ids := _place_spline_segment(spline_last_pt, hover_pos)
+			if not seg_ids.is_empty():
+				spline_last_pt = hover_pos; spline_seg_count += 1
+				_refresh_context_bar()
+				if right_drawer.visible: _open_spline_drawer()
+				_toast("Placed %s segment #%d (%d brushes) — click next point or Esc!" % [spline_preset.capitalize(), spline_seg_count, seg_ids.size()])
+		return
+
+	if hover_valid:
+		_place_tool_at(hover_pos)
 
 func _finish_marquee_select() -> void:
 	_marquee_active = false
@@ -3644,26 +3897,6 @@ func _finish_marquee_select() -> void:
 		map_sync.set_multi_selection(selected_solids, selected_solid, -1)
 		_refresh_selection_bar(); _update_3d_gizmo(); audio.play("click")
 		_toast("Marquee selected %d solids! (Drag Gizmo, Clone, Mirror BLU/RED, or Save Prefab)" % picked.size())
-
-	if active_tool == "floor" and hover_valid:
-		_drawing_box = true; _box_start = hover_pos; return
-
-	if active_tool == "wall" and hover_valid:
-		if not _wall_chain_active:
-			_wall_chain_active = true; _wall_chain_start = hover_pos
-			_toast("Wall Chain started â€” click next corner (RMB or Esc to finish)")
-		else:
-			var b: Dictionary = Tf2GamemodesScript.get_biome(active_biome)
-			var wmat: String = active_material if not active_material.is_empty() else str(b["wall"])
-			var wid: int = doc.add_wall_segment(_wall_chain_start, hover_pos, wall_height_m, wall_thick_m, wmat)
-			if wid >= 0:
-				if symmetry != SymmetryMode.OFF: doc.mirror_solid_x(wid, symmetry == SymmetryMode.ROT_180)
-				_record_history("Draw Wall"); map_sync.sync_all(); _select_solid(wid, -1); audio.play("place")
-				_wall_chain_start = hover_pos
-		return
-
-	if hover_valid:
-		_place_tool_at(hover_pos)
 
 ## Smart entity placement: brush entities (func_door, trigger_*, func_respawnroom, func_nobuild, etc.)
 ## automatically create real 3D solid/trigger brush volumes instead of 0-size point entities!
@@ -4314,6 +4547,14 @@ func _setup_auto_shot(idx: int) -> void:
 			var lid: int = doc.add_point_entity("light_spot", Vector3(0.0, 5.5, 0.0), {"_light": "255 205 135 550", "pitch": "-75", "_cone": "54"})
 			ent_vis.sync_all(); _select_entity(lid); _insp_tab = 0; _open_inspector_drawer()
 			cam_pos = Vector3(13.0, 9.5, 14.0); editor_cam.look_at_from_position(cam_pos, Vector3(0.0, 2.5, 0.0), Vector3.UP)
+			cam_yaw = editor_cam.rotation.y; cam_pitch = editor_cam.rotation.x
+		"v13_spline":
+			_set_lighting_mode(0); _show_welcome_hub(false); _load_gamemode("koth", "badlands", false); set_stage(Stage.BUILD)
+			spline_preset = "catwalk"; _place_spline_segment(Vector3(-8.0, 2.0, -5.0), Vector3(0.0, 2.0, -5.0)); _place_spline_segment(Vector3(0.0, 2.0, -5.0), Vector3(6.0, 2.0, 1.0))
+			spline_preset = "fence"; _place_spline_segment(Vector3(-9.0, 0.0, 5.0), Vector3(-2.0, 0.0, 7.0))
+			spline_preset = "guardrail"; spline_chain_active = true; spline_seg_count = 3
+			active_tool = "spline_path"; _open_spline_drawer(); _refresh_context_bar()
+			cam_pos = Vector3(15.0, 11.5, 17.0); editor_cam.look_at_from_position(cam_pos, Vector3(-1.0, 1.5, -1.0), Vector3.UP)
 			cam_yaw = editor_cam.rotation.y; cam_pitch = editor_cam.rotation.x
 	if not viewing_bsp and not settings_modal.visible:
 		_update_hover(get_viewport().get_visible_rect().size * Vector2(0.42, 0.52))

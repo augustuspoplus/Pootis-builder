@@ -34,6 +34,10 @@ var lighting_preview_mode: int = 0 # 0=Daylight, 1=Lit Interior, 2=Fullbright
 var cart_visual_node: Node3D = null
 var _cart_orig_pos: Vector3 = Vector3.ZERO
 var _cart_orig_rot: Vector3 = Vector3.ZERO
+var _sel_im: ImmediateMesh = null
+var _hov_im: ImmediateMesh = null
+var _wire_mat_sel: StandardMaterial3D = null
+var _wire_mat_hov: StandardMaterial3D = null
 
 const ENTITY_MODELS := {
 	"item_healthkit_small":  "models/items/medkit_small.mdl",
@@ -215,27 +219,25 @@ func set_hover(ent_idx: int) -> void:
 	hovered_entity = ent_idx
 	_rebuild_highlight_boxes()
 
-func _rebuild_highlight_boxes() -> void:
-	if selection_box != null:
-		selection_box.mesh = null
-		if selected_entity >= 0 and _ent_bounds.has(selected_entity):
-			var bb: Array = _ent_bounds[selected_entity]
-			selection_box.mesh = _make_wire_box(bb[0], bb[1], Color(0.98, 0.68, 0.16, 1.0), 0.06)
-	if hover_box != null:
-		hover_box.mesh = null
-		if hovered_entity >= 0 and hovered_entity != selected_entity and _ent_bounds.has(hovered_entity):
-			var bb: Array = _ent_bounds[hovered_entity]
-			hover_box.mesh = _make_wire_box(bb[0], bb[1], Color(0.20, 0.90, 1.0, 0.92), 0.05)
+func _ensure_wire_pool() -> void:
+	if _sel_im == null:
+		_sel_im = ImmediateMesh.new()
+		_wire_mat_sel = StandardMaterial3D.new()
+		_wire_mat_sel.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		_wire_mat_sel.albedo_color = Color(0.98, 0.68, 0.16, 1.0)
+		_wire_mat_sel.no_depth_test = true
+	if _hov_im == null:
+		_hov_im = ImmediateMesh.new()
+		_wire_mat_hov = StandardMaterial3D.new()
+		_wire_mat_hov.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		_wire_mat_hov.albedo_color = Color(0.20, 0.90, 1.0, 0.92)
+		_wire_mat_hov.no_depth_test = true
 
-func _make_wire_box(bmin: Vector3, bmax: Vector3, col: Color, pad_val: float = 0.04) -> ImmediateMesh:
+func _fill_wire_box(im: ImmediateMesh, mat: StandardMaterial3D, bmin: Vector3, bmax: Vector3, pad_val: float = 0.04) -> void:
+	im.clear_surfaces()
 	var pad := Vector3(pad_val, pad_val, pad_val)
 	var a := bmin - pad
 	var b := bmax + pad
-	var im := ImmediateMesh.new()
-	var mat := StandardMaterial3D.new()
-	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	mat.albedo_color = col
-	mat.no_depth_test = true
 	im.surface_begin(Mesh.PRIMITIVE_LINES, mat)
 	var corners := [
 		Vector3(a.x, a.y, a.z), Vector3(b.x, a.y, a.z),
@@ -243,16 +245,28 @@ func _make_wire_box(bmin: Vector3, bmax: Vector3, col: Color, pad_val: float = 0
 		Vector3(a.x, b.y, a.z), Vector3(b.x, b.y, a.z),
 		Vector3(b.x, b.y, b.z), Vector3(a.x, b.y, b.z),
 	]
-	var edges := [
-		[0,1],[1,2],[2,3],[3,0],
-		[4,5],[5,6],[6,7],[7,4],
-		[0,4],[1,5],[2,6],[3,7],
-	]
+	var edges := [[0,1],[1,2],[2,3],[3,0],[4,5],[5,6],[6,7],[7,4],[0,4],[1,5],[2,6],[3,7]]
 	for e in edges:
 		im.surface_add_vertex(corners[e[0]])
 		im.surface_add_vertex(corners[e[1]])
 	im.surface_end()
-	return im
+
+func _rebuild_highlight_boxes() -> void:
+	_ensure_wire_pool()
+	if selection_box != null:
+		selection_box.visible = false
+		if selected_entity >= 0 and _ent_bounds.has(selected_entity):
+			var bb: Array = _ent_bounds[selected_entity]
+			_fill_wire_box(_sel_im, _wire_mat_sel, bb[0], bb[1], 0.06)
+			selection_box.mesh = _sel_im
+			selection_box.visible = not playtest_mode
+	if hover_box != null:
+		hover_box.visible = false
+		if hovered_entity >= 0 and hovered_entity != selected_entity and _ent_bounds.has(hovered_entity):
+			var bb: Array = _ent_bounds[hovered_entity]
+			_fill_wire_box(_hov_im, _wire_mat_hov, bb[0], bb[1], 0.05)
+			hover_box.mesh = _hov_im
+			hover_box.visible = not playtest_mode
 
 func _spawn_entity_node(idx: int, e: Dictionary, pos: Vector3) -> Node3D:
 	var cls: String = str(e["classname"])

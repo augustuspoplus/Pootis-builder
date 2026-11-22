@@ -72,10 +72,16 @@ static func build_materials_drawer(app: Node3D, vbox: VBoxContainer) -> void:
 			if not old_m.is_empty():
 				var n: int = app.doc.replace_material(old_m, app.active_material)
 				app._record_history("Replace Textures")
-				app.map_sync.sync_all()
+				app.map_sync.sync_all(true)
 				app._toast("Replaced %d faces (%s -> %s)" % [n, old_m.get_file(), app.active_material.get_file()])
 	)
 	act_row.add_child(rep_b)
+
+	var auto_b := Button.new(); auto_b.text = "Auto-Biome"
+	auto_b.tooltip_text = "Auto-apply active biome roof/floor/wall textures to selected solid(s)"
+	HudWidgets.style_tf2_button(auto_b, fonts["body"], 10, false, 3)
+	auto_b.pressed.connect(func(): app._auto_texture_selected_solids())
+	act_row.add_child(auto_b)
 
 	# Hammer Face UV Controls (Scale X/Y, Shift X/Y, Rot, Lightmap Scale, Justify, Align!)
 	if app.selected_solid >= 0:
@@ -1983,3 +1989,71 @@ static func build_scatter_drawer(app: Node3D, vbox: VBoxContainer) -> void:
 	HudWidgets.style_tf2_button(act_b, fonts["heading"], 11, true)
 	act_b.pressed.connect(func(): app.audio.play("click"); app.active_tool = "scatter_props"; app._open_scatter_drawer(); app._toast("Prop Scatter Brush active — click ground/cliffs in 3D!"))
 	v2.add_child(act_b)
+
+# ==============================================================================
+# 15. 3D SPLINE PATH / FENCE / GUARDRAIL / CATWALK BUILDER (Milestone 33)
+# ==============================================================================
+static func build_spline_drawer(app: Node3D, vbox: VBoxContainer) -> void:
+	var fonts: Dictionary = app.fonts
+
+	var c1 := HudWidgets.make_section_card("1. CHOOSE SPLINE STRUCTURE STYLE", fonts, HudWidgets.COL_CYAN)
+	vbox.add_child(c1["panel"])
+	var v1: VBoxContainer = c1["vbox"]
+	v1.add_child(_lbl("Click Point A -> B -> C in the 3D viewport to lay continuous aligned TF2 fences, guardrails, catwalks, or barriers! Press Esc or RMB to finish a chain.", fonts["body"], 10, HudWidgets.COL_TX_MUTED))
+
+	var presets := [
+		{"id": "fence",     "t": "Wooden Fence Line",  "sub": "Farm/Badlands boundary fence with posts"},
+		{"id": "guardrail", "t": "Steel Guardrail",    "sub": "Industrial waist-high handrail + posts"},
+		{"id": "catwalk",   "t": "Elevated Catwalk",   "sub": "Metal grate walkway + twin safety rails"},
+		{"id": "barrier",   "t": "Concrete Barrier",   "sub": "Chest-high combat cover wall (48u)"},
+	]
+	for pr in presets:
+		var pid: String = str(pr["id"])
+		var b := Button.new()
+		b.text = "%s\n%s" % [str(pr["t"]), str(pr["sub"])]
+		b.alignment = HORIZONTAL_ALIGNMENT_LEFT
+		b.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		HudWidgets.style_tf2_button(b, fonts["body"], 10, app.spline_preset == pid)
+		b.pressed.connect(func():
+			app.audio.play("click")
+			app.spline_preset = pid
+			app.active_tool = "spline_path"
+			app._open_spline_drawer()
+			app._refresh_context_bar()
+		)
+		v1.add_child(b)
+
+	var c2 := HudWidgets.make_section_card("2. DIMENSIONS & CHAIN CONTROLS", fonts, HudWidgets.COL_ACC)
+	vbox.add_child(c2["panel"])
+	var v2: VBoxContainer = c2["vbox"]
+	var g2 := GridContainer.new(); g2.columns = 2; g2.add_theme_constant_override("h_separation", 6); v2.add_child(g2)
+
+	var h_sb := SpinBox.new(); h_sb.min_value = 32; h_sb.max_value = 192; h_sb.step = 8; h_sb.value = app.spline_height_m * 32.0; h_sb.prefix = "Height: "; h_sb.suffix = "u"
+	h_sb.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	h_sb.value_changed.connect(func(v: float): app.spline_height_m = v / 32.0)
+	g2.add_child(h_sb)
+
+	var w_sb := SpinBox.new(); w_sb.min_value = 8; w_sb.max_value = 160; w_sb.step = 8; w_sb.value = app.spline_width_m * 32.0; w_sb.prefix = "Width: "; w_sb.suffix = "u"
+	w_sb.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	w_sb.value_changed.connect(func(v: float): app.spline_width_m = v / 32.0)
+	g2.add_child(w_sb)
+
+	var state_txt := "CHAIN ACTIVE (%d segments placed) — Click next point or Finish" % app.spline_seg_count if app.spline_chain_active else "Ready: Click Point A in 3D to start spline chain"
+	v2.add_child(_lbl(state_txt, fonts["mono"], 10, HudWidgets.COL_GREEN if app.spline_chain_active else HudWidgets.COL_TX_MUTED))
+
+	var row := HBoxContainer.new(); row.add_theme_constant_override("separation", 6); v2.add_child(row)
+	var start_b := Button.new(); start_b.text = "Activate Spline Tool"; start_b.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	HudWidgets.style_tf2_button(start_b, fonts["heading"], 10, true)
+	start_b.pressed.connect(func(): app.audio.play("click"); app.active_tool = "spline_path"; app._refresh_context_bar(); app._toast("Spline Path Builder active — click A -> B -> C in 3D!"))
+	row.add_child(start_b)
+
+	var fin_b := Button.new(); fin_b.text = "Finish Chain (Esc)"
+	HudWidgets.style_tf2_button(fin_b, fonts["body"], 10)
+	fin_b.pressed.connect(func():
+		app.audio.play("click")
+		app.spline_chain_active = false
+		app.spline_seg_count = 0
+		app._open_spline_drawer()
+		app._toast("Finished spline chain — click anywhere to start a new one!")
+	)
+	row.add_child(fin_b)
