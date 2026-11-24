@@ -17,6 +17,9 @@ var app: Node3D
 var http: HTTPRequest
 var is_thinking: bool = false
 var show_config: bool = false
+var active_tab: int = 0 # 0=Architect Chat, 1=AI Arena & Valve DNA
+var valve_dna: Dictionary = {}
+var arena_leaderboard: Array[Dictionary] = []
 var chat_history: Array[Dictionary] = [] # [{role: "user"|"ai", text: String, badge: String, actions_run: int}]
 var suggested_followups: Array[String] = [
 	"What should I improve next?",
@@ -32,42 +35,100 @@ func setup(p_app: Node3D) -> void:
 	http.timeout = 24.0
 	add_child(http)
 	http.request_completed.connect(_on_http_completed)
+	load_valve_dna()
+	_load_leaderboard()
 	if chat_history.is_empty():
+		var studied: int = (valve_dna.get("maps_studied", []) as Array).size()
+		var dna_note := " Grounded in %d mined official Valve TF2 maps!" % studied if studied > 0 else ""
 		chat_history.append({
 			"role": "ai",
-			"text": "Hi! I'm your TF2 AI Map Architect. Tell me what you want to build (like 'add a sniper balcony with crates' or 'add warm lights'), or click 'What should I improve next?' for a live map critique!",
+			"text": "Hi! I'm your TF2 AI Map Architect.%s Tell me what you want to build, click 'What should I improve next?', or switch to the 'AI Arena & Valve DNA' tab to score & compare models!" % dna_note,
 			"badge": get_active_backend_label(),
 			"actions_run": 0,
 		})
 
+func load_valve_dna() -> void:
+	var dna_path := _get_repo_root().path_join("godot/data/tf2_design_dna.json")
+	if FileAccess.file_exists(dna_path):
+		var parsed = JSON.parse_string(FileAccess.get_file_as_string(dna_path))
+		if parsed is Dictionary:
+			valve_dna = parsed
+
+func _get_repo_root() -> String:
+	if app != null and not str(app.repo_root).is_empty():
+		return str(app.repo_root)
+	return ProjectSettings.globalize_path("res://").get_base_dir().get_base_dir()
+
+func _load_leaderboard() -> void:
+	var lp := _get_repo_root().path_join("godot/ai_benchmarks/leaderboard.json")
+	if FileAccess.file_exists(lp):
+		var parsed = JSON.parse_string(FileAccess.get_file_as_string(lp))
+		if parsed is Array:
+			arena_leaderboard.clear()
+			for item in parsed:
+				if item is Dictionary:
+					arena_leaderboard.append(item)
+
+func _save_leaderboard() -> void:
+	var bdir := _get_repo_root().path_join("godot/ai_benchmarks")
+	DirAccess.make_dir_recursive_absolute(bdir)
+	var f := FileAccess.open(bdir.path_join("leaderboard.json"), FileAccess.WRITE)
+	if f != null:
+		f.store_string(JSON.stringify(arena_leaderboard, "\t"))
+		f.close()
+
 func get_effective_gemini_key() -> String:
-	if app != null and app.settings != null and not app.settings.gemini_api_key.strip_edges().is_empty():
-		return app.settings.gemini_api_key.strip_edges()
-	var env_k := OS.get_environment("GEMINI_API_KEY").strip_edges()
-	return env_k
+	if app != null and app.settings != null and not str(app.settings.gemini_api_key).strip_edges().is_empty():
+		return str(app.settings.gemini_api_key).strip_edges()
+	return OS.get_environment("GEMINI_API_KEY").strip_edges()
+
+func get_effective_claude_key() -> String:
+	if app != null and app.settings != null and not str(app.settings.claude_api_key).strip_edges().is_empty():
+		return str(app.settings.claude_api_key).strip_edges()
+	return OS.get_environment("ANTHROPIC_API_KEY").strip_edges()
+
+func get_effective_openai_key() -> String:
+	if app != null and app.settings != null and not str(app.settings.openai_api_key).strip_edges().is_empty():
+		return str(app.settings.openai_api_key).strip_edges()
+	return OS.get_environment("OPENAI_API_KEY").strip_edges()
 
 func get_active_backend() -> String:
 	if app == null or app.settings == null:
 		return "offline"
 	var pref: String = str(app.settings.ai_provider).to_lower()
-	if pref == "offline":
-		return "offline"
-	if pref == "gemini":
-		return "gemini" if not get_effective_gemini_key().is_empty() else "offline"
-	if pref == "ollama":
-		return "ollama"
-	# "auto": use Gemini if key exists, else instant offline architect
-	if not get_effective_gemini_key().is_empty():
-		return "gemini"
+	if pref == "offline": return "offline"
+	if pref == "gemini": return "gemini" if not get_effective_gemini_key().is_empty() else "offline"
+	if pref == "claude": return "claude" if not get_effective_claude_key().is_empty() else "offline"
+	if pref == "openai": return "openai" if not get_effective_openai_key().is_empty() else "offline"
+	if pref == "ollama": return "ollama"
+	# "auto": pick first configured cloud provider, else instant Valve-DNA offline architect
+	if not get_effective_gemini_key().is_empty(): return "gemini"
+	if not get_effective_claude_key().is_empty(): return "claude"
+	if not get_effective_openai_key().is_empty(): return "openai"
 	return "offline"
 
 func get_active_backend_label() -> String:
 	var b := get_active_backend()
-	if b == "gemini":
-		return "GEMINI API (%s)" % (app.settings.gemini_model if app != null else "gemini-2.5-flash")
-	if b == "ollama":
-		return "LOCAL OLLAMA (%s)" % (app.settings.ollama_model if app != null else "llama3.2")
-	return "OFFLINE TF2 ARCHITECT (INSTANT)"
+	if b == "gemini": return "GEMINI API (%s)" % (str(app.settings.gemini_model) if app != null else "gemini-2.5-flash")
+	if b == "claude": return "CLAUDE API (%s)" % (str(app.settings.claude_model) if app != null else "claude-sonnet-4")
+	if b == "openai": return "OPENAI-COMPAT (%s)" % (str(app.settings.openai_model) if app != null else "gpt-4o-mini")
+	if b == "ollama": return "LOCAL OLLAMA (%s)" % (str(app.settings.ollama_model) if app != null else "llama3.2")
+	var studied: int = (valve_dna.get("maps_studied", []) as Array).size()
+	return "VALVE-DNA ARCHITECT (%d MAPS)" % studied if studied > 0 else "OFFLINE TF2 ARCHITECT"
+
+func get_dna_prompt_snippet() -> String:
+	if valve_dna.is_empty():
+		return "Valve standard corridor 192-320u, doorway 128x128u, crouch-jump 72u, rocket-jump 240u."
+	var theme_k: String = str(app.active_biome) if app != null else "badlands"
+	var by_t: Dictionary = valve_dna.get("by_theme", {})
+	var tinfo: Dictionary = by_t.get(theme_k, by_t.get("badlands", {}))
+	var walls: Array = tinfo.get("walls", [])
+	var floors: Array = tinfo.get("floors", [])
+	var props: Array = tinfo.get("props", [])
+	return "Mined Official Valve TF2 DNA (%d maps studied): For '%s' theme prefer walls=%s, floors=%s, props=%s. Corridor 192-320u, crouch-jump 72u, scout-2x 136u, rocket-jump 240u, keep sightlines <1536u." % [
+		(valve_dna.get("maps_studied", []) as Array).size(), theme_k,
+		str(walls.slice(0, 3)), str(floors.slice(0, 3)), str(props.slice(0, 3))
+	]
 
 func build_map_context_summary() -> String:
 	if app == null or app.doc == null:
@@ -112,6 +173,7 @@ func submit_prompt(prompt: String) -> void:
 
 	var sys_prompt := """You are Pootis Builder 2.0's built-in Team Fortress 2 Level Design AI Architect.
 Current Map State: %s
+%s
 Coordinates are in Godot meters (1 meter = 32 TF2 Hammer units, Y is UP, floor is usually Y=0).
 Respond ONLY with valid raw JSON (no markdown fences) matching this exact schema:
 {
@@ -135,7 +197,7 @@ Respond ONLY with valid raw JSON (no markdown fences) matching this exact schema
   ],
   "followups": ["Short next idea 1", "Short next idea 2"]
 }
-Only include actions if the user asks to build, add, fix, light, or change something. Keep action count <= 10.""" % build_map_context_summary()
+Only include actions if the user asks to build, add, fix, light, or change something. Keep action count <= 10.""" % [build_map_context_summary(), get_dna_prompt_snippet()]
 
 	if _pending_backend == "gemini":
 		var key := get_effective_gemini_key()
@@ -150,6 +212,41 @@ Only include actions if the user asks to build, add, fix, light, or change somet
 			is_thinking = false
 			var fb := _run_offline_architect(clean)
 			fb["reply"] = "(Gemini request error %d — used instant offline fallback) " % err + str(fb["reply"])
+			_finish_response(fb, "OFFLINE FALLBACK")
+	elif _pending_backend == "claude":
+		var key := get_effective_claude_key()
+		var mdl: String = str(app.settings.claude_model) if not str(app.settings.claude_model).is_empty() else "claude-sonnet-4-20250514"
+		var headers := PackedStringArray(["Content-Type: application/json", "x-api-key: " + key, "anthropic-version: 2023-06-01"])
+		var body := JSON.stringify({
+			"model": mdl,
+			"max_tokens": 1024,
+			"system": sys_prompt,
+			"messages": [{"role": "user", "content": clean}],
+		})
+		var err := http.request("https://api.anthropic.com/v1/messages", headers, HTTPClient.METHOD_POST, body)
+		if err != OK:
+			is_thinking = false
+			var fb := _run_offline_architect(clean)
+			fb["reply"] = "(Claude request error %d — used instant offline fallback) " % err + str(fb["reply"])
+			_finish_response(fb, "OFFLINE FALLBACK")
+	elif _pending_backend == "openai":
+		var key := get_effective_openai_key()
+		var base_u: String = str(app.settings.openai_base_url).trim_suffix("/")
+		var mdl: String = str(app.settings.openai_model) if not str(app.settings.openai_model).is_empty() else "gpt-4o-mini"
+		var headers := PackedStringArray(["Content-Type: application/json", "Authorization: Bearer " + key])
+		var body := JSON.stringify({
+			"model": mdl,
+			"response_format": {"type": "json_object"},
+			"messages": [
+				{"role": "system", "content": sys_prompt},
+				{"role": "user", "content": clean},
+			],
+		})
+		var err := http.request(base_u + "/chat/completions", headers, HTTPClient.METHOD_POST, body)
+		if err != OK:
+			is_thinking = false
+			var fb := _run_offline_architect(clean)
+			fb["reply"] = "(OpenAI-compat request error %d — used instant offline fallback) " % err + str(fb["reply"])
 			_finish_response(fb, "OFFLINE FALLBACK")
 	elif _pending_backend == "ollama":
 		var base_u: String = str(app.settings.ollama_url).trim_suffix("/")
@@ -183,6 +280,14 @@ func _on_http_completed(_result: int, response_code: int, _headers: PackedString
 					var parts: Array = cands[0].get("content", {}).get("parts", [])
 					if not parts.is_empty():
 						ai_text = str(parts[0].get("text", ""))
+			elif _pending_backend == "claude":
+				var blocks: Array = parsed.get("content", [])
+				if not blocks.is_empty():
+					ai_text = str(blocks[0].get("text", ""))
+			elif _pending_backend == "openai":
+				var chs: Array = parsed.get("choices", [])
+				if not chs.is_empty():
+					ai_text = str(chs[0].get("message", {}).get("content", ""))
 			elif _pending_backend == "ollama":
 				ai_text = str(parsed.get("message", {}).get("content", ""))
 
@@ -632,19 +737,167 @@ func _exec_auto_fix_map() -> int:
 	return fixes
 
 # ==============================================================================
-# AI MAP CO-PILOT STUDIO DRAWER UI
+# OBJECTIVE 0-100 TF2 MAP AUTO-SCORER & MULTI-MODEL AI ARENA (Milestone 45!)
+# ==============================================================================
+func score_map_doc(target_doc: Object = null) -> Dictionary:
+	var d_obj: Object = target_doc if target_doc != null else (app.doc if app != null else null)
+	if d_obj == null:
+		return {"total": 0, "grade": "D", "seal": 0, "balance": 0, "sightlines": 0, "lighting": 0, "detail": 0, "op_rays": 0, "max_sight_u": 0}
+	var scnt: int = d_obj.get_solid_count()
+	var ents: Array = d_obj.get_entities()
+	var sealed: bool = d_obj.is_map_sealed()
+
+	# 1. Seal & Geometry Integrity (/25)
+	var seal_pts: int = (20 if sealed else 0) + (5 if scnt >= 8 else (2 if scnt >= 2 else 0))
+
+	# 2. Spawn & Gamemode Balance (/20)
+	var red_sp := 0; var blu_sp := 0; var has_rules := false; var has_obj := false
+	var lights := 0; var has_sun := false; var health := 0; var ammo := 0; var props := 0
+	for e in ents:
+		var cls := str(e.get("classname", ""))
+		var tm := str(e.get("kv", {}).get("TeamNum", ""))
+		if cls == "info_player_teamspawn":
+			if tm == "2": red_sp += 1
+			elif tm == "3": blu_sp += 1
+		elif cls == "tf_gamerules": has_rules = true
+		elif cls in ["team_control_point", "item_teamflag", "path_track", "func_capturezone"]: has_obj = true
+		elif cls == "light_environment": has_sun = true; lights += 1
+		elif cls.begins_with("light"): lights += 1
+		elif cls.begins_with("item_healthkit"): health += 1
+		elif cls.begins_with("item_ammopack"): ammo += 1
+		elif cls.begins_with("prop_"): props += 1
+	var bal_pts := 0
+	if red_sp >= 1 and blu_sp >= 1: bal_pts += 8
+	if red_sp == blu_sp and red_sp >= 2: bal_pts += 4
+	if has_rules: bal_pts += 4
+	if has_obj: bal_pts += 4
+
+	# 3. Sniper Sightline Health (/20) — 18-ray 360 deg horizontal scan!
+	var op_rays := 0; var max_u := 0
+	for i in range(18):
+		var a: float = TAU * float(i) / 18.0
+		var rc: Dictionary = d_obj.raycast_face(Vector3(0, 2.35, 0), Vector3(cos(a), 0, sin(a)))
+		if rc.get("hit", false):
+			var du := int(round(Vector3(0, 2.35, 0).distance_to(rc["hit_pos"]) * 32.0))
+			max_u = maxi(max_u, du)
+			if du > 2048: op_rays += 1
+	var sight_pts: int = clampi(20 - op_rays * 4 - (3 if max_u > 1600 else 0), 4, 20)
+
+	# 4. Lighting & Atmosphere (/15)
+	var light_pts: int = (6 if has_sun else 0) + mini(9, lights * 3)
+
+	# 5. Pickups, Props & Verticality (/20)
+	var min_y := 1e9; var max_y := -1e9
+	for s in range(mini(scnt, 120)):
+		var si: Dictionary = d_obj.get_solid_info(s)
+		if si.get("valid", false) and not bool(si.get("is_skybox", false)):
+			min_y = minf(min_y, (si["bounds_min"] as Vector3).y)
+			max_y = maxf(max_y, (si["bounds_max"] as Vector3).y)
+	var vert_u: float = maxf(0.0, (max_y - min_y) * 32.0) if max_y > min_y else 0.0
+	var det_pts: int = mini(6, health * 3) + mini(6, ammo * 3) + mini(4, props) + (4 if vert_u >= 128.0 else (2 if vert_u >= 48.0 else 0))
+
+	var total: int = clampi(seal_pts + bal_pts + sight_pts + light_pts + det_pts, 0, 100)
+	var grade := "S" if total >= 92 else ("A" if total >= 82 else ("B" if total >= 70 else ("C" if total >= 55 else "D")))
+	return {
+		"total": total, "grade": grade,
+		"seal": seal_pts, "balance": bal_pts, "sightlines": sight_pts, "lighting": light_pts, "detail": det_pts,
+		"op_rays": op_rays, "max_sight_u": max_u, "solids": scnt, "entities": ents.size(),
+	}
+
+## Runs a live 3-Candidate AI & Valve-DNA Model Arena Bake-Off, scores each candidate objectively out of 100,
+## and persists the ranked leaderboard to godot/ai_benchmarks/leaderboard.json!
+func run_arena_bakeoff() -> Array[Dictionary]:
+	var candidates := [
+		{"model": "Valve-DNA: Viaduct Winter KOTH", "mode": "koth", "biome": "winter",     "extra_cover": true},
+		{"model": "Valve-DNA: Turbine Spytech CTF", "mode": "ctf",  "biome": "spytech",    "extra_cover": true},
+		{"model": "Valve-DNA: Badlands 3CP Arena",  "mode": "cp",   "biome": "badlands",   "extra_cover": false},
+	]
+	var results: Array[Dictionary] = []
+	for cand in candidates:
+		var tmp_doc = ClassDB.instantiate("Tf2MapDoc")
+		_build_candidate_into_doc(tmp_doc, str(cand["mode"]), str(cand["biome"]), bool(cand["extra_cover"]))
+		var sc := score_map_doc(tmp_doc)
+		results.append({
+			"model": str(cand["model"]),
+			"mode": str(cand["mode"]),
+			"biome": str(cand["biome"]),
+			"score": int(sc["total"]),
+			"grade": str(sc["grade"]),
+			"max_sight_u": int(sc["max_sight_u"]),
+			"solids": int(sc["solids"]),
+			"entities": int(sc["entities"]),
+			"ts": Time.get_datetime_string_from_system(),
+		})
+	results.sort_custom(func(a: Dictionary, b: Dictionary) -> bool: return int(a["score"]) > int(b["score"]))
+	arena_leaderboard = results
+	_save_leaderboard()
+	if app != null:
+		app.audio.play("save")
+		app._toast("AI Arena Complete! Winner: %s (%d/100 Grade %s)" % [str(results[0]["model"]), int(results[0]["score"]), str(results[0]["grade"])])
+		if app.right_drawer.visible and app.right_drawer_title.text.find("AI MAP") != -1:
+			app._open_ai_copilot_drawer()
+	return results
+
+func _build_candidate_into_doc(tdoc: Object, mode: String, biome: String, extra_cover: bool) -> void:
+	var b: Dictionary = Tf2GamemodesScript.get_biome(biome)
+	tdoc.new_map("%s_arena_%s" % [mode, biome])
+	tdoc.set_skyname(str(b["sky"]))
+	tdoc.add_box(Vector3(-22, -1, -13), Vector3(22, 0, 13), str(b["floor"]))
+	tdoc.add_box(Vector3(-5, 0, -5), Vector3(5, 1.0, 5), str(b.get("trim", "CONCRETE/CONCRETEFLOOR002")))
+	tdoc.add_box(Vector3(-23, 0, -14), Vector3(23, 8, -13), str(b["wall"]))
+	tdoc.add_box(Vector3(-23, 0, 13), Vector3(23, 8, 14), str(b["wall"]))
+	tdoc.add_box(Vector3(-23, 0, -13), Vector3(-22, 8, 13), str(b["wall"]))
+	tdoc.add_box(Vector3(22, 0, -13), Vector3(23, 8, 13), str(b["wall"]))
+	tdoc.add_box(Vector3(-12, 2.8, -10.5), Vector3(12, 3.1, -8.0), "METAL/METALGRATE011A")
+	tdoc.add_box(Vector3(-12, 2.8, 8.0), Vector3(12, 3.1, 10.5), "METAL/METALGRATE011A")
+	if extra_cover:
+		tdoc.add_box(Vector3(-8.5, 0, -1.5), Vector3(-7.0, 2.6, 1.5), "CONCRETE/CONCRETEWALL002")
+		tdoc.add_box(Vector3(7.0, 0, -1.5), Vector3(8.5, 2.6, 1.5), "CONCRETE/CONCRETEWALL002")
+	for team_i in [2, 3]:
+		var sgn: float = -1.0 if team_i == 2 else 1.0
+		for si in range(3):
+			tdoc.add_point_entity("info_player_teamspawn", Vector3(sgn * 19.0, 0.2, (float(si) - 1.0) * 2.4), {"TeamNum": str(team_i)})
+		tdoc.add_point_entity("prop_static", Vector3(sgn * 10.0, 0.0, -4.0), {"model": "models/props_2fort/miningcrate001.mdl"})
+		tdoc.add_point_entity("prop_static", Vector3(sgn * 10.0, 0.0, 4.0), {"model": "models/props_2fort/oildrum.mdl"})
+		tdoc.add_point_entity("item_healthkit_medium", Vector3(sgn * 11.0, 0.2, 0.0), {})
+		tdoc.add_point_entity("item_ammopack_medium", Vector3(sgn * 11.0, 0.2, 3.0), {})
+		tdoc.add_point_entity("light_spot", Vector3(sgn * 10.0, 5.5, 0.0), {"_light": "255 190 110 700" if team_i == 2 else "120 190 255 700", "pitch": "-75"})
+	tdoc.add_point_entity("tf_gamerules", Vector3(0, 7.0, 0), {"targetname": "gamerules"})
+	tdoc.add_point_entity("light_environment", Vector3(0, 7.6, 0), {"_light": "255 235 200 450", "pitch": "-45"})
+	if mode == "ctf":
+		Tf2GamemodesScript.stamp_preset(tdoc, "intel", Vector3(-14, 0.2, 0), 2)
+		Tf2GamemodesScript.stamp_preset(tdoc, "intel", Vector3(14, 0.2, 0), 3)
+	else:
+		Tf2GamemodesScript.stamp_preset(tdoc, "cap_point", Vector3(0, 1.05, 0), 0)
+	tdoc.auto_seal_skybox()
+
+# ==============================================================================
+# AI MAP CO-PILOT STUDIO DRAWER UI (2 Tabs: Architect Chat | AI Arena & Valve DNA)
 # ==============================================================================
 static func build_copilot_drawer(app: Node3D, vbox: VBoxContainer) -> void:
 	var fonts: Dictionary = app.fonts
 	var ai: AiMapCopilot = app.ai_copilot
 
-	# 1. Engine Status + Inline Setup Toggle
+	# Top 2-Tab Bar
+	var tab_r := HBoxContainer.new(); tab_r.add_theme_constant_override("separation", 5); vbox.add_child(tab_r)
+	for ti in [{"id": 0, "t": "1. Architect Chat"}, {"id": 1, "t": "2. AI Arena & Valve DNA"}]:
+		var tb := Button.new(); tb.text = str(ti["t"]); tb.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		var tid: int = int(ti["id"])
+		HudWidgets.style_tf2_button(tb, fonts["heading"], 10, ai.active_tab == tid)
+		tb.pressed.connect(func(): app.audio.play("click"); ai.active_tab = tid; app._open_ai_copilot_drawer())
+		tab_r.add_child(tb)
+
+	if ai.active_tab == 1:
+		_build_arena_dna_tab(app, vbox, ai, fonts)
+		return
+
+	# 1. Engine Status + Inline 5-Provider Setup Toggle
 	var c1 := HudWidgets.make_section_card("AI ENGINE: " + ai.get_active_backend_label(), fonts, HudWidgets.COL_CYAN)
 	vbox.add_child(c1["panel"])
 	var v1: VBoxContainer = c1["vbox"]
 
 	var top_r := HBoxContainer.new(); top_r.add_theme_constant_override("separation", 5); v1.add_child(top_r)
-	var cfg_b := Button.new(); cfg_b.text = "Hide AI Setup" if ai.show_config else "Configure Gemini / Ollama"
+	var cfg_b := Button.new(); cfg_b.text = "Hide AI Setup" if ai.show_config else "Models (Gemini/Claude/GPT/Ollama)"
 	cfg_b.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	HudWidgets.style_tf2_button(cfg_b, fonts["body"], 10, ai.show_config)
 	cfg_b.pressed.connect(func(): app.audio.play("click"); ai.show_config = not ai.show_config; app._open_ai_copilot_drawer())
@@ -656,33 +909,30 @@ static func build_copilot_drawer(app: Node3D, vbox: VBoxContainer) -> void:
 	top_r.add_child(undo_b)
 
 	if ai.show_config:
-		var prow := HBoxContainer.new(); prow.add_theme_constant_override("separation", 4); v1.add_child(prow)
-		for pid in ["auto", "gemini", "ollama", "offline"]:
+		var pg := GridContainer.new(); pg.columns = 3; pg.add_theme_constant_override("h_separation", 4); pg.add_theme_constant_override("v_separation", 4); v1.add_child(pg)
+		for pid in ["auto", "gemini", "claude", "openai", "ollama", "offline"]:
 			var pb := Button.new(); pb.text = str(pid).capitalize(); pb.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 			HudWidgets.style_tf2_button(pb, fonts["heading"], 9, app.settings.ai_provider == pid)
 			var mode_id: String = str(pid)
 			pb.pressed.connect(func():
 				app.audio.play("click"); app.settings.ai_provider = mode_id; app.settings.save_to_disk(); app._open_ai_copilot_drawer()
 			)
-			prow.add_child(pb)
+			pg.add_child(pb)
 
-		var g_le := LineEdit.new()
-		g_le.placeholder_text = "Optional Gemini API Key (or set GEMINI_API_KEY env var)..."
-		g_le.secret = true
-		g_le.text = app.settings.gemini_api_key
-		g_le.add_theme_font_override("font", fonts["mono"]); g_le.add_theme_font_size_override("font_size", 10)
-		v1.add_child(g_le)
+		var g_le := LineEdit.new(); g_le.placeholder_text = "Gemini API Key (or GEMINI_API_KEY env)..."; g_le.secret = true; g_le.text = app.settings.gemini_api_key
+		var cl_le := LineEdit.new(); cl_le.placeholder_text = "Claude API Key (or ANTHROPIC_API_KEY env)..."; cl_le.secret = true; cl_le.text = app.settings.claude_api_key
+		var oa_le := LineEdit.new(); oa_le.placeholder_text = "OpenAI-Compat Key (GPT / DeepSeek / OpenRouter)..."; oa_le.secret = true; oa_le.text = app.settings.openai_api_key
+		var o_le := LineEdit.new(); o_le.placeholder_text = "Ollama Model (e.g. llama3.2, qwen2.5)"; o_le.text = app.settings.ollama_model
+		for le: LineEdit in [g_le, cl_le, oa_le, o_le]:
+			le.add_theme_font_override("font", fonts["mono"]); le.add_theme_font_size_override("font_size", 10)
+			v1.add_child(le)
 
-		var o_le := LineEdit.new()
-		o_le.placeholder_text = "Local Ollama Model (e.g. llama3.2, qwen2.5)"
-		o_le.text = app.settings.ollama_model
-		o_le.add_theme_font_override("font", fonts["mono"]); o_le.add_theme_font_size_override("font_size", 10)
-		v1.add_child(o_le)
-
-		var sav_b := Button.new(); sav_b.text = "Save AI Settings"
+		var sav_b := Button.new(); sav_b.text = "Save Multi-Model AI Settings"
 		HudWidgets.style_tf2_button(sav_b, fonts["heading"], 10, true)
 		sav_b.pressed.connect(func():
 			app.settings.gemini_api_key = g_le.text.strip_edges()
+			app.settings.claude_api_key = cl_le.text.strip_edges()
+			app.settings.openai_api_key = oa_le.text.strip_edges()
 			app.settings.ollama_model = o_le.text.strip_edges() if not o_le.text.strip_edges().is_empty() else "llama3.2"
 			app.settings.save_to_disk()
 			ai.show_config = false
@@ -772,3 +1022,81 @@ static func build_copilot_drawer(app: Node3D, vbox: VBoxContainer) -> void:
 		t_lbl.add_theme_font_override("font", fonts["body"]); t_lbl.add_theme_font_size_override("font_size", 10)
 		t_lbl.add_theme_color_override("font_color", HudWidgets.COL_TX if not is_u else Color(1.0, 0.94, 0.82))
 		v3.add_child(t_lbl)
+
+static func _build_arena_dna_tab(app: Node3D, vbox: VBoxContainer, ai: AiMapCopilot, fonts: Dictionary) -> void:
+	# 1. Objective Live Map Quality Score (/100)
+	var sc := ai.score_map_doc()
+	var grade_col := HudWidgets.COL_GREEN if int(sc["total"]) >= 82 else (HudWidgets.COL_ACC if int(sc["total"]) >= 65 else HudWidgets.COL_RED)
+	var c1 := HudWidgets.make_section_card("LIVE MAP QUALITY SCORE: %d / 100 (GRADE %s)" % [int(sc["total"]), str(sc["grade"])], fonts, grade_col)
+	vbox.add_child(c1["panel"])
+	var v1: VBoxContainer = c1["vbox"]
+	for row in [
+		["Seal & Geometry:", "%d / 25" % int(sc["seal"])],
+		["Spawn & Mode Balance:", "%d / 20" % int(sc["balance"])],
+		["Sniper Sightlines:", "%d / 20  (Max %du, %d OP)" % [int(sc["sightlines"]), int(sc["max_sight_u"]), int(sc["op_rays"])]],
+		["Lighting & Sun:", "%d / 15" % int(sc["lighting"])],
+		["Pickups, Props & Height:", "%d / 20" % int(sc["detail"])],
+	]:
+		var rh := HBoxContainer.new(); v1.add_child(rh)
+		var kl := Label.new(); kl.text = str(row[0]); kl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		kl.add_theme_font_override("font", fonts["body"]); kl.add_theme_font_size_override("font_size", 10)
+		kl.add_theme_color_override("font_color", HudWidgets.COL_TX_MUTED); rh.add_child(kl)
+		var vl := Label.new(); vl.text = str(row[1])
+		vl.add_theme_font_override("font", fonts["mono"]); vl.add_theme_font_size_override("font_size", 10)
+		vl.add_theme_color_override("font_color", HudWidgets.COL_TX); rh.add_child(vl)
+
+	var fix_b := Button.new(); fix_b.text = "Auto-Boost Map Score (Fix Issues)"
+	HudWidgets.style_tf2_button(fix_b, fonts["heading"], 10, int(sc["total"]) < 85)
+	fix_b.pressed.connect(func(): ai.submit_prompt("Fix all map problems"); app._open_ai_copilot_drawer())
+	v1.add_child(fix_b)
+
+	# 2. Multi-Model AI Arena Bake-Off & Leaderboard
+	var c2 := HudWidgets.make_section_card("AI MODEL ARENA & LEADERBOARD", fonts, HudWidgets.COL_CYAN)
+	vbox.add_child(c2["panel"])
+	var v2: VBoxContainer = c2["vbox"]
+	var run_b := Button.new(); run_b.text = "Run 3-Candidate AI Arena Bake-Off"
+	HudWidgets.style_tf2_button(run_b, fonts["heading"], 10, true)
+	run_b.pressed.connect(func(): ai.run_arena_bakeoff())
+	v2.add_child(run_b)
+
+	if ai.arena_leaderboard.is_empty():
+		var el := Label.new(); el.text = "Click above to benchmark & score 3 Valve-DNA map candidates into leaderboard.json!"
+		el.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		el.add_theme_font_override("font", fonts["body"]); el.add_theme_font_size_override("font_size", 10)
+		el.add_theme_color_override("font_color", HudWidgets.COL_TX_MUTED); v2.add_child(el)
+	else:
+		for rank in range(mini(3, ai.arena_leaderboard.size())):
+			var e: Dictionary = ai.arena_leaderboard[rank]
+			var rb := Button.new()
+			rb.text = "#%d  %s — %d/100 (Grade %s | Max Sight %du)  [Build]" % [
+				rank + 1, str(e["model"]), int(e["score"]), str(e["grade"]), int(e.get("max_sight_u", 0))
+			]
+			rb.alignment = HORIZONTAL_ALIGNMENT_LEFT
+			rb.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+			HudWidgets.style_tf2_button(rb, fonts["body"], 9, rank == 0)
+			var m_id: String = str(e.get("mode", "koth"))
+			var b_id: String = str(e.get("biome", "winter"))
+			rb.pressed.connect(func():
+				ai._exec_generate_arena(m_id, b_id)
+				app._record_history("Arena Winner: " + str(e["model"]))
+				app._toast("Loaded Arena Candidate: %s!" % str(e["model"]))
+				app._open_ai_copilot_drawer()
+			)
+			v2.add_child(rb)
+
+	# 3. Mined Official Valve TF2 Map DNA Corpus
+	var studied: Array = ai.valve_dna.get("maps_studied", [])
+	var c3 := HudWidgets.make_section_card("OFFICIAL VALVE TF2 MAP DNA (%d MAPS MINED)" % studied.size(), fonts, HudWidgets.COL_ACC)
+	vbox.add_child(c3["panel"])
+	var v3: VBoxContainer = c3["vbox"]
+	for i in range(mini(5, studied.size())):
+		var m: Dictionary = studied[i]
+		var ml := Label.new()
+		var sp: Array = m.get("play_span_u", [0, 0, 0])
+		ml.text = "%s (%s) — %s | %d props | %d doors" % [
+			str(m["name"]), str(m["mode"]).to_upper(), str(m.get("skyname", "")), int(m.get("total_props", 0)), int(m.get("door_count", 0))
+		]
+		ml.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		ml.add_theme_font_override("font", fonts["mono"]); ml.add_theme_font_size_override("font_size", 9)
+		ml.add_theme_color_override("font_color", HudWidgets.COL_TX)
+		v3.add_child(ml)

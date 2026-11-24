@@ -73,5 +73,15 @@ func _initialize() -> void:
 	var p_fix: Dictionary = ai._run_offline_architect("Fix all map problems")
 	_check((p_fix.get("actions", []) as Array).size() == 1 and str((p_fix["actions"] as Array)[0]["op"]) == "auto_fix_map", "AI v2.0 planned full auto-fix map repair")
 
-	print("=== Milestones 37-42 Verification Summary: %d failures ===" % _failed)
+	# 5. Milestones 44-46: Official Valve TF2 DNA + 100-Pt Auto-Scorer + Multi-Model AI Arena Bake-Off!
+	ai.load_valve_dna()
+	var dna_maps: Array = ai.valve_dna.get("maps_studied", [])
+	_check(dna_maps.size() >= 5, "Loaded Official Valve TF2 Design DNA (%d real official Valve maps mined!)" % dna_maps.size())
+	var arena_res := ai.run_arena_bakeoff()
+	_check(arena_res.size() == 3 and int(arena_res[0]["score"]) >= 85, "AI Model Arena Bake-Off scored 3 Valve-DNA candidates (Winner: %s = %d/100 Grade %s)" % [
+		str(arena_res[0]["model"]), int(arena_res[0]["score"]), str(arena_res[0]["grade"])
+	])
+	_check(FileAccess.file_exists(repo_root.path_join("godot/ai_benchmarks/leaderboard.json")), "AI Arena persisted leaderboard to godot/ai_benchmarks/leaderboard.json")
+
+	print("=== Milestones 37-46 Verification Summary: %d failures ===" % _failed)
 	quit(1 if _failed > 0 else 0)

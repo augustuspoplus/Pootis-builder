@@ -1,0 +1,695 @@
+{
+	"by_mode": {
+		"cp": {
+			"avg_props": 1506,
+			"avg_span_u": [
+				3117,
+				13351,
+				974
+			],
+			"maps_analyzed": 2
+		},
+		"ctf": {
+			"avg_props": 1368,
+			"avg_span_u": [
+				5788,
+				5510,
+				1027
+			],
+			"maps_analyzed": 2
+		},
+		"koth": {
+			"avg_props": 1095,
+			"avg_span_u": [
+				10586,
+				13720,
+				10175
+			],
+			"maps_analyzed": 2
+		},
+		"mvm": {
+			"avg_props": 547,
+			"avg_span_u": [
+				2684,
+				6770,
+				1048
+			],
+			"maps_analyzed": 1
+		},
+		"pl": {
+			"avg_props": 1303,
+			"avg_span_u": [
+				5810,
+				4654,
+				1273
+			],
+			"maps_analyzed": 2
+		}
+	},
+	"by_theme": {
+		"badlands": {
+			"floors": [
+				"concrete/concretefloor003",
+				"wood/wood_beam03",
+				"nature/blendrockground007",
+				"wood/grain_elevator_silo_10a",
+				"concrete/concretewall011",
+				"concrete/concretewall011b"
+			],
+			"props": [
+				"models/props_mining/track_straight_256.mdl",
+				"models/props_2fort/oildrum.mdl",
+				"models/props_badlands/barrel03.mdl",
+				"models/props_lights/light_fluorescent_basement.mdl",
+				"models/props_lights/light_cone_farm.mdl",
+				"models/props_mining/ceiling_pipe_128_thick.mdl",
+				"models/props_trainyard/handrail28.mdl",
+				"models/props_2fort/window001.mdl"
+			],
+			"skies": [
+				"sky_badlands_01",
+				"sky_upward",
+				"sky_hydro_01"
+			],
+			"walls": [
+				"nature/rockwall012",
+				"nature/rockwall013",
+				"metal/metalstair001a",
+				"wood/wood_bridge001",
+				"metal/wall011f",
+				"metal/wall011g"
+			]
+		},
+		"farm": {
+			"floors": [
+				"nature/rockwall003",
+				"nature/blendgroundtograss001",
+				"wood/wood_bridge001",
+				"nature/blendgroundtogravel001",
+				"concrete/concretewall005",
+				"concrete/concretewall001b"
+			],
+			"props": [
+				"models/props_spytech/hanging_ceiling_lamp.mdl",
+				"models/props_spytech/computer_wall_cabinet.mdl",
+				"models/props_spytech/computer_wall.mdl",
+				"models/props_mining/ceiling_pipe_128.mdl",
+				"models/props_spytech/spytech_railing02.mdl",
+				"models/props_spytech/terminal_chair.mdl",
+				"models/props_2fort/groundlight001.mdl",
+				"models/props_mining/industrial_ceiling_lamp02.mdl"
+			],
+			"skies": [
+				"sky_tf2_04",
+				"sky_harvest_01"
+			],
+			"walls": [
+				"wood/wood_beam02",
+				"concrete/computerwall004",
+				"concrete/wall022",
+				"concrete/computerwall005a",
+				"concrete/computerwall003a",
+				"concrete/concretewall008b"
+			]
+		},
+		"industrial": {
+			"floors": [
+				"concrete/concretefloor003",
+				"nature/blendgrassground001",
+				"wood/wood_beam03",
+				"wood/wood_bridge001",
+				"wood/wood_beam02",
+				"concrete/concretewall005"
+			],
+			"props": [
+				"models/props_2fort/oildrum.mdl",
+				"models/props_2fort/window001.mdl",
+				"models/props_2fort/window002.mdl",
+				"models/props_granary/grain_sack.mdl",
+				"models/props_vehicles/train_flatcar_container.mdl",
+				"models/props_2fort/window003.mdl",
+				"models/props_lights/light_cone_farm.mdl",
+				"models/props_2fort/miningcrate002.mdl"
+			],
+			"skies": [
+				"sky_granary_01",
+				"sky_alpinestorm_01"
+			],
+			"walls": [
+				"metal/wall026",
+				"wood/wood_wall003",
+				"wood/wood_wall002",
+				"metal/wall014d",
+				"concrete/concretefloor002b",
+				"metal/metaldoor001"
+			]
+		},
+		"spytech": {
+			"floors": [
+				"concrete/computerwall003a",
+				"metal/imetal001",
+				"metal/imetal002",
+				"concrete/concretewall001e",
+				"metal/metaldoor001",
+				"tile/floor_tile_007a"
+			],
+			"props": [
+				"models/props_2fort/groundlight001.mdl",
+				"models/props_mining/ceiling_pipe_256_thick.mdl",
+				"models/props_2fort/handrail001_i1.mdl",
+				"models/props_spytech/computer_low.mdl",
+				"models/props_lights/light_cone_farm_32.mdl",
+				"models/props_spytech/terminal_chair.mdl",
+				"models/props_spytech/vent.mdl",
+				"models/props_2fort/groundlight002.mdl"
+			],
+			"skies": [
+				"sky_dustbowl_01_hdr"
+			],
+			"walls": [
+				"concrete/computerwall005a",
+				"metal/wall030",
+				"concrete/computerwall007",
+				"concrete/computerwall004",
+				"concrete/computerwall003",
+				"concrete/computerwall006b"
+			]
+		},
+		"winter": {
+			"floors": [
+				"metal/wall025",
+				"wood/wood_wall009",
+				"metal/ibeam002",
+				"concrete/concretefloor003",
+				"metal/wall011g",
+				"concrete/concretewall012"
+			],
+			"props": [
+				"models/props_2fort/miningcrate002.mdl",
+				"models/props_2fort/window001.mdl",
+				"models/props_forest/icicle_lrg_straight.mdl",
+				"models/props_2fort/oildrum.mdl",
+				"models/props_forest/icicle_med_straight.mdl",
+				"models/props_foliage/tree_pine01_4cluster.mdl",
+				"models/props_2fort/window002.mdl",
+				"models/props_forest/sawmill_window1a.mdl"
+			],
+			"skies": [
+				"sky_morningsnow_01"
+			],
+			"walls": [
+				"wood/wood_floor002",
+				"wood/wood_bridge001",
+				"wood/wall007a",
+				"nature/blendrockgroundwallsnow",
+				"metal/ibeam001b",
+				"wood/wood_wall001"
+			]
+		}
+	},
+	"maps_studied": [
+		{
+			"avg_door_speed_u": 300,
+			"door_count": 10,
+			"mode": "ctf",
+			"name": "ctf_turbine",
+			"play_span_u": [
+				8003,
+				3359,
+				943
+			],
+			"skyname": "sky_dustbowl_01_hdr",
+			"sun_pitch": -90,
+			"sun_rgb": [
+				216,
+				207,
+				194
+			],
+			"theme": "spytech",
+			"top_floors": [
+				"concrete/computerwall003a",
+				"metal/imetal001",
+				"metal/imetal002",
+				"concrete/concretewall001e",
+				"metal/metaldoor001",
+				"tile/floor_tile_007a"
+			],
+			"top_props": [
+				"models/props_2fort/groundlight001.mdl",
+				"models/props_mining/ceiling_pipe_256_thick.mdl",
+				"models/props_2fort/handrail001_i1.mdl",
+				"models/props_spytech/computer_low.mdl",
+				"models/props_lights/light_cone_farm_32.mdl",
+				"models/props_spytech/terminal_chair.mdl",
+				"models/props_spytech/vent.mdl",
+				"models/props_2fort/groundlight002.mdl"
+			],
+			"top_walls": [
+				"concrete/computerwall005a",
+				"metal/wall030",
+				"concrete/computerwall007",
+				"concrete/computerwall004",
+				"concrete/computerwall003",
+				"concrete/computerwall006b"
+			],
+			"total_props": 430
+		},
+		{
+			"avg_door_speed_u": 457,
+			"door_count": 14,
+			"mode": "ctf",
+			"name": "ctf_2fort",
+			"play_span_u": [
+				3572,
+				7660,
+				1110
+			],
+			"skyname": "sky_tf2_04",
+			"sun_pitch": -45,
+			"sun_rgb": [
+				216,
+				207,
+				194
+			],
+			"theme": "farm",
+			"top_floors": [
+				"nature/rockwall003",
+				"nature/blendgroundtograss001",
+				"wood/wood_bridge001",
+				"nature/blendgroundtogravel001",
+				"concrete/concretewall005",
+				"concrete/concretewall001b"
+			],
+			"top_props": [
+				"models/props_spytech/computer_wall_cabinet.mdl",
+				"models/props_spytech/computer_wall.mdl",
+				"models/props_mining/ceiling_pipe_128.mdl",
+				"models/props_spytech/spytech_railing02.mdl",
+				"models/props_spytech/terminal_chair.mdl",
+				"models/props_2fort/groundlight001.mdl",
+				"models/props_spytech/hanging_ceiling_lamp.mdl",
+				"models/props_mining/industrial_ceiling_lamp02.mdl"
+			],
+			"top_walls": [
+				"concrete/computerwall004",
+				"concrete/wall022",
+				"wood/wood_beam02",
+				"concrete/computerwall005a",
+				"concrete/computerwall003a",
+				"concrete/concretewall008b"
+			],
+			"total_props": 2305
+		},
+		{
+			"avg_door_speed_u": 400,
+			"door_count": 0,
+			"mode": "koth",
+			"name": "koth_viaduct",
+			"play_span_u": [
+				18083,
+				22270,
+				19467
+			],
+			"skyname": "sky_morningsnow_01",
+			"sun_pitch": -35,
+			"sun_rgb": [
+				251,
+				199,
+				174
+			],
+			"theme": "winter",
+			"top_floors": [
+				"metal/wall025",
+				"wood/wood_wall009",
+				"metal/ibeam002",
+				"concrete/concretefloor003",
+				"metal/wall011g",
+				"concrete/concretewall012"
+			],
+			"top_props": [
+				"models/props_2fort/miningcrate002.mdl",
+				"models/props_2fort/window001.mdl",
+				"models/props_forest/icicle_lrg_straight.mdl",
+				"models/props_2fort/oildrum.mdl",
+				"models/props_forest/icicle_med_straight.mdl",
+				"models/props_foliage/tree_pine01_4cluster.mdl",
+				"models/props_2fort/window002.mdl",
+				"models/props_forest/sawmill_window1a.mdl"
+			],
+			"top_walls": [
+				"wood/wood_floor002",
+				"wood/wood_bridge001",
+				"wood/wall007a",
+				"nature/blendrockgroundwallsnow",
+				"metal/ibeam001b",
+				"wood/wood_wall001"
+			],
+			"total_props": 1516
+		},
+		{
+			"avg_door_speed_u": 300,
+			"door_count": 8,
+			"mode": "koth",
+			"name": "koth_harvest_final",
+			"play_span_u": [
+				3088,
+				5169,
+				882
+			],
+			"skyname": "sky_harvest_01",
+			"sun_pitch": -20,
+			"sun_rgb": [
+				238,
+				218,
+				181
+			],
+			"theme": "farm",
+			"top_floors": [
+				"harvest/ground_to_green_grass_001",
+				"harvest/ground_to_green_grass_002",
+				"harvest/leaf_pile_01",
+				"concrete/concretefloor003",
+				"harvest/ground_to_green_grass_001_nosprites",
+				"metal/wall011d"
+			],
+			"top_props": [
+				"models/props_lights/light_cone_farm_32.mdl",
+				"models/props_2fort/lightbulb001.mdl",
+				"models/props_2fort/miningcrate002.mdl",
+				"models/props_2fort/miningcrate001.mdl",
+				"models/props_gameplay/haybale.mdl",
+				"models/props_2fort/window005a.mdl",
+				"models/props_2fort/window003.mdl",
+				"models/props_spytech/hanging_ceiling_lamp.mdl"
+			],
+			"top_walls": [
+				"wood/wood_bridge001",
+				"wood/wood_beam02",
+				"nature/dirtground004",
+				"wood/wood_wall002",
+				"wood/wood_floor001",
+				"wood/wood_wall003"
+			],
+			"total_props": 673
+		},
+		{
+			"avg_door_speed_u": 325,
+			"door_count": 12,
+			"mode": "cp",
+			"name": "cp_badlands",
+			"play_span_u": [
+				3952,
+				11107,
+				1008
+			],
+			"skyname": "sky_badlands_01",
+			"sun_pitch": -30,
+			"sun_rgb": [
+				251,
+				201,
+				155
+			],
+			"theme": "badlands",
+			"top_floors": [
+				"nature/blendrockground007",
+				"wood/wood_beam03",
+				"wood/grain_elevator_silo_10a",
+				"concrete/concretewall011",
+				"concrete/concretefloor003",
+				"concrete/concretewall011b"
+			],
+			"top_props": [
+				"models/props_lights/light_fluorescent_basement.mdl",
+				"models/props_gameplay/sign_gameplay01.mdl",
+				"models/props_spytech/hanging_ceiling_lamp.mdl",
+				"models/props_2fort/groundlight001.mdl",
+				"models/props_spytech/vent_system_corner.mdl",
+				"models/props_badlands/barrel03.mdl",
+				"models/props_badlands/barrel_flatbed01.mdl",
+				"models/props_foliage/shrub_03b.mdl"
+			],
+			"top_walls": [
+				"nature/rockwall012",
+				"nature/rockwall013",
+				"wood/wood_bridge001",
+				"metal/wall011f",
+				"metal/wall011g",
+				"metal/metalstair001a"
+			],
+			"total_props": 1308
+		},
+		{
+			"avg_door_speed_u": 300,
+			"door_count": 12,
+			"mode": "cp",
+			"name": "cp_granary",
+			"play_span_u": [
+				2282,
+				15594,
+				939
+			],
+			"skyname": "sky_granary_01",
+			"sun_pitch": -15,
+			"sun_rgb": [
+				255,
+				226,
+				196
+			],
+			"theme": "industrial",
+			"top_floors": [
+				"nature/blendgrassground001",
+				"wood/wood_beam03",
+				"wood/wood_bridge001",
+				"wood/wood_beam02",
+				"concrete/concretefloor003",
+				"concrete/concretewall005"
+			],
+			"top_props": [
+				"models/props_2fort/window001.mdl",
+				"models/props_2fort/window002.mdl",
+				"models/props_granary/grain_sack.mdl",
+				"models/props_2fort/oildrum.mdl",
+				"models/props_vehicles/train_flatcar_container.mdl",
+				"models/props_2fort/window003.mdl",
+				"models/props_lights/light_cone_farm.mdl",
+				"models/props_2fort/miningcrate002.mdl"
+			],
+			"top_walls": [
+				"metal/wall026",
+				"wood/wood_wall003",
+				"wood/wood_wall002",
+				"metal/wall014d",
+				"concrete/concretefloor002b",
+				"metal/metaldoor001"
+			],
+			"total_props": 1703
+		},
+		{
+			"avg_door_speed_u": 300,
+			"door_count": 13,
+			"mode": "pl",
+			"name": "pl_upward",
+			"play_span_u": [
+				5038,
+				4368,
+				1283
+			],
+			"skyname": "sky_upward",
+			"sun_pitch": -55,
+			"sun_rgb": [
+				253,
+				242,
+				208
+			],
+			"theme": "badlands",
+			"top_floors": [
+				"coalmines/red_beam1",
+				"coalmines/blendgroundtograss_coalmines",
+				"wood/wood_floor002",
+				"coalmines/blendbeach_to_beach",
+				"concrete/concretefloor003",
+				"nature/blendrockgroundwallforest002"
+			],
+			"top_props": [
+				"models/props_lights/light_cone_farm_32.mdl",
+				"models/props_lights/light_fluorescent_basement.mdl",
+				"models/props_coalmines/boulder_pile2.mdl",
+				"models/props_2fort/oildrum.mdl",
+				"models/props_mining/track_straight_256.mdl",
+				"models/props_mining/track_straight_64.mdl",
+				"models/props_foliage/shrub_03a.mdl",
+				"models/props_coalmines/boulder_pile1.mdl"
+			],
+			"top_walls": [
+				"coalmines/blendgroundtowall_coalmines",
+				"coalmines/red_beam2_middle",
+				"coalmines/red_wall1_bottom",
+				"metal/wall027",
+				"wood/wall007a",
+				"metal/metalstair001a"
+			],
+			"total_props": 1309
+		},
+		{
+			"avg_door_speed_u": 191,
+			"door_count": 48,
+			"mode": "pl",
+			"name": "pl_badwater",
+			"play_span_u": [
+				6583,
+				4940,
+				1263
+			],
+			"skyname": "sky_hydro_01",
+			"sun_pitch": -35,
+			"sun_rgb": [
+				254,
+				226,
+				186
+			],
+			"theme": "badlands",
+			"top_floors": [
+				"nature/blendgroundtogravel005",
+				"nature/blendgroundtograss005",
+				"wood/wood_beam03",
+				"wood/wood_bridge001",
+				"concrete/concretefloor003",
+				"metal/imetal005"
+			],
+			"top_props": [
+				"models/props_trainyard/handrail128.mdl",
+				"models/props_2fort/window001.mdl",
+				"models/props_trainyard/handrail28.mdl",
+				"models/props_badlands/barrel03.mdl",
+				"models/props_mining/ceiling_pipe_128_thick.mdl",
+				"models/props_lights/light_cone_farm.mdl",
+				"models/props_2fort/oildrum.mdl",
+				"models/props_mining/track_straight_256.mdl"
+			],
+			"top_walls": [
+				"nature/rockwall013",
+				"nature/rockwall012",
+				"metal/ibeam001b",
+				"metal/metaltrack001",
+				"nature/rockwall011",
+				"metal/ibeam002"
+			],
+			"total_props": 1297
+		},
+		{
+			"avg_door_speed_u": 450,
+			"door_count": 2,
+			"mode": "mvm",
+			"name": "mvm_mannworks",
+			"play_span_u": [
+				2684,
+				6770,
+				1048
+			],
+			"skyname": "sky_alpinestorm_01",
+			"sun_pitch": -65,
+			"sun_rgb": [
+				170,
+				188,
+				193
+			],
+			"theme": "industrial",
+			"top_floors": [
+				"nature/blendgroundtograss008_nodetail",
+				"nature/blendconcretetograss002",
+				"concrete/concretefloor003",
+				"metal/ibeam003b",
+				"metal/bridgebeam001",
+				"wood/wood_floor002"
+			],
+			"top_props": [
+				"models/props_2fort/oildrum.mdl",
+				"models/props_mvm/barrel_crate.mdl",
+				"models/props_coalmines/window1.mdl",
+				"models/props_hydro/3pipe_straight_256.mdl",
+				"models/props_mvm/sack_stack_pallet.mdl",
+				"models/props_mvm/oildrum.mdl",
+				"models/props_foliage/tree_pine01_8cluster.mdl",
+				"models/props_lights/hangingbulb.mdl"
+			],
+			"top_walls": [
+				"nature/blendrockgroundwallforest",
+				"wood/wood_bridge001",
+				"brick/wall028",
+				"metal/metaltruss001",
+				"concrete/concretewall015a",
+				"metal/wall028"
+			],
+			"total_props": 547
+		}
+	],
+	"source": "Official Valve TF2 .bsp corpus + tf.fgd/tf-abs.fgd",
+	"valve_io_recipes": [
+		{
+			"delay": 0.0,
+			"in": "Open",
+			"name": "Spawn Door Auto-Open",
+			"out": "OnStartTouch",
+			"src": "trigger_multiple",
+			"tgt": "func_door"
+		},
+		{
+			"delay": 0.0,
+			"in": "Close",
+			"name": "Spawn Door Auto-Close",
+			"out": "OnEndTouchAll",
+			"src": "trigger_multiple",
+			"tgt": "func_door"
+		},
+		{
+			"delay": 0.0,
+			"in": "SetRedKothClockActive",
+			"name": "KOTH Point Capture Timer",
+			"out": "OnCapTeam1",
+			"src": "trigger_capture_area",
+			"tgt": "tf_logic_koth"
+		},
+		{
+			"delay": 0.0,
+			"in": "Pause",
+			"name": "Payload Cart Final Explosion",
+			"out": "OnPass",
+			"src": "path_track",
+			"tgt": "team_round_timer"
+		},
+		{
+			"delay": 0.0,
+			"in": "Trigger",
+			"name": "CTF Intel Return Relay",
+			"out": "OnCapture",
+			"src": "item_teamflag",
+			"tgt": "logic_relay"
+		}
+	],
+	"valve_metrics": {
+		"ceiling_height_u": [
+			256,
+			512
+		],
+		"corridor_width_u": [
+			192,
+			320
+		],
+		"doorway_size_u": [
+			128,
+			128
+		],
+		"jump_heights_u": {
+			"crouch_jump": 72,
+			"rocket_jump": 240,
+			"scout_double": 136,
+			"step": 18
+		},
+		"sightline_thresholds_u": {
+			"caution": 1536,
+			"healthy": 1024,
+			"op_sniper": 2048
+		}
+	},
+	"version": 1
+}

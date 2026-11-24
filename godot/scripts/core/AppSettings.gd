@@ -23,10 +23,15 @@ var back_clip_m: float = 650.0
 var prop_ambient_boost: float = 0.28
 var show_skybox_bg: bool = true
 
-# AI Map Co-Pilot (Hybrid: Gemini API + Local Ollama + Instant Offline Planner!)
-var ai_provider: String = "auto"   # auto | gemini | ollama | offline
+# AI Map Co-Pilot (Hybrid: Gemini + Claude + OpenAI-Compatible + Local Ollama + Valve-DNA Offline!)
+var ai_provider: String = "auto"   # auto | gemini | claude | openai | ollama | offline
 var gemini_api_key: String = ""
 var gemini_model: String = "gemini-2.5-flash"
+var claude_api_key: String = ""
+var claude_model: String = "claude-sonnet-4-20250514"
+var openai_api_key: String = ""
+var openai_base_url: String = "https://api.openai.com/v1"
+var openai_model: String = "gpt-4o-mini"
 var ollama_url: String = "http://127.0.0.1:11434"
 var ollama_model: String = "llama3.2"
 
@@ -113,6 +118,11 @@ func load_from_disk() -> void:
 	ai_provider = str(cf.get_value("ai", "ai_provider", ai_provider))
 	gemini_api_key = str(cf.get_value("ai", "gemini_api_key", gemini_api_key))
 	gemini_model = str(cf.get_value("ai", "gemini_model", gemini_model))
+	claude_api_key = str(cf.get_value("ai", "claude_api_key", claude_api_key))
+	claude_model = str(cf.get_value("ai", "claude_model", claude_model))
+	openai_api_key = str(cf.get_value("ai", "openai_api_key", openai_api_key))
+	openai_base_url = str(cf.get_value("ai", "openai_base_url", openai_base_url))
+	openai_model = str(cf.get_value("ai", "openai_model", openai_model))
 	ollama_url = str(cf.get_value("ai", "ollama_url", ollama_url))
 	ollama_model = str(cf.get_value("ai", "ollama_model", ollama_model))
 
@@ -164,6 +174,11 @@ func save_to_disk() -> void:
 	cf.set_value("ai", "ai_provider", ai_provider)
 	cf.set_value("ai", "gemini_api_key", gemini_api_key)
 	cf.set_value("ai", "gemini_model", gemini_model)
+	cf.set_value("ai", "claude_api_key", claude_api_key)
+	cf.set_value("ai", "claude_model", claude_model)
+	cf.set_value("ai", "openai_api_key", openai_api_key)
+	cf.set_value("ai", "openai_base_url", openai_base_url)
+	cf.set_value("ai", "openai_model", openai_model)
 	cf.set_value("ai", "ollama_url", ollama_url)
 	cf.set_value("ai", "ollama_model", ollama_model)
 	cf.save(CFG_PATH)

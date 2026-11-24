@@ -5170,6 +5170,17 @@ func _setup_auto_shot(idx: int) -> void:
 			cam_pos = Vector3(14.5, 9.5, 16.5); editor_cam.look_at_from_position(cam_pos, Vector3(0.0, 1.5, 0.0), Vector3.UP)
 			cam_yaw = editor_cam.rotation.y; cam_pitch = editor_cam.rotation.x
 			_update_gizmo_scale()
+		"v20_ai_arena_dna":
+			_set_lighting_mode(0); _show_welcome_hub(false); _clear_official_bsp(); _clear_selection()
+			doc.load_vmf(repo_root.path_join("godot/maps/cp_foundry_mini.vmf"))
+			active_gamemode = "cp"
+			map_sync.clear_all(); map_sync.sync_all(); ent_vis.sync_all()
+			set_stage(Stage.BUILD); minimap_enabled = false; diag_popover.visible = false; _sync_mode_visibility()
+			ai_copilot.active_tab = 1
+			ai_copilot.run_arena_bakeoff()
+			_open_ai_copilot_drawer()
+			cam_pos = Vector3(-16.0, 10.0, 14.0); editor_cam.look_at_from_position(cam_pos, Vector3(2.0, 1.8, -1.0), Vector3.UP)
+			cam_yaw = editor_cam.rotation.y; cam_pitch = editor_cam.rotation.x
 	if not viewing_bsp and not settings_modal.visible:
 		_update_hover(get_viewport().get_visible_rect().size * Vector2(0.42, 0.52))
 
