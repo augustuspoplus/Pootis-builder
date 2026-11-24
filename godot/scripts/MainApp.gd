@@ -28,6 +28,8 @@ const WorkshopHubScript      = preload("res://scripts/ui/WorkshopHubModal.gd")
 const CommandPaletteScript   = preload("res://scripts/ui/CommandPaletteModal.gd")
 const Blueprint2DScript      = preload("res://scripts/ui/Blueprint2DView.gd")
 const EditorDrawersScript    = preload("res://scripts/ui/EditorDrawers.gd")
+const TutorialManagerScript  = preload("res://scripts/ui/TutorialManager.gd")
+const AiMapCopilotScript     = preload("res://scripts/ai/AiMapCopilot.gd")
 
 const UPM := 32.0
 const GRID_STEPS: Array[int] = [8, 16, 32, 64, 128]
@@ -209,6 +211,8 @@ var pie_wheel: Control
 var welcome_panel: Control
 var settings_modal: ColorRect
 var command_palette: ColorRect
+var tutorial_mgr: Node
+var ai_copilot: Node
 var zen_mode: bool = false
 var zen_pill: PanelContainer
 var recent_materials: Array[String] = []
@@ -525,6 +529,14 @@ func _init_ui() -> void:
 	command_palette.setup(self)
 	hud_layer.add_child(command_palette)
 
+	tutorial_mgr = TutorialManagerScript.new()
+	add_child(tutorial_mgr)
+	tutorial_mgr.setup(self)
+
+	ai_copilot = AiMapCopilotScript.new()
+	add_child(ai_copilot)
+	ai_copilot.setup(self)
+
 	zen_pill = HudWidgets.HudFrame.new(HudWidgets.COL_ACC, 8.0, false)
 	zen_pill.set_anchors_preset(Control.PRESET_TOP_RIGHT)
 	zen_pill.offset_right = -12; zen_pill.offset_top = 10; zen_pill.offset_left = -210
@@ -538,7 +550,7 @@ func _init_ui() -> void:
 	hud_layer.add_child(zen_pill)
 
 	# Apply global TF2 theme directly onto CanvasLayer control roots (CanvasLayer breaks Window.theme inheritance!)
-	for ctrl in [top_bar, context_bar, left_rail_panel, tool_hover_card, bottom_dock, selection_bar, minimap_panel, diag_popover, right_drawer, split_2d_panel, welcome_panel, settings_modal, command_palette]:
+	for ctrl in [top_bar, context_bar, left_rail_panel, tool_hover_card, bottom_dock, selection_bar, minimap_panel, diag_popover, tutorial_mgr.tracker_panel, right_drawer, split_2d_panel, welcome_panel, settings_modal, command_palette]:
 		if ctrl is Control:
 			(ctrl as Control).theme = ui_theme
 
@@ -1146,6 +1158,18 @@ func _build_top_bar() -> void:
 	bar_hb.add_child(right_frame)
 	var rhb := HBoxContainer.new(); rhb.alignment = BoxContainer.ALIGNMENT_END; rhb.add_theme_constant_override("separation", 5)
 	right_frame.add_child(rhb)
+
+	var ai_b := Button.new(); ai_b.text = "AI"
+	ai_b.tooltip_text = "AI Map Co-Pilot / Architect (Ctrl+J) — Generate TF2 geometry, lighting & map critiques!"
+	HudWidgets.style_tf2_button(ai_b, fonts["heading"], 10, false, 3)
+	ai_b.pressed.connect(func(): audio.play("click"); _open_ai_copilot_drawer())
+	rhb.add_child(ai_b); edit_only_top_nodes.append(ai_b)
+
+	var tut_b := Button.new(); tut_b.text = "Learn"
+	tut_b.tooltip_text = "Interactive Guided Tutorials & Quests (F1) — Step-by-step TF2 mapping academy!"
+	HudWidgets.style_tf2_button(tut_b, fonts["body"], 10)
+	tut_b.pressed.connect(func(): audio.play("click"); _open_tutorial_drawer())
+	rhb.add_child(tut_b); edit_only_top_nodes.append(tut_b)
 
 	var search_b := Button.new(); search_b.text = "Search"
 	search_b.tooltip_text = "Quick Command Palette (Ctrl+K) — Find any tool, entity, prop, or map"
@@ -2886,6 +2910,14 @@ func _open_gamemode_wizard() -> void:
 	_clear_drawer("%s GAMEMODE LOGIC STUDIO" % active_gamemode.to_upper())
 	EditorDrawersScript.build_gamemode_wizard_drawer(self, right_drawer_vbox)
 
+func _open_tutorial_drawer() -> void:
+	_clear_drawer("INTERACTIVE TUTORIALS & QUESTS (F1)")
+	TutorialManagerScript.build_tutorial_hub_drawer(self, right_drawer_vbox)
+
+func _open_ai_copilot_drawer() -> void:
+	_clear_drawer("AI MAP ARCHITECT CO-PILOT (CTRL+J)")
+	AiMapCopilotScript.build_copilot_drawer(self, right_drawer_vbox)
+
 func _apply_gamemode_wizard_stamp(aid: String) -> void:
 	var ents: Array = doc.get_entities()
 	var has_rules := false
@@ -3725,6 +3757,10 @@ func _unhandled_input(event: InputEvent) -> void:
 			if event.keycode == KEY_K and event.ctrl_pressed:
 				if command_palette != null: command_palette.open_palette()
 				return
+			if event.keycode == KEY_J and event.ctrl_pressed and not viewing_bsp and stage != Stage.PLAYTEST:
+				_open_ai_copilot_drawer(); return
+			if event.keycode == KEY_F1 and not viewing_bsp and stage != Stage.PLAYTEST:
+				_open_tutorial_drawer(); return
 			if event.keycode == KEY_TAB and not event.ctrl_pressed and not event.alt_pressed:
 				_toggle_zen_mode(); return
 			if event.keycode == KEY_COMMA and event.ctrl_pressed:
@@ -4947,6 +4983,19 @@ func _setup_auto_shot(idx: int) -> void:
 			cam_pos = Vector3(-17.0, 9.0, 13.5); editor_cam.look_at_from_position(cam_pos, Vector3(3.0, 1.8, -1.5), Vector3.UP)
 			cam_yaw = editor_cam.rotation.y; cam_pitch = editor_cam.rotation.x
 			_refresh_2d_views(true)
+		"v17_tutorial_quest":
+			_set_lighting_mode(0); _show_welcome_hub(false); _load_gamemode("koth", "badlands", false); set_stage(Stage.BUILD)
+			minimap_enabled = false; diag_popover.visible = false; _sync_mode_visibility()
+			tutorial_mgr.start_quest("q1_first_arena")
+			_open_tutorial_drawer()
+			cam_pos = Vector3(20, 14, 24); cam_yaw = 0.65; cam_pitch = -0.42; _apply_editor_cam()
+		"v17_ai_copilot":
+			_set_lighting_mode(0); _show_welcome_hub(false); _load_gamemode("koth", "badlands", false); set_stage(Stage.BUILD)
+			tutorial_mgr.stop_quest()
+			minimap_enabled = false; diag_popover.visible = false; _sync_mode_visibility()
+			ai_copilot.submit_prompt("Build an elevated catwalk with ramps and dramatic warm & cool TF2 spotlights")
+			_open_ai_copilot_drawer()
+			cam_pos = Vector3(20, 14, 24); cam_yaw = 0.65; cam_pitch = -0.42; _apply_editor_cam()
 	if not viewing_bsp and not settings_modal.visible:
 		_update_hover(get_viewport().get_visible_rect().size * Vector2(0.42, 0.52))
 

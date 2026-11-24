@@ -138,6 +138,8 @@ func _collect_candidates(query: String) -> Array[Dictionary]:
 
 	# 1. High-value Editor Commands & Studios
 	var cmds := [
+		{"tag": "AI",     "col": HudWidgets.COL_CYAN, "title": "AI Map Architect Co-Pilot (Ctrl+J)",       "sub": "Build TF2 rooms, catwalks, lights & get live map critiques (Gemini / Ollama / Offline)", "kind": "cmd", "id": "ai_copilot"},
+		{"tag": "LEARN",  "col": HudWidgets.COL_GREEN,"title": "Interactive Guided Tutorials & Quests (F1)", "sub": "4 hands-on TF2 map-making quests with live auto-completion & Show Me buttons", "kind": "cmd", "id": "tutorials"},
 		{"tag": "ACTION", "col": HudWidgets.COL_ACC,  "title": "Compile & Launch in Real TF2 (F9)",        "sub": "Open Valve vbsp/vvis/vrad Compile Studio", "kind": "cmd", "id": "compile"},
 		{"tag": "ACTION", "col": HudWidgets.COL_ACC,  "title": "Cycle Lighting: Daylight / Lit Interior / Fullbright (F3)", "sub": "Preview real TF2 light & light_spot illumination or fullbright blockout", "kind": "cmd", "id": "lighting"},
 		{"tag": "ACTION", "col": HudWidgets.COL_CYAN, "title": "Visual 3D Entity I/O Wiring (Shift+W)",    "sub": "Click source -> click target entity in 3D for 1-click TF2 outputs", "kind": "cmd", "id": "wire3d"},
@@ -302,6 +304,8 @@ func _run_item(it: Dictionary) -> void:
 	var id := str(it["id"])
 	if kind == "cmd":
 		match id:
+			"ai_copilot": app._open_ai_copilot_drawer()
+			"tutorials": app._open_tutorial_drawer()
 			"compile": app._open_compile_drawer()
 			"lighting": app._cycle_lighting_mode()
 			"wire3d": app._start_visual_3d_wire(app.selected_entity)
