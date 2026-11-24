@@ -58,5 +58,20 @@ func _initialize() -> void:
 	var plan_critique: Dictionary = ai._run_offline_architect("What should I improve next on my map?")
 	_check(str(plan_critique.get("reply", "")).find("Critique") != -1, "Offline TF2 Architect generated Live TF2 Map Critique for 'What should I improve next?'")
 
-	print("=== Milestones 37-39 Verification Summary: %d failures ===" % _failed)
+	# 4. Milestones 40-42: Instant cold prop box (<1ms) + AI v2.0 generators (arena, door, sightlines, auto-fix)
+	var tc := Time.get_ticks_usec()
+	var fast_props := Tf2CatalogScript.get_props_for_box_fast(core, "spytech", 45)
+	var fast_ms := float(Time.get_ticks_usec() - tc) / 1000.0
+	_check(fast_props.size() >= 4 and fast_ms < 2.0, "Cold Tf2Catalog.get_props_for_box_fast('spytech') returned %d curated props in %.3f ms (<2ms, ZERO freeze!)" % [fast_props.size(), fast_ms])
+
+	var p_arena: Dictionary = ai._run_offline_architect("Generate a complete snowy KOTH arena")
+	_check((p_arena.get("actions", []) as Array).size() == 1 and str((p_arena["actions"] as Array)[0]["op"]) == "generate_arena", "AI v2.0 planned full snowy KOTH arena generation")
+	var p_sight: Dictionary = ai._run_offline_architect("Break long sniper sightlines")
+	_check((p_sight.get("actions", []) as Array).size() == 1 and str((p_sight["actions"] as Array)[0]["op"]) == "break_sightlines", "AI v2.0 planned automatic Sniper sightline breaker")
+	var p_door: Dictionary = ai._run_offline_architect("Add a wired sliding door")
+	_check((p_door.get("actions", []) as Array).size() == 1 and str((p_door["actions"] as Array)[0]["op"]) == "add_wired_door", "AI v2.0 planned wired sliding func_door + trigger")
+	var p_fix: Dictionary = ai._run_offline_architect("Fix all map problems")
+	_check((p_fix.get("actions", []) as Array).size() == 1 and str((p_fix["actions"] as Array)[0]["op"]) == "auto_fix_map", "AI v2.0 planned full auto-fix map repair")
+
+	print("=== Milestones 37-42 Verification Summary: %d failures ===" % _failed)
 	quit(1 if _failed > 0 else 0)

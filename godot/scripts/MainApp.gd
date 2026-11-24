@@ -147,6 +147,13 @@ var sightline_active: bool = false
 var sightline_origin: Vector3 = Vector3(0, 2.35, 0)
 var sightline_max_u: int = 0
 var sightline_op_count: int = 0
+var ruler_root: Node3D = null
+var ruler_active: bool = false
+var ruler_pt_a: Vector3 = Vector3.ZERO
+var ruler_pt_b: Vector3 = Vector3.ZERO
+var ruler_has_a: bool = false
+var ruler_has_b: bool = false
+var ruler_summary: String = ""
 var _payload_track_idx: int = 0
 var _payload_prev_ent: int = -1
 var mvm_start_cash: int = 800
@@ -633,9 +640,9 @@ func _build_diagnostics_popover() -> void:
 	diag_popover = HudWidgets.HudFrame.new(HudWidgets.COL_CYAN, 9.0, true)
 	diag_popover.set_anchors_preset(Control.PRESET_BOTTOM_LEFT)
 	diag_popover.offset_left = 74
-	diag_popover.offset_right = 408
+	diag_popover.offset_right = 418
 	diag_popover.offset_bottom = -168
-	diag_popover.offset_top = -352
+	diag_popover.offset_top = -402
 	diag_popover.visible = false
 	hud_layer.add_child(diag_popover)
 
@@ -670,8 +677,11 @@ func _refresh_diagnostics_popover() -> void:
 		elif cls.begins_with("prop_"): p_cnt += 1
 		elif cls == "info_player_teamspawn": sp_cnt += 1
 	var sealed: bool = doc.is_map_sealed()
+	var fps_now: int = maxi(1, Engine.get_frames_per_second())
+	var frame_ms: float = 1000.0 / float(fps_now)
 	var rows := [
 		["Map / Mode:", "%s (%s)" % [doc.get_map_name(), active_gamemode.to_upper()], HudWidgets.COL_ACC],
+		["Performance:", "%d FPS  (%.1f ms/frame)" % [fps_now, frame_ms], HudWidgets.COL_GREEN if fps_now >= 55 else HudWidgets.COL_ACC],
 		["Brushes / Props:", "%d solids | %d props" % [scnt, p_cnt], HudWidgets.COL_TX],
 		["Entities:", "%d total | %d lights | %d spawns" % [ents.size(), l_cnt, sp_cnt], HudWidgets.COL_TX],
 		["VPK Cache:", "%d mats | %d 3D models" % [assets._mat_cache.size(), assets._mesh_cache.size()], HudWidgets.COL_TX_MUTED],
@@ -685,6 +695,31 @@ func _refresh_diagnostics_popover() -> void:
 		var v := Label.new(); v.text = str(r[1]); v.size_flags_horizontal = Control.SIZE_EXPAND_FILL; v.clip_text = true
 		v.add_theme_font_override("font", fonts["mono"]); v.add_theme_font_size_override("font_size", 10)
 		v.add_theme_color_override("font_color", r[2]); rhb.add_child(v)
+
+	# 1-Click Performance Profile Switcher (Turbo / Balanced / Ultra)
+	var perf_r := HBoxContainer.new(); perf_r.add_theme_constant_override("separation", 4); diag_vbox.add_child(perf_r)
+	var p_lbl := Label.new(); p_lbl.text = "Perf:"; p_lbl.custom_minimum_size = Vector2(36, 0)
+	p_lbl.add_theme_font_override("font", fonts["body"]); p_lbl.add_theme_font_size_override("font_size", 10)
+	p_lbl.add_theme_color_override("font_color", HudWidgets.COL_TX_MUTED); perf_r.add_child(p_lbl)
+	var is_turbo: bool = (settings.msaa_level == 0 and settings.shadow_quality == 0 and not settings.ssao_enabled)
+	var is_ultra: bool = (settings.msaa_level == 2 and settings.ssao_enabled)
+	var is_bal: bool = not is_turbo and not is_ultra
+	for pm in [
+		{"t": "Turbo FPS", "act": is_turbo, "msaa": 0, "sh": 0, "ssao": false},
+		{"t": "Balanced",  "act": is_bal,   "msaa": 1, "sh": 1, "ssao": false},
+		{"t": "Ultra",     "act": is_ultra, "msaa": 2, "sh": 2, "ssao": true},
+	]:
+		var pb := Button.new(); pb.text = str(pm["t"]); pb.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		HudWidgets.style_tf2_button(pb, fonts["heading"], 9, bool(pm["act"]))
+		var m_v: int = int(pm["msaa"]); var sh_v: int = int(pm["sh"]); var ss_v: bool = bool(pm["ssao"]); var nm_v: String = str(pm["t"])
+		pb.pressed.connect(func():
+			audio.play("click")
+			settings.msaa_level = m_v; settings.shadow_quality = sh_v; settings.ssao_enabled = ss_v
+			settings.save_to_disk(); settings.apply_runtime(self)
+			_refresh_diagnostics_popover()
+			_toast("Performance Profile: %s applied!" % nm_v)
+		)
+		perf_r.add_child(pb)
 
 	var brow := HBoxContainer.new(); brow.add_theme_constant_override("separation", 5); diag_vbox.add_child(brow)
 	var sb := Button.new(); sb.text = "Auto-Seal"; sb.size_flags_horizontal = Control.SIZE_EXPAND_FILL
@@ -844,6 +879,11 @@ func _refresh_context_bar() -> void:
 		add_chip.call("Max: %du  |  OP >2048u Rays: %d" % [sightline_max_u, sightline_op_count], sightline_op_count > 0, func(): pass)
 		add_chip.call("Click 3D Floor/Balcony to Move Probe", false, func(): active_tool = "sightline")
 		add_chip.call("Hide Rays (Alt+S)", false, func(): _toggle_sightline_analyzer())
+	elif active_tool == "ruler" or ruler_active:
+		context_bar.visible = true
+		add_tag.call("TF2 3D RULER (ALT+R)")
+		add_chip.call(ruler_summary if not ruler_summary.is_empty() else "Click Point A -> Point B in 3D to Measure", true, func(): pass)
+		add_chip.call("Clear (Esc)", false, func(): _toggle_ruler_tool())
 	else:
 		context_bar.visible = false
 
@@ -1722,7 +1762,7 @@ func _rebuild_bottom_dock() -> void:
 		for mp in _prop_favorites:
 			pitems.append({"name": mp.get_file().get_basename().replace("_", " ").capitalize(), "mdl": mp})
 	else:
-		pitems = Tf2CatalogScript.get_props_for_box(core, _dock_prop_cat, "", 45)
+		pitems = Tf2CatalogScript.get_props_for_box_fast(core, _dock_prop_cat, 45)
 
 	var p_per: int = clampi(int((eff_pw - 410.0) / 112.0), 3, 8)
 	var p_pages := maxi(1, int(ceil(float(pitems.size()) / float(p_per))))
@@ -2078,7 +2118,7 @@ func _sync_mode_visibility() -> void:
 	if zen_pill != null:
 		zen_pill.visible = is_edit and zen_mode
 	if minimap_panel != null:
-		minimap_panel.visible = show_hud and minimap_enabled and not split_2d_panel.visible and not right_drawer.visible
+		minimap_panel.visible = ((show_hud and not split_2d_panel.visible and not right_drawer.visible) or stage == Stage.PLAYTEST) and minimap_enabled and not viewing_bsp
 	for n in edit_only_top_nodes:
 		if is_instance_valid(n):
 			n.visible = is_edit
@@ -2959,6 +2999,72 @@ func _apply_gamemode_wizard_stamp(aid: String) -> void:
 		_record_history("Stamp Team Spawns"); ent_vis.sync_all()
 		_toast("Stamped 4 RED + 4 BLU Team Spawns & Resupply Cabinets!")
 
+func _toggle_ruler_tool() -> void:
+	ruler_active = not ruler_active
+	if ruler_active:
+		active_tool = "ruler"
+		ruler_has_a = false; ruler_has_b = false; ruler_summary = ""
+		if ruler_root != null: ruler_root.visible = false
+		_refresh_context_bar()
+		audio.play("click")
+		_toast("TF2 3D Ruler ON (Alt+R) — Click Point A then Point B in 3D to measure Hammer units & travel time!")
+	else:
+		if ruler_root != null: ruler_root.visible = false
+		ruler_has_a = false; ruler_has_b = false; ruler_summary = ""
+		if active_tool == "ruler": active_tool = "select"
+		_refresh_context_bar()
+
+func _update_ruler_visuals(p_a: Vector3, p_b: Vector3) -> String:
+	if ruler_root == null:
+		ruler_root = Node3D.new()
+		ruler_root.name = "Tf2Ruler3D"
+		add_child(ruler_root)
+	for ch in ruler_root.get_children():
+		ch.queue_free()
+	ruler_root.visible = true
+
+	var dist_m: float = p_a.distance_to(p_b)
+	var dist_u: int = int(round(dist_m * UPM))
+	var dy_u: int = int(round(absf(p_b.y - p_a.y) * UPM))
+	var scout_s: float = float(dist_u) / 400.0
+	var sold_s: float = float(dist_u) / 240.0
+	var jump_tag := "Walkable"
+	if dy_u > 240: jump_tag = "High Ground (>240u)"
+	elif dy_u > 136: jump_tag = "Rocket Jump"
+	elif dy_u > 72: jump_tag = "Scout 2x-Jump"
+	elif dy_u > 18: jump_tag = "Crouch-Jump"
+
+	ruler_summary = "%du (dZ: %du | %s)  |  Scout: %.2fs  |  Soldier: %.2fs" % [dist_u, dy_u, jump_tag, scout_s, sold_s]
+
+	var im := ImmediateMesh.new()
+	var mat := StandardMaterial3D.new()
+	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	mat.vertex_color_use_as_albedo = true
+	mat.no_depth_test = true
+	im.surface_begin(Mesh.PRIMITIVE_LINES, mat)
+	var c_cyan := HudWidgets.COL_CYAN
+	var c_amb := HudWidgets.COL_ACC
+	im.surface_set_color(c_cyan); im.surface_add_vertex(p_a + Vector3(0, 0.2, 0))
+	im.surface_set_color(c_cyan); im.surface_add_vertex(p_b + Vector3(0, 0.2, 0))
+	# Horizontal + Vertical delta legs for easy elevation reading!
+	var corner := Vector3(p_b.x, p_a.y, p_b.z)
+	im.surface_set_color(c_amb); im.surface_add_vertex(p_a + Vector3(0, 0.15, 0))
+	im.surface_set_color(c_amb); im.surface_add_vertex(corner + Vector3(0, 0.15, 0))
+	im.surface_set_color(c_amb); im.surface_add_vertex(corner + Vector3(0, 0.15, 0))
+	im.surface_set_color(c_amb); im.surface_add_vertex(p_b + Vector3(0, 0.15, 0))
+	im.surface_end()
+	var lmi := MeshInstance3D.new(); lmi.mesh = im; lmi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	ruler_root.add_child(lmi)
+
+	for pt in [p_a, p_b]:
+		var smi := MeshInstance3D.new()
+		var sph := SphereMesh.new(); sph.radius = 0.28; sph.height = 0.56
+		smi.mesh = sph; smi.position = (pt as Vector3) + Vector3(0, 0.2, 0)
+		var sm := StandardMaterial3D.new(); sm.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED; sm.albedo_color = c_cyan; sm.no_depth_test = true
+		smi.material_override = sm
+		ruler_root.add_child(smi)
+	return ruler_summary
+
 func _toggle_sightline_analyzer() -> void:
 	sightline_active = not sightline_active
 	if sightline_active:
@@ -3776,6 +3882,7 @@ func _unhandled_input(event: InputEvent) -> void:
 				elif active_tool == "wire_io": _wire_io_src = -1; active_tool = "select"; overlay_2d.queue_redraw(); _toast("Cancelled Visual 3D Wiring")
 				elif _clip_3d_active: _clip_3d_active = false; if _clip_plane_mesh != null: _clip_plane_mesh.visible = false
 				elif spline_chain_active: spline_chain_active = false; spline_seg_count = 0; _refresh_context_bar(); _toast("Finished spline path chain")
+				elif ruler_active: _toggle_ruler_tool()
 				elif sightline_active: _toggle_sightline_analyzer()
 				elif _wall_chain_active: _wall_chain_active = false; ghost_mesh.visible = false; _toast("Finished wall chain")
 				elif _drawing_box: _drawing_box = false; ghost_mesh.visible = false
@@ -3783,7 +3890,11 @@ func _unhandled_input(event: InputEvent) -> void:
 				elif right_drawer.visible: right_drawer.visible = false
 				return
 			if stage == Stage.PLAYTEST:
-				player.handle_key_press(event.keycode); return
+				if event.keycode == KEY_M:
+					_toggle_minimap()
+				else:
+					player.handle_key_press(event.keycode)
+				return
 			if event.keycode == KEY_Q:
 				pie_wheel.open_at(get_viewport().get_mouse_position()); return
 			elif event.keycode == KEY_L:
@@ -3814,6 +3925,7 @@ func _unhandled_input(event: InputEvent) -> void:
 			elif event.keycode == KEY_A and event.shift_pressed: set_stage(Stage.STYLE); _open_materials_drawer()
 			elif event.keycode == KEY_P and event.alt_pressed: _open_check_problems_drawer()
 			elif event.keycode == KEY_S and event.alt_pressed: _toggle_sightline_analyzer()
+			elif event.keycode == KEY_R and event.alt_pressed: _toggle_ruler_tool()
 			elif (event.keycode == KEY_ENTER or event.keycode == KEY_KP_ENTER) and event.alt_pressed: _open_inspector_drawer()
 			elif event.keycode == KEY_DELETE: _delete_selection()
 			elif event.keycode == KEY_BRACKETLEFT: _step_grid(-1)
@@ -4167,6 +4279,19 @@ func _handle_left_click(screen_pos: Vector2, shift_held: bool = false, alt_held:
 			if _clip_plane_mesh != null: _clip_plane_mesh.visible = false
 		return
 
+	if active_tool == "ruler" and hover_valid:
+		if not ruler_has_a or ruler_has_b:
+			ruler_pt_a = hover_pos; ruler_has_a = true; ruler_has_b = false
+			_spawn_place_fx(hover_pos, HudWidgets.COL_CYAN); audio.play("click")
+			_toast("Ruler Point A set — move & click Point B to measure!")
+		else:
+			ruler_pt_b = hover_pos; ruler_has_b = true
+			var s := _update_ruler_visuals(ruler_pt_a, ruler_pt_b)
+			_refresh_context_bar()
+			_spawn_place_fx(hover_pos, HudWidgets.COL_ACC); audio.play("place")
+			_toast("Measured: " + s)
+		return
+
 	if active_tool == "sightline" and hover_valid:
 		_rebuild_sightline_rays(hover_pos + Vector3(0, 2.35, 0))
 		_refresh_context_bar()
@@ -4439,7 +4564,10 @@ func _update_hover(screen_pos: Vector2) -> void:
 		map_sync.set_hover(-1); ent_vis.set_hover(-1)
 
 	if hover_valid:
-		if active_tool == "terrain":
+		if active_tool == "ruler" and ruler_has_a and not ruler_has_b:
+			_update_ruler_visuals(ruler_pt_a, hover_pos)
+			_refresh_context_bar()
+		elif active_tool == "terrain":
 			ghost_mesh.visible = false; brush_ring.visible = true
 			brush_ring.position = hover_pos + Vector3(0, 0.15, 0); brush_ring.scale = Vector3(terrain_radius_m, 1.0, terrain_radius_m)
 		elif active_tool == "scatter_props":
@@ -4501,6 +4629,8 @@ func _process(delta: float) -> void:
 	_terrain_sync_accum += delta
 	if assets != null:
 		assets.poll_async_loads()
+	if Tf2CatalogScript.poll_prop_warmup() and stage == Stage.STYLE and _dock_prop_cat != "_tools" and _dock_prop_cat != "_saved":
+		_rebuild_bottom_dock()
 	if icon_cache != null:
 		icon_cache.paused = (_rmb_looking or _mmb_panning or _dragging_face or _dragging_move or _dragging_gizmo or _dragging_vertex or _terrain_sculpting)
 	if _hover_dirty:
@@ -4610,6 +4740,8 @@ func _process(delta: float) -> void:
 				playtest_obj_bar.value = clampf(float(ctf_caps) / 3.0 * 100.0, 0.0, 100.0)
 			else:
 				playtest_obj_lbl.visible = false; playtest_obj_bar.visible = false
+		if minimap_panel != null and minimap_panel.visible and minimap_view != null:
+			minimap_view.refresh(-1, player.global_position, false, player._yaw)
 		overlay_2d.queue_redraw()
 
 	_step_cli_shots()
@@ -4996,6 +5128,28 @@ func _setup_auto_shot(idx: int) -> void:
 			ai_copilot.submit_prompt("Build an elevated catwalk with ramps and dramatic warm & cool TF2 spotlights")
 			_open_ai_copilot_drawer()
 			cam_pos = Vector3(20, 14, 24); cam_yaw = 0.65; cam_pitch = -0.42; _apply_editor_cam()
+		"v18_ruler_perf":
+			_set_lighting_mode(0); _show_welcome_hub(false); _clear_official_bsp(); _clear_selection()
+			doc.load_vmf(repo_root.path_join("godot/maps/cp_foundry_mini.vmf"))
+			active_gamemode = "cp"
+			map_sync.clear_all(); map_sync.sync_all(); ent_vis.sync_all()
+			set_stage(Stage.BUILD); right_drawer.visible = false
+			ruler_active = true; active_tool = "ruler"; ruler_has_a = true; ruler_has_b = true
+			ruler_pt_a = Vector3(-12.0, 0.0, 0.0); ruler_pt_b = Vector3(0.0, 3.0, -11.0)
+			_update_ruler_visuals(ruler_pt_a, ruler_pt_b); _refresh_context_bar()
+			minimap_enabled = true; diag_popover.visible = true; _sync_mode_visibility(); _refresh_diagnostics_popover()
+			cam_pos = Vector3(-16.0, 11.5, 14.5); editor_cam.look_at_from_position(cam_pos, Vector3(-3.0, 1.5, -4.0), Vector3.UP)
+			cam_yaw = editor_cam.rotation.y; cam_pitch = editor_cam.rotation.x
+			_refresh_2d_views(true)
+		"v18_ai_arena":
+			_set_lighting_mode(0); _show_welcome_hub(false); _clear_official_bsp(); _clear_selection()
+			if ruler_root != null: ruler_root.visible = false
+			ruler_active = false; diag_popover.visible = false; minimap_enabled = false
+			ai_copilot.submit_prompt("Generate a complete snowy KOTH arena")
+			_set_lighting_mode(1)
+			_open_ai_copilot_drawer()
+			cam_pos = Vector3(-18.0, 10.5, 15.0); editor_cam.look_at_from_position(cam_pos, Vector3(2.0, 1.8, -1.0), Vector3.UP)
+			cam_yaw = editor_cam.rotation.y; cam_pitch = editor_cam.rotation.x
 	if not viewing_bsp and not settings_modal.visible:
 		_update_hover(get_viewport().get_visible_rect().size * Vector2(0.42, 0.52))
 

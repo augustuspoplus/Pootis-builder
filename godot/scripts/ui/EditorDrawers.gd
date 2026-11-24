@@ -1851,14 +1851,14 @@ static func build_viewport_menu_drawer(app: Node3D, vbox: VBoxContainer) -> void
 	var g3 := GridContainer.new(); g3.columns = 2; g3.add_theme_constant_override("h_separation", 6); g3.add_theme_constant_override("v_separation", 6)
 	v3.add_child(g3)
 	for act in [
-		{"t": "Scene Outliner (O)",   "fn": func(): app._open_outliner_drawer()},
-		{"t": "Mini-Map Radar (M)",   "fn": func(): app._toggle_minimap()},
-		{"t": "Sniper Sightlines (Alt+S)", "fn": func(): app._toggle_sightline_analyzer()},
-		{"t": "Split 2D Blueprints",  "fn": func(): app._toggle_split_2d()},
-		{"t": "VisGroups & Layers",   "fn": func(): app._open_visgroups_drawer()},
-		{"t": "Map Diagnostics",      "fn": func(): app._toggle_diagnostics_popover()},
-		{"t": "Zen Viewport (Tab)",   "fn": func(): app._toggle_zen_mode()},
-		{"t": "Focus Selection (F)",  "fn": func(): app._focus_camera_on_selection()},
+		{"t": "Scene Outliner (O)",       "fn": func(): app._open_outliner_drawer()},
+		{"t": "Mini-Map Radar (M)",       "fn": func(): app._toggle_minimap()},
+		{"t": "Sniper Sightlines (Alt+S)","fn": func(): app._toggle_sightline_analyzer()},
+		{"t": "TF2 3D Ruler (Alt+R)",     "fn": func(): app._toggle_ruler_tool()},
+		{"t": "Split 2D Blueprints",      "fn": func(): app._toggle_split_2d()},
+		{"t": "VisGroups & Layers",       "fn": func(): app._open_visgroups_drawer()},
+		{"t": "Map Diagnostics & FPS",    "fn": func(): app._toggle_diagnostics_popover()},
+		{"t": "Zen Viewport (Tab)",       "fn": func(): app._toggle_zen_mode()},
 	]:
 		var b := Button.new(); b.text = str(act["t"]); b.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 		HudWidgets.style_tf2_button(b, fonts["body"], 10)

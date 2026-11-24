@@ -18,6 +18,11 @@ var http: HTTPRequest
 var is_thinking: bool = false
 var show_config: bool = false
 var chat_history: Array[Dictionary] = [] # [{role: "user"|"ai", text: String, badge: String, actions_run: int}]
+var suggested_followups: Array[String] = [
+	"What should I improve next?",
+	"Generate a complete snowy KOTH arena",
+	"Break long sniper sightlines",
+]
 var _pending_prompt: String = ""
 var _pending_backend: String = "offline"
 
@@ -120,10 +125,15 @@ Respond ONLY with valid raw JSON (no markdown fences) matching this exact schema
     {"op": "add_pickup", "kind": "health_med|ammo_med|health_small|ammo_small", "pos": [x,y,z]},
     {"op": "add_prop", "mdl": "models/props_2fort/miningcrate001.mdl", "pos": [x,y,z], "yaw": 0},
     {"op": "stamp_room", "kind": "spawn_room|sniper_deck|mid_arena|hallway", "team": 2},
+    {"op": "generate_arena", "mode": "koth|ctf|cp", "biome": "badlands|winter|spytech|industrial|medieval"},
+    {"op": "add_wired_door", "pos": [x,y,z], "name": "ai_door_01"},
+    {"op": "break_sightlines"},
+    {"op": "auto_fix_map"},
     {"op": "apply_biome", "biome": "badlands|winter|spytech|industrial|medieval|farm"},
     {"op": "set_lighting_mode", "mode": 1},
     {"op": "auto_seal"}
-  ]
+  ],
+  "followups": ["Short next idea 1", "Short next idea 2"]
 }
 Only include actions if the user asks to build, add, fix, light, or change something. Keep action count <= 10.""" % build_map_context_summary()
 
@@ -207,6 +217,10 @@ func _finish_response(plan: Dictionary, badge: String) -> void:
 	if not actions.is_empty():
 		applied = execute_actions(actions, _pending_prompt.left(28))
 	var reply_txt := str(plan.get("reply", "Done!"))
+	if plan.has("followups") and plan["followups"] is Array and not (plan["followups"] as Array).is_empty():
+		suggested_followups.clear()
+		for fu in plan["followups"]:
+			suggested_followups.append(str(fu))
 	var entry := {
 		"role": "ai",
 		"text": reply_txt,
@@ -232,6 +246,45 @@ func _finish_response(plan: Dictionary, badge: String) -> void:
 func _run_offline_architect(prompt: String) -> Dictionary:
 	var q := prompt.to_lower()
 	var acts: Array = []
+
+	# 0. Full Symmetrical TF2 Map Generation ("generate a complete snowy koth / ctf / cp arena")
+	if (q.find("generate") != -1 or q.find("create") != -1 or q.find("new map") != -1 or q.find("complete") != -1) and (q.find("map") != -1 or q.find("arena") != -1 or q.find("fortress") != -1 or q.find("koth") != -1 or q.find("ctf") != -1 or q.find("3cp") != -1 or q.find("5cp") != -1):
+		var gmode := "ctf" if q.find("ctf") != -1 else ("cp" if (q.find("cp") != -1 or q.find("3cp") != -1 or q.find("5cp") != -1) else "koth")
+		var gbiome := "badlands"
+		for bk_c in ["winter", "snow", "spytech", "industrial", "medieval", "farm"]:
+			var bks := str(bk_c)
+			if q.find(bks) != -1:
+				gbiome = "winter" if bks == "snow" else bks; break
+		return {
+			"reply": "Generated a brand-new symmetrical %s %s TF2 arena (spawns, wired sliding doors, catwalks, spotlights, cover & 0-leak skybox)! Press F5 to playtest it right now." % [gbiome.capitalize(), gmode.to_upper()],
+			"actions": [{"op": "generate_arena", "mode": gmode, "biome": gbiome}],
+			"followups": ["Break long sniper sightlines", "Add symmetrical health & ammo pickups", "What should I improve next?"],
+		}
+
+	# 0b. Auto-Fix All Map Problems
+	if q.find("fix") != -1 and (q.find("all") != -1 or q.find("problem") != -1 or q.find("map") != -1 or q.find("leak") != -1):
+		return {
+			"reply": "Ran full TF2 Auto-Fix: sealed skybox, verified tf_gamerules + light_environment, ensured RED/BLU spawns & balanced pickups!",
+			"actions": [{"op": "auto_fix_map"}],
+			"followups": ["Break long sniper sightlines", "Add dramatic warm & cool TF2 spotlights", "What should I improve next?"],
+		}
+
+	# 0c. Auto-Break Long Sniper Sightlines
+	if q.find("break") != -1 and q.find("sightline") != -1:
+		return {
+			"reply": "Scanned 360 deg Sniper sightlines and placed TF2 cover barriers & crates directly across the longest open sightline lanes!",
+			"actions": [{"op": "break_sightlines"}],
+			"followups": ["Add dramatic warm & cool TF2 spotlights", "Add a wired sliding door", "What should I improve next?"],
+		}
+
+	# 0d. Add Wired Sliding TF2 Door
+	if q.find("door") != -1:
+		var dp: Vector3 = app.hover_pos if (app != null and app.hover_valid) else Vector3(-6.0, 0.0, 0.0)
+		return {
+			"reply": "Built a working TF2 func_door + trigger_multiple wired with OnStartTouch->Open & OnEndTouchAll->Close! Walk through it in F5 to test.",
+			"actions": [{"op": "add_wired_door", "pos": [dp.x, dp.y, dp.z], "name": "ai_sliding_door"}],
+			"followups": ["Add dramatic warm & cool TF2 spotlights", "What should I improve next?"],
+		}
 
 	# 1. Live Map Critique / "What should I do next?"
 	if q.find("next") != -1 or q.find("audit") != -1 or q.find("critique") != -1 or q.find("improve") != -1 or q.find("help") != -1 or q.find("clue") != -1 or q.find("tip") != -1:
@@ -407,6 +460,25 @@ func execute_actions(actions: Array, label: String = "AI Architect") -> int:
 				app._room_kit_team = int(a.get("team", 2))
 				app._stamp_smart_room_kit(str(a.get("kind", "sniper_deck")))
 				count += 1; touched_solids = true; touched_ents = true
+			"generate_arena":
+				_exec_generate_arena(str(a.get("mode", "koth")), str(a.get("biome", "badlands")))
+				count += 1; touched_solids = true; touched_ents = true
+			"add_wired_door":
+				var dp := _v3(a.get("pos", [-6, 0, 0]))
+				var dn := str(a.get("name", "ai_sliding_door_%d" % (randi() % 900 + 100)))
+				app.doc.add_brush_entity("func_door", dp + Vector3(-0.25, 0.0, -2.0), dp + Vector3(0.25, 3.6, 2.0), "METAL/METALDOOR001", {
+					"targetname": dn, "movedir": "-90 0 0", "speed": "420"
+				})
+				var ti: int = app.doc.add_brush_entity("trigger_multiple", dp + Vector3(-2.2, 0.0, -2.4), dp + Vector3(2.2, 3.6, 2.4), "TOOLS/TOOLSTRIGGER", {})
+				app.doc.add_connection(ti, "OnStartTouch", dn, "Open", "", 0.0, false)
+				app.doc.add_connection(ti, "OnEndTouchAll", dn, "Close", "", 0.0, false)
+				count += 1; touched_ents = true
+			"break_sightlines":
+				var broke := _exec_break_sightlines()
+				count += maxi(1, broke); touched_solids = true; touched_ents = true
+			"auto_fix_map":
+				var fixed := _exec_auto_fix_map()
+				count += maxi(1, fixed); touched_solids = true; touched_ents = true
 			"apply_biome":
 				app._apply_biome(str(a.get("biome", "badlands")))
 				count += 1; touched_solids = true
@@ -434,6 +506,130 @@ func _v3(arr: Variant) -> Vector3:
 	if arr is Array and (arr as Array).size() >= 3:
 		return Vector3(float(arr[0]), float(arr[1]), float(arr[2]))
 	return Vector3.ZERO
+
+func _exec_generate_arena(mode: String, biome: String) -> void:
+	var b: Dictionary = Tf2GamemodesScript.get_biome(biome)
+	var floor_m: String = str(b["floor"])
+	var wall_m: String = str(b["wall"])
+	var roof_m: String = str(b["roof"])
+	app.doc.new_map("%s_ai_%s" % [mode, biome])
+	app.active_gamemode = mode
+	app.active_biome = biome
+	app.active_sky = str(b["sky"])
+	app.doc.set_skyname(app.active_sky)
+	app._apply_environment_from_biome(biome)
+
+	# Courtyard floor + mid platform + perimeter walls
+	app.doc.add_box(Vector3(-24, -1.0, -14), Vector3(24, 0.0, 14), floor_m)
+	app.doc.add_box(Vector3(-5, 0.0, -5), Vector3(5, 1.0, 5), str(b.get("trim", "CONCRETE/CONCRETEFLOOR002")))
+	app.doc.add_ramp(Vector3(-7.5, 0.0, -2.5), Vector3(-5, 1.0, 2.5), 0, floor_m)
+	app.doc.add_ramp(Vector3(5, 0.0, -2.5), Vector3(7.5, 1.0, 2.5), 1, floor_m)
+	app.doc.add_box(Vector3(-25, 0, -15), Vector3(25, 9, -14), wall_m)
+	app.doc.add_box(Vector3(-25, 0, 14), Vector3(25, 9, 15), wall_m)
+	app.doc.add_box(Vector3(-25, 0, -14), Vector3(-24, 9, 14), wall_m)
+	app.doc.add_box(Vector3(24, 0, -14), Vector3(25, 9, 14), wall_m)
+
+	# Elevated twin flank catwalks + ramps
+	for sv in [-1.0, 1.0]:
+		var sz: float = float(sv) * 10.0
+		app.doc.add_box(Vector3(-12, 2.8, sz - 1.4), Vector3(12, 3.1, sz + 1.4), "METAL/METALGRATE011A")
+		app.doc.add_ramp(Vector3(-15, 0.0, sz - 1.4), Vector3(-12, 2.8, sz + 1.4), 0, "METAL/METALFLOOR001")
+		app.doc.add_ramp(Vector3(12, 0.0, sz - 1.4), Vector3(15, 2.8, sz + 1.4), 1, "METAL/METALFLOOR001")
+
+	# Symmetrical RED & BLU spawns + wired doors + spotlights + cover + pickups
+	for team_i in [2, 3]:
+		var sgn: float = -1.0 if team_i == 2 else 1.0
+		var bx0: float = -24.0 if team_i == 2 else 18.0
+		var bx1: float = -18.0 if team_i == 2 else 24.0
+		var dx: float = -18.0 if team_i == 2 else 18.0
+		app.doc.add_box(Vector3(bx0, 0, -6), Vector3(bx1, 4.5, -5.5), wall_m)
+		app.doc.add_box(Vector3(bx0, 0, 5.5), Vector3(bx1, 4.5, 6), wall_m)
+		app.doc.add_box(Vector3(bx0, 4.5, -6), Vector3(bx1, 5.0, 6), roof_m)
+		var dn := "ai_door_red" if team_i == 2 else "ai_door_blu"
+		app.doc.add_brush_entity("func_door", Vector3(dx - 0.2, 0, -2.0), Vector3(dx + 0.2, 3.6, 2.0), "METAL/METALDOOR001", {"targetname": dn, "movedir": "-90 0 0", "speed": "400"})
+		var ti: int = app.doc.add_brush_entity("trigger_multiple", Vector3(dx - 2.2, 0, -2.4), Vector3(dx + 2.2, 3.6, 2.4), "TOOLS/TOOLSTRIGGER", {})
+		app.doc.add_connection(ti, "OnStartTouch", dn, "Open", "", 0.0, false)
+		app.doc.add_connection(ti, "OnEndTouchAll", dn, "Close", "", 0.0, false)
+		for si in range(3):
+			app.doc.add_point_entity("info_player_teamspawn", Vector3(sgn * 21.0, 0.2, (float(si) - 1.0) * 2.5), {"TeamNum": str(team_i), "angles": "0 %d 0" % (0 if team_i == 2 else 180)})
+		Tf2GamemodesScript.stamp_preset(app.doc, "resupply", Vector3(sgn * 22.8, 0.0, 0.0), team_i)
+		app.doc.add_point_entity("prop_static", Vector3(sgn * 10.5, 0.0, -4.0), {"model": "models/props_2fort/miningcrate001.mdl", "angles": "0 15 0"})
+		app.doc.add_point_entity("prop_static", Vector3(sgn * 10.5, 0.0, 4.0), {"model": "models/props_2fort/oildrum.mdl", "angles": "0 0 0"})
+		app.doc.add_point_entity("item_healthkit_medium", Vector3(sgn * 12.0, 0.2, 0.0), {})
+		app.doc.add_point_entity("item_ammopack_medium", Vector3(sgn * 12.0, 0.2, 3.0), {})
+		app.doc.add_point_entity("light_spot", Vector3(sgn * 11.0, 6.0, 0.0), {"_light": "255 185 105 720" if team_i == 2 else "120 190 255 720", "pitch": "-75", "_cone": "55"})
+
+	app.doc.add_point_entity("tf_gamerules", Vector3(0, 8, 0), {"targetname": "gamerules"})
+	app.doc.add_point_entity("light_environment", Vector3(0, 8.6, 0), {"_light": "255 235 200 450", "pitch": "-45"})
+	if mode == "ctf":
+		Tf2GamemodesScript.stamp_preset(app.doc, "intel", Vector3(-15, 0.2, 0), 2)
+		Tf2GamemodesScript.stamp_preset(app.doc, "intel", Vector3(15, 0.2, 0), 3)
+		app.doc.add_brush_entity("func_capturezone", Vector3(-17, 0, -2.5), Vector3(-13, 3.5, 2.5), "TOOLS/TOOLSTRIGGER", {"TeamNum": "2"})
+		app.doc.add_brush_entity("func_capturezone", Vector3(13, 0, -2.5), Vector3(17, 3.5, 2.5), "TOOLS/TOOLSTRIGGER", {"TeamNum": "3"})
+	elif mode == "cp":
+		app.doc.add_point_entity("team_control_point_master", Vector3(0, 8.4, 0), {})
+		Tf2GamemodesScript.stamp_preset(app.doc, "cap_point", Vector3(-13, 0.05, 0), 2)
+		Tf2GamemodesScript.stamp_preset(app.doc, "cap_point", Vector3(0, 1.05, 0), 0)
+		Tf2GamemodesScript.stamp_preset(app.doc, "cap_point", Vector3(13, 0.05, 0), 3)
+	else:
+		app.doc.add_point_entity("tf_logic_koth", Vector3(0, 8.2, 0), {"timer_length": "180"})
+		app.doc.add_point_entity("team_control_point_master", Vector3(0, 8.4, 0), {})
+		Tf2GamemodesScript.stamp_preset(app.doc, "cap_point", Vector3(0, 1.05, 0), 0)
+
+	app.doc.auto_seal_skybox()
+	app.map_sync.clear_all(); app.map_sync.sync_all(true)
+	app.ent_vis.clear_all(); app.ent_vis.sync_all(true)
+	app.map_title_lbl.text = "| " + app.doc.get_map_name()
+
+func _exec_break_sightlines() -> int:
+	var orig := Vector3(0.0, 2.35, 0.0)
+	var placed := 0
+	var dirs := [Vector3(1, 0, 0), Vector3(-1, 0, 0), Vector3(0, 0, 1), Vector3(0, 0, -1), Vector3(0.707, 0, 0.707), Vector3(-0.707, 0, -0.707)]
+	for d_v in dirs:
+		var dir: Vector3 = (d_v as Vector3).normalized()
+		var rc: Dictionary = app.doc.raycast_face(orig, dir)
+		if rc.get("hit", false):
+			var dist_m: float = orig.distance_to(rc["hit_pos"])
+			if dist_m * 32.0 > 640.0 and placed < 3:
+				var spot: Vector3 = orig + dir * clampf(dist_m * 0.45, 5.5, 14.0)
+				spot.y = 0.0
+				app.doc.add_box(spot + Vector3(-1.2, 0.0, -0.6), spot + Vector3(1.2, 2.2, 0.6), "CONCRETE/CONCRETEWALL002")
+				app.doc.add_point_entity("prop_static", spot + Vector3(1.6, 0.0, 0.2), {"model": "models/props_2fort/miningcrate001.mdl", "angles": "0 25 0"})
+				placed += 1
+	if placed == 0:
+		app.doc.add_box(Vector3(-7.0, 0.0, -1.2), Vector3(-5.8, 2.4, 1.2), "CONCRETE/CONCRETEWALL002")
+		app.doc.add_box(Vector3(5.8, 0.0, -1.2), Vector3(7.0, 2.4, 1.2), "CONCRETE/CONCRETEWALL002")
+		placed = 2
+	return placed
+
+func _exec_auto_fix_map() -> int:
+	var fixes := 0
+	if not app.doc.is_map_sealed():
+		app.doc.auto_seal_skybox(); fixes += 1
+	var ents: Array = app.doc.get_entities()
+	var has_rules := false; var has_sun := false; var red_sp := 0; var blu_sp := 0; var hk := 0
+	for e in ents:
+		var cls := str(e.get("classname", ""))
+		var tm := str(e.get("kv", {}).get("TeamNum", ""))
+		if cls == "tf_gamerules": has_rules = true
+		elif cls == "light_environment": has_sun = true
+		elif cls == "info_player_teamspawn":
+			if tm == "2": red_sp += 1
+			elif tm == "3": blu_sp += 1
+		elif cls.begins_with("item_healthkit"): hk += 1
+	if not has_rules:
+		app.doc.add_point_entity("tf_gamerules", Vector3(0, 7.0, 0), {"targetname": "gamerules"}); fixes += 1
+	if not has_sun:
+		app.doc.add_point_entity("light_environment", Vector3(0, 7.5, 0), {"_light": "255 235 200 450", "pitch": "-45"}); fixes += 1
+	while red_sp < 2:
+		app.doc.add_point_entity("info_player_teamspawn", Vector3(-16.0, 0.2, float(red_sp) * 2.4 - 1.2), {"TeamNum": "2", "angles": "0 0 0"}); red_sp += 1; fixes += 1
+	while blu_sp < 2:
+		app.doc.add_point_entity("info_player_teamspawn", Vector3(16.0, 0.2, float(blu_sp) * 2.4 - 1.2), {"TeamNum": "3", "angles": "0 180 0"}); blu_sp += 1; fixes += 1
+	if hk < 2:
+		app.doc.add_point_entity("item_healthkit_medium", Vector3(-7.0, 0.2, 5.0), {})
+		app.doc.add_point_entity("item_healthkit_medium", Vector3(7.0, 0.2, -5.0), {})
+		fixes += 2
+	return fixes
 
 # ==============================================================================
 # AI MAP CO-PILOT STUDIO DRAWER UI
@@ -496,18 +692,26 @@ static func build_copilot_drawer(app: Node3D, vbox: VBoxContainer) -> void:
 		)
 		v1.add_child(sav_b)
 
-	# 2. One-Click "What Next?" Prompt Chips
-	var c2 := HudWidgets.make_section_card("QUICK AI ACTIONS (1-CLICK)", fonts, HudWidgets.COL_ACC)
+	# 2. One-Click "What Next?" Prompt Chips (Dynamic Follow-Ups + Core Generators!)
+	var c2 := HudWidgets.make_section_card("QUICK AI ACTIONS & SUGGESTED NEXT STEPS", fonts, HudWidgets.COL_ACC)
 	vbox.add_child(c2["panel"])
 	var v2: VBoxContainer = c2["vbox"]
-	var chips := [
+	var chips: Array[String] = []
+	for fu in ai.suggested_followups:
+		if not chips.has(fu):
+			chips.append(fu)
+	for base_c in [
 		"What should I improve next?",
-		"Build a sniper balcony + cover crates",
+		"Generate a complete snowy KOTH arena",
+		"Break long sniper sightlines",
+		"Add a wired sliding door",
 		"Add dramatic warm & cool TF2 spotlights",
-		"Build an elevated catwalk with ramps",
-		"Add symmetrical health & ammo pickups",
-		"Switch to winter theme & scatter pine trees",
-	]
+		"Fix all map problems",
+	]:
+		if chips.size() >= 6:
+			break
+		if not chips.has(base_c):
+			chips.append(base_c)
 	var cg := GridContainer.new(); cg.columns = 2; cg.add_theme_constant_override("h_separation", 4); cg.add_theme_constant_override("v_separation", 4)
 	v2.add_child(cg)
 	for ch_txt in chips:

@@ -108,6 +108,24 @@ func _build_shell() -> void:
 	sub.add_theme_color_override("font_color", HudWidgets.COL_TX_MUTED)
 	tvb.add_child(sub)
 
+	var tut_b := Button.new(); tut_b.text = "3-Min Tutorial"
+	HudWidgets.style_tf2_button(tut_b, fonts["heading"], 12)
+	tut_b.pressed.connect(func():
+		app.audio.play("click")
+		app._show_welcome_hub(false)
+		if app.tutorial_mgr != null: app.tutorial_mgr.start_quest("q1_first_arena")
+	)
+	hdr.add_child(tut_b)
+
+	var ai_b := Button.new(); ai_b.text = "Build with AI"
+	HudWidgets.style_tf2_button(ai_b, fonts["heading"], 12, false, 3)
+	ai_b.pressed.connect(func():
+		app.audio.play("click")
+		app._show_welcome_hub(false)
+		app._open_ai_copilot_drawer()
+	)
+	hdr.add_child(ai_b)
+
 	var set_b := Button.new(); set_b.text = "Settings"
 	HudWidgets.style_tf2_button(set_b, fonts["body"], 12)
 	set_b.pressed.connect(func(): app.audio.play("click"); app.settings_modal.open_modal())

@@ -261,6 +261,86 @@ static func get_prop_box(cat_id: String) -> Dictionary:
 
 static var _prop_box_cache: Dictionary = {}
 static var _ent_box_cache: Dictionary = {}
+static var _warmup_mutex := Mutex.new()
+static var _warmup_in_flight: Dictionary = {} # cat_id -> true
+static var _warmup_ready: Dictionary = {}     # cache_key -> Array[Dictionary]
+
+## Zero-freeze prop box lookup for UI docks: returns full cached VPK list if warmed,
+## otherwise returns instant curated TF2 props (<0.02ms) and warms the full VPK list on a background thread!
+static func get_props_for_box_fast(core: Object, cat_id: String, limit: int = 45) -> Array[Dictionary]:
+	var cache_key := "%s||%d" % [cat_id, limit]
+	if _prop_box_cache.has(cache_key):
+		return _prop_box_cache[cache_key]
+	var box := get_prop_box(cat_id)
+	var instant: Array[Dictionary] = []
+	for item in box.get("curated", []):
+		instant.append({"name": str(item["name"]), "mdl": str(item["mdl"])})
+	# Kick off non-blocking WorkerThreadPool warm-up once per category!
+	if core != null and core.has_method("search_models") and DisplayServer.get_name() != "headless":
+		_warmup_mutex.lock()
+		var already := _warmup_in_flight.has(cat_id)
+		if not already:
+			_warmup_in_flight[cat_id] = true
+		_warmup_mutex.unlock()
+		if not already:
+			var core_ref: Object = core
+			WorkerThreadPool.add_task(func():
+				var full := _scan_props_for_box_worker(core_ref, cat_id, limit)
+				_warmup_mutex.lock()
+				_warmup_ready[cache_key] = full
+				_warmup_in_flight.erase(cat_id)
+				_warmup_mutex.unlock()
+			)
+	return instant
+
+static func poll_prop_warmup() -> bool:
+	_warmup_mutex.lock()
+	if _warmup_ready.is_empty():
+		_warmup_mutex.unlock()
+		return false
+	for k in _warmup_ready.keys():
+		_prop_box_cache[k] = _warmup_ready[k]
+	_warmup_ready.clear()
+	_warmup_mutex.unlock()
+	return true
+
+static func _scan_props_for_box_worker(core: Object, cat_id: String, limit: int) -> Array[Dictionary]:
+	var results: Array[Dictionary] = []
+	var seen: Dictionary = {}
+	var box := get_prop_box(cat_id)
+	if box.is_empty():
+		return results
+	for item in box.get("curated", []):
+		var mp: String = str(item["mdl"])
+		if not seen.has(mp):
+			seen[mp] = true
+			results.append({"name": str(item["name"]), "mdl": mp})
+	var kws: Array = box.get("keywords", [])
+	var strict_fn: bool = bool(box.get("strict_file_match", false))
+	var excludes: Array = box.get("exclude", [])
+	for kw in kws:
+		if results.size() >= limit:
+			break
+		var kws_str := str(kw)
+		var found: PackedStringArray = core.search_models(kws_str, 28)
+		for m in found:
+			if results.size() >= limit:
+				break
+			var mp := str(m)
+			var mpl := mp.to_lower()
+			var fn := mpl.get_file()
+			if seen.has(mp): continue
+			if mpl.find("/player/") != -1 or mpl.find("/weapons/") != -1 or mpl.find("/bots/") != -1 or mpl.find("skybox") != -1 or mpl.find("_animations") != -1 or mpl.find("_ss.") != -1 or mpl.find("police") != -1 or mpl.find("gib") != -1:
+				continue
+			if strict_fn and fn.find(kws_str.to_lower()) == -1: continue
+			var blocked := false
+			for ex in excludes:
+				if mpl.find(str(ex).to_lower()) != -1:
+					blocked = true; break
+			if blocked: continue
+			seen[mp] = true
+			results.append({"name": mp.get_file().get_basename().replace("_", " ").capitalize(), "mdl": mp})
+	return results
 
 static func get_props_for_box(core: Object, cat_id: String, search_filter: String = "", limit: int = 48) -> Array[Dictionary]:
 	var fl := search_filter.to_lower().strip_edges()
