@@ -454,40 +454,40 @@ func _create_editor_helpers() -> void:
 	_clip_plane_mesh.visible = false
 	add_child(_clip_plane_mesh)
 
-	# 3D RGB Transform Axis Gizmo (shown on selected solid or entity!)
+	# 3D RGB Transform Axis Gizmo (LARGE, bold, camera-scaled arrows for effortless dragging!)
 	_gizmo_root = Node3D.new()
 	_gizmo_root.name = "TransformGizmo3D"
 	_gizmo_root.visible = false
 	add_child(_gizmo_root)
 	var axes := [
-		{"dir": Vector3.RIGHT,   "rot": Vector3(0, 0, -90), "col": Color(0.96, 0.24, 0.22, 0.96)},
-		{"dir": Vector3.UP,      "rot": Vector3(0, 0, 0),   "col": Color(0.24, 0.92, 0.36, 0.96)},
-		{"dir": Vector3.BACK,    "rot": Vector3(90, 0, 0),  "col": Color(0.24, 0.56, 0.98, 0.96)},
+		{"dir": Vector3.RIGHT,   "rot": Vector3(0, 0, -90), "col": Color(1.0, 0.24, 0.20, 1.0)},
+		{"dir": Vector3.UP,      "rot": Vector3(0, 0, 0),   "col": Color(0.22, 0.96, 0.38, 1.0)},
+		{"dir": Vector3.BACK,    "rot": Vector3(90, 0, 0),  "col": Color(0.22, 0.60, 1.0, 1.0)},
 	]
 	for ax in axes:
 		var amat := StandardMaterial3D.new()
 		amat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 		amat.no_depth_test = true
-		amat.render_priority = 10
+		amat.render_priority = 12
 		amat.albedo_color = ax["col"]
 		var shaft := MeshInstance3D.new()
-		var cm := CylinderMesh.new(); cm.top_radius = 0.045; cm.bottom_radius = 0.045; cm.height = 1.65
+		var cm := CylinderMesh.new(); cm.top_radius = 0.11; cm.bottom_radius = 0.11; cm.height = 2.80
 		shaft.mesh = cm; shaft.material_override = amat
 		shaft.rotation_degrees = ax["rot"]
-		shaft.position = (ax["dir"] as Vector3) * 0.85
+		shaft.position = (ax["dir"] as Vector3) * 1.45
 		_gizmo_root.add_child(shaft)
 		var tip := MeshInstance3D.new()
-		var tm2 := CylinderMesh.new(); tm2.top_radius = 0.0; tm2.bottom_radius = 0.14; tm2.height = 0.40
+		var tm2 := CylinderMesh.new(); tm2.top_radius = 0.0; tm2.bottom_radius = 0.34; tm2.height = 0.92
 		tip.mesh = tm2; tip.material_override = amat
 		tip.rotation_degrees = ax["rot"]
-		tip.position = (ax["dir"] as Vector3) * 1.85
+		tip.position = (ax["dir"] as Vector3) * 3.15
 		_gizmo_root.add_child(tip)
 	var gdot := MeshInstance3D.new()
-	var gs := SphereMesh.new(); gs.radius = 0.14; gs.height = 0.28
+	var gs := SphereMesh.new(); gs.radius = 0.26; gs.height = 0.52
 	gdot.mesh = gs
 	var dmat := StandardMaterial3D.new()
-	dmat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED; dmat.no_depth_test = true; dmat.render_priority = 11
-	dmat.albedo_color = Color(0.98, 0.82, 0.32, 1.0)
+	dmat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED; dmat.no_depth_test = true; dmat.render_priority = 13
+	dmat.albedo_color = Color(1.0, 0.85, 0.28, 1.0)
 	gdot.material_override = dmat
 	_gizmo_root.add_child(gdot)
 
@@ -2143,15 +2143,24 @@ func _update_3d_gizmo() -> void:
 		var bmax: Vector3 = info.get("bounds_max", Vector3.ZERO)
 		_gizmo_root.position = (bmin + bmax) * 0.5
 		_gizmo_root.visible = true
+		_update_gizmo_scale()
 	elif selected_entity >= 0:
 		var ents: Array = doc.get_entities()
 		if selected_entity < ents.size():
 			_gizmo_root.position = (ents[selected_entity]["pos"] as Vector3) + Vector3(0, 0.8, 0)
 			_gizmo_root.visible = true
+			_update_gizmo_scale()
 		else:
 			_gizmo_root.visible = false
 	else:
 		_gizmo_root.visible = false
+
+func _update_gizmo_scale() -> void:
+	if _gizmo_root == null or not _gizmo_root.visible or editor_cam == null:
+		return
+	var dist := editor_cam.position.distance_to(_gizmo_root.position)
+	var sc := clampf(dist * 0.068, 0.95, 2.6) * (1.18 if _dragging_gizmo else 1.0)
+	_gizmo_root.scale = Vector3(sc, sc, sc)
 
 func _show_welcome_hub(show: bool) -> void:
 	if show:
@@ -4058,10 +4067,11 @@ func _hit_test_gizmo_axis(ro: Vector3, rd: Vector3) -> Vector3:
 	if _gizmo_root == null or not _gizmo_root.visible:
 		return Vector3.ZERO
 	var orig := _gizmo_root.position
+	var sc: float = maxf(1.0, _gizmo_root.scale.x)
 	var best_ax := Vector3.ZERO
-	var best_dist := 0.36
+	var best_dist := 0.72 * sc
 	for ax: Vector3 in [Vector3.RIGHT, Vector3.UP, Vector3.BACK]:
-		var t := clampf(_project_ray_onto_axis(ro, rd, orig, ax), 0.15, 2.15)
+		var t := clampf(_project_ray_onto_axis(ro, rd, orig, ax), 0.2 * sc, 3.8 * sc)
 		var pt_on_ax := orig + ax * t
 		var s := maxf(0.0, (pt_on_ax - ro).dot(rd))
 		var pt_on_ray := ro + rd * s
@@ -4642,6 +4652,8 @@ func _process(delta: float) -> void:
 	if _toast_ttl > 0.0:
 		_toast_ttl -= delta
 		if _toast_ttl <= 0.0: toast_panel.visible = false
+	if _gizmo_root != null and _gizmo_root.visible:
+		_update_gizmo_scale()
 	if _prop_preview_mesh != null and is_instance_valid(_prop_preview_mesh):
 		_prop_preview_mesh.rotate_y(delta * 0.85)
 
@@ -5150,6 +5162,14 @@ func _setup_auto_shot(idx: int) -> void:
 			_open_ai_copilot_drawer()
 			cam_pos = Vector3(-18.0, 10.5, 15.0); editor_cam.look_at_from_position(cam_pos, Vector3(2.0, 1.8, -1.0), Vector3.UP)
 			cam_yaw = editor_cam.rotation.y; cam_pitch = editor_cam.rotation.x
+		"v19_fonts_arrows":
+			_set_lighting_mode(0); _show_welcome_hub(false); _load_gamemode("koth", "badlands", false); set_stage(Stage.BUILD)
+			minimap_enabled = false; diag_popover.visible = false; _sync_mode_visibility()
+			_select_solid(2, -1)
+			_open_ai_copilot_drawer()
+			cam_pos = Vector3(14.5, 9.5, 16.5); editor_cam.look_at_from_position(cam_pos, Vector3(0.0, 1.5, 0.0), Vector3.UP)
+			cam_yaw = editor_cam.rotation.y; cam_pitch = editor_cam.rotation.x
+			_update_gizmo_scale()
 	if not viewing_bsp and not settings_modal.visible:
 		_update_hover(get_viewport().get_visible_rect().size * Vector2(0.42, 0.52))
 

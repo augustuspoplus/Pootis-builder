@@ -22,30 +22,9 @@ const COL_GREEN    := Color(76.0 / 255.0, 188.0 / 255.0, 96.0 / 255.0, 1.0)
 const COL_TX       := Color(240.0 / 255.0, 230.0 / 255.0, 210.0 / 255.0, 1.0)
 const COL_TX_MUTED := Color(180.0 / 255.0, 168.0 / 255.0, 150.0 / 255.0, 1.0)
 
-static func load_fonts(tf2_dir: String = "") -> Dictionary:
-	var heading_font: Font = null
-	var body_font: Font = null
-	var mono_font: Font = null
-
-	# Prefer Valve's official installed TF2 fonts if present!
-	if not tf2_dir.is_empty():
-		var f_build := tf2_dir.path_join("tf/resource/tf2build.ttf")
-		var f_sec := tf2_dir.path_join("tf/resource/tf2secondary.ttf")
-		if FileAccess.file_exists(f_build):
-			var ff := FontFile.new()
-			if ff.load_dynamic_font(f_build) == OK:
-				ff.antialiasing = TextServer.FONT_ANTIALIASING_GRAY
-				ff.hinting = TextServer.HINTING_LIGHT
-				ff.subpixel_positioning = TextServer.SUBPIXEL_POSITIONING_AUTO
-				heading_font = ff
-		if FileAccess.file_exists(f_sec):
-			var ff2 := FontFile.new()
-			if ff2.load_dynamic_font(f_sec) == OK:
-				ff2.antialiasing = TextServer.FONT_ANTIALIASING_GRAY
-				ff2.hinting = TextServer.HINTING_LIGHT
-				ff2.subpixel_positioning = TextServer.SUBPIXEL_POSITIONING_AUTO
-				body_font = ff2
-
+static func load_fonts(_tf2_dir: String = "") -> Dictionary:
+	# Clean, ultra-legible studio typography using bundled IBM Plex Sans & IBM Plex Mono!
+	# Replaces jagged/cramped tf2secondary.ttf with razor-sharp, balanced studio weights.
 	var load_ttf := func(res_path: String) -> Font:
 		var abs_p := ProjectSettings.globalize_path(res_path)
 		if FileAccess.file_exists(abs_p):
@@ -54,17 +33,21 @@ static func load_fonts(tf2_dir: String = "") -> Dictionary:
 				ff.antialiasing = TextServer.FONT_ANTIALIASING_GRAY
 				ff.hinting = TextServer.HINTING_LIGHT
 				ff.subpixel_positioning = TextServer.SUBPIXEL_POSITIONING_AUTO
+				ff.oversampling = 2.0
 				return ff
 		return null
 
-	var fallback_semi: Font = load_ttf.call("res://assets/fonts/IBMPlexSans-SemiBold.ttf")
-	var fallback_reg: Font = load_ttf.call("res://assets/fonts/IBMPlexSans-Regular.ttf")
-	var fallback_mono: Font = load_ttf.call("res://assets/fonts/IBMPlexMono-Medium.ttf")
-	if heading_font == null:
-		heading_font = fallback_semi
+	var heading_font: Font = load_ttf.call("res://assets/fonts/IBMPlexSans-SemiBold.ttf")
+	var body_font: Font    = load_ttf.call("res://assets/fonts/IBMPlexSans-Medium.ttf")
 	if body_font == null:
-		body_font = fallback_reg if fallback_reg != null else fallback_semi
-	mono_font = fallback_mono if fallback_mono != null else body_font
+		body_font = load_ttf.call("res://assets/fonts/IBMPlexSans-Regular.ttf")
+	var mono_font: Font    = load_ttf.call("res://assets/fonts/IBMPlexMono-Medium.ttf")
+	if heading_font == null:
+		heading_font = body_font
+	if body_font == null:
+		body_font = heading_font
+	if mono_font == null:
+		mono_font = body_font
 
 	return {"heading": heading_font, "body": body_font, "mono": mono_font}
 

@@ -53,6 +53,7 @@ var _wire_mat_hov: StandardMaterial3D = null
 var _wire_mat_sel: StandardMaterial3D = null
 var _wire_mat_multi: StandardMaterial3D = null
 var _face_cone_mesh: CylinderMesh = null
+var _face_stem_mesh: CylinderMesh = null
 var _face_handle_mats: Dictionary = {}
 var _vert_box_mesh: BoxMesh = null
 var _vert_mat: StandardMaterial3D = null
@@ -296,7 +297,7 @@ func hit_test_face_handle(ray_origin: Vector3, ray_dir: Vector3) -> Dictionary:
 			continue
 		var closest := ray_origin + rd * proj
 		var dist := closest.distance_to(hp)
-		var grab_r := clampf(proj * 0.045, 0.34, 1.2)
+		var grab_r := clampf(proj * 0.068, 0.58, 1.9)
 		if dist < grab_r and proj < best_t:
 			best_t = proj
 			best = h
@@ -364,11 +365,16 @@ func _ensure_pooled_helpers() -> void:
 	if _face_cone_mesh == null:
 		_face_cone_mesh = CylinderMesh.new()
 		_face_cone_mesh.top_radius = 0.0
-		_face_cone_mesh.bottom_radius = 0.22
-		_face_cone_mesh.height = 0.52
+		_face_cone_mesh.bottom_radius = 0.44
+		_face_cone_mesh.height = 0.96
+	if _face_stem_mesh == null:
+		_face_stem_mesh = CylinderMesh.new()
+		_face_stem_mesh.top_radius = 0.14
+		_face_stem_mesh.bottom_radius = 0.14
+		_face_stem_mesh.height = 0.72
 	if _vert_box_mesh == null:
 		_vert_box_mesh = BoxMesh.new()
-		_vert_box_mesh.size = Vector3(0.28, 0.28, 0.28)
+		_vert_box_mesh.size = Vector3(0.42, 0.42, 0.42)
 		_vert_mat = StandardMaterial3D.new()
 		_vert_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 		_vert_mat.albedo_color = Color(1.0, 0.92, 0.18)
@@ -449,33 +455,42 @@ func _rebuild_selection_visuals() -> void:
 			_vertex_data.append({"pos": verts[vi], "vert_idx": vi, "solid_idx": selected_solid})
 		return
 
-	# 6 interactive 3D Push/Pull Face Handles (+X,-X,+Y,-Y,+Z,-Z)
+	# 6 interactive BIG 3D Push/Pull Face Arrows (+X,-X,+Y,-Y,+Z,-Z) with bold cone + stem!
 	var mid := (bmin + bmax) * 0.5
 	var dirs := [
-		{"n": Vector3(1, 0, 0),  "pos": Vector3(bmax.x + 0.55, mid.y, mid.z), "col": Color(0.95, 0.30, 0.22)},
-		{"n": Vector3(-1, 0, 0), "pos": Vector3(bmin.x - 0.55, mid.y, mid.z), "col": Color(0.95, 0.30, 0.22)},
-		{"n": Vector3(0, 1, 0),  "pos": Vector3(mid.x, bmax.y + 0.55, mid.z), "col": Color(0.98, 0.76, 0.18)},
-		{"n": Vector3(0, -1, 0), "pos": Vector3(mid.x, bmin.y - 0.55, mid.z), "col": Color(0.98, 0.76, 0.18)},
-		{"n": Vector3(0, 0, 1),  "pos": Vector3(mid.x, mid.y, bmax.z + 0.55), "col": Color(0.24, 0.66, 0.96)},
-		{"n": Vector3(0, 0, -1), "pos": Vector3(mid.x, mid.y, bmin.z - 0.55), "col": Color(0.24, 0.66, 0.96)},
+		{"n": Vector3(1, 0, 0),  "pos": Vector3(bmax.x + 1.05, mid.y, mid.z), "col": Color(0.98, 0.30, 0.22)},
+		{"n": Vector3(-1, 0, 0), "pos": Vector3(bmin.x - 1.05, mid.y, mid.z), "col": Color(0.98, 0.30, 0.22)},
+		{"n": Vector3(0, 1, 0),  "pos": Vector3(mid.x, bmax.y + 1.05, mid.z), "col": Color(1.0, 0.80, 0.16)},
+		{"n": Vector3(0, -1, 0), "pos": Vector3(mid.x, bmin.y - 1.05, mid.z), "col": Color(1.0, 0.80, 0.16)},
+		{"n": Vector3(0, 0, 1),  "pos": Vector3(mid.x, mid.y, bmax.z + 1.05), "col": Color(0.22, 0.68, 1.0)},
+		{"n": Vector3(0, 0, -1), "pos": Vector3(mid.x, mid.y, bmin.z - 1.05), "col": Color(0.22, 0.68, 1.0)},
 	]
 	for item in dirs:
-		var handle := MeshInstance3D.new()
-		handle.mesh = _face_cone_mesh
-		handle.material_override = _get_face_mat(item["col"])
-		handle.position = item["pos"]
+		var holder := Node3D.new()
+		holder.position = item["pos"]
 		var n: Vector3 = item["n"]
 		if n == Vector3(1, 0, 0):
-			handle.rotation_degrees = Vector3(0, 0, -90)
+			holder.rotation_degrees = Vector3(0, 0, -90)
 		elif n == Vector3(-1, 0, 0):
-			handle.rotation_degrees = Vector3(0, 0, 90)
+			holder.rotation_degrees = Vector3(0, 0, 90)
 		elif n == Vector3(0, -1, 0):
-			handle.rotation_degrees = Vector3(180, 0, 0)
+			holder.rotation_degrees = Vector3(180, 0, 0)
 		elif n == Vector3(0, 0, 1):
-			handle.rotation_degrees = Vector3(90, 0, 0)
+			holder.rotation_degrees = Vector3(90, 0, 0)
 		elif n == Vector3(0, 0, -1):
-			handle.rotation_degrees = Vector3(-90, 0, 0)
-		face_handles_root.add_child(handle)
+			holder.rotation_degrees = Vector3(-90, 0, 0)
+		var fmat := _get_face_mat(item["col"])
+		var cone := MeshInstance3D.new()
+		cone.mesh = _face_cone_mesh
+		cone.material_override = fmat
+		cone.position = Vector3(0, 0.28, 0)
+		holder.add_child(cone)
+		var stem := MeshInstance3D.new()
+		stem.mesh = _face_stem_mesh
+		stem.material_override = fmat
+		stem.position = Vector3(0, -0.45, 0)
+		holder.add_child(stem)
+		face_handles_root.add_child(holder)
 		_handle_data.append({"pos": item["pos"], "normal": n, "solid_idx": selected_solid})
 
 func _resolve_material(mpath: String, is_sky: bool) -> Material:
