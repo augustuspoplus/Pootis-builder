@@ -1,0 +1,23 @@
+; Engine configuration file.
+; Pootis Builder — Build B (Godot 4 Prototype)
+
+config_version=5
+
+[application]
+
+config/name="Pootis Builder (Godot 4 Prototype)"
+run/main_scene="res://scenes/Main.tscn"
+config/features=PackedStringArray("4.7", "Forward Plus")
+
+[display]
+
+window/size/viewport_width=1600
+window/size/viewport_height=950
+window/stretch/mode="disabled"
+
+[rendering]
+
+anti_aliasing/quality/msaa_3d=2
+lights_and_shadows/directional_shadow/size=4096
+lights_and_shadows/directional_shadow/soft_shadow_filter_quality=3
+environment/ssao/quality=2

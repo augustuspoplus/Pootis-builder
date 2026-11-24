@@ -6,22 +6,25 @@
 // from the approved UI direction, plus font handles and small widgets.
 namespace pb::ui {
 
-// Palette (matches the design mockups; sRGB hex in the comments).
+// Palette — Direction B: Warm TF2 Mann Co. Workshop charcoal/cream/amber + RED/BLU.
 namespace col {
-inline const ImVec4 bg0{0.086f, 0.094f, 0.106f, 1.0f};   // #16181b window/base
-inline const ImVec4 bg1{0.114f, 0.125f, 0.141f, 1.0f};   // #1d2024 panels
-inline const ImVec4 bg2{0.145f, 0.157f, 0.176f, 1.0f};   // #25282d inputs / raised
-inline const ImVec4 bg3{0.180f, 0.196f, 0.220f, 1.0f};   // #2e3238 hover
-inline const ImVec4 bd{0.200f, 0.216f, 0.243f, 1.0f};    // #33373e hairline
-inline const ImVec4 bd2{0.255f, 0.275f, 0.306f, 1.0f};   // #41464e strong border
-inline const ImVec4 tx{0.890f, 0.898f, 0.910f, 1.0f};    // #e3e5e8 text
-inline const ImVec4 dim{0.596f, 0.620f, 0.651f, 1.0f};   // #989ea6 muted
-inline const ImVec4 faint{0.424f, 0.447f, 0.478f, 1.0f}; // #6c727a hint
-inline const ImVec4 acc{0.925f, 0.604f, 0.267f, 1.0f};   // #ec9a44 accent
-inline const ImVec4 acc2{0.788f, 0.494f, 0.184f, 1.0f};  // #c97e2f accent deep
+inline const ImVec4 bg0{0.094f, 0.082f, 0.075f, 1.0f};   // #181513 window/base
+inline const ImVec4 bg1{0.118f, 0.102f, 0.090f, 1.0f};   // #1e1a17 panels
+inline const ImVec4 bg2{0.161f, 0.141f, 0.125f, 1.0f};   // #292420 cards / raised
+inline const ImVec4 bg3{0.200f, 0.173f, 0.153f, 1.0f};   // #332c27 hover
+inline const ImVec4 bd{0.227f, 0.200f, 0.176f, 1.0f};    // #3a332d hairline
+inline const ImVec4 bd2{0.302f, 0.267f, 0.235f, 1.0f};   // #4d443c strong border
+inline const ImVec4 tx{0.941f, 0.902f, 0.824f, 1.0f};    // #f0e6d2 warm parchment
+inline const ImVec4 dim{0.749f, 0.706f, 0.635f, 1.0f};   // #bfb4a2 muted
+inline const ImVec4 faint{0.541f, 0.498f, 0.439f, 1.0f}; // #8a7f70 hint
+inline const ImVec4 acc{0.898f, 0.529f, 0.169f, 1.0f};   // #e5872b TF2 amber
+inline const ImVec4 acc2{0.745f, 0.420f, 0.125f, 1.0f};  // #be6b20 amber deep
 inline const ImVec4 sel{0.329f, 0.655f, 0.886f, 1.0f};   // #54a7e2 selection
-inline const ImVec4 good{0.42f, 0.73f, 0.49f, 1.0f};     // checklist done
-inline const ImVec4 warn{0.91f, 0.51f, 0.36f, 1.0f};     // #e88259 error / warning
+inline const ImVec4 teamRed{0.722f, 0.220f, 0.231f, 1.0f}; // #b8383b TF2 RED
+inline const ImVec4 teamBlu{0.298f, 0.494f, 0.627f, 1.0f}; // #4c7ea0 TF2 BLU
+inline const ImVec4 cadCyan{0.000f, 0.898f, 1.000f, 1.0f}; // #00e5ff CAD accent
+inline const ImVec4 good{0.424f, 0.769f, 0.486f, 1.0f};    // #6cc47c checklist done
+inline const ImVec4 warn{0.910f, 0.470f, 0.320f, 1.0f};    // #e87852 warning / error
 }  // namespace col
 
 inline ImU32 u32(const ImVec4& c, float a = 1.0f) {
@@ -30,8 +33,9 @@ inline ImU32 u32(const ImVec4& c, float a = 1.0f) {
 
 // Font handles, valid after loadFonts().
 extern ImFont* fontUi;      // 16px regular  — default
-extern ImFont* fontUiMed;   // 16px medium   — labels, headers
-extern ImFont* fontBig;     // 21px semibold — titles
+extern ImFont* fontUiMed;   // 16px medium   — labels, headers (TF2 Secondary when available)
+extern ImFont* fontBig;     // 21px semibold — titles (TF2 Build when available)
+extern ImFont* fontTf2;     // 17px TF2 Build — HUD buttons, stage pills, counters
 extern ImFont* fontMono;    // 14.5px mono   — coordinates, keycaps
 
 // The UI scale currently in effect (set by applyStyle). 1.0 = 100%.

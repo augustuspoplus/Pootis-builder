@@ -13,6 +13,7 @@ namespace pb::ui {
 ImFont* fontUi = nullptr;
 ImFont* fontUiMed = nullptr;
 ImFont* fontBig = nullptr;
+ImFont* fontTf2 = nullptr;
 ImFont* fontMono = nullptr;
 float g_scale = 1.0f;
 std::string g_gpuRenderer;
@@ -42,9 +43,9 @@ void loadFonts(const char* exeDir, float scale) {
     // Font Awesome merged inline: sized just under the cap height, nudged onto
     // the text baseline, and given an advance close to its real glyph width so
     // "ICON  text" labels don't get a wide gap.
-    auto addWithIcons = [&](const char* file, float size, float iconScale = 0.88f) {
+    auto addWithIconsPath = [&](const std::string& fullPath, float size, float iconScale = 0.88f) {
         size = std::round(size * scale);
-        ImFont* f = io.Fonts->AddFontFromFileTTF((dir + file).c_str(), size, &text);
+        ImFont* f = io.Fonts->AddFontFromFileTTF(fullPath.c_str(), size, &text);
         ImFontConfig fa;
         fa.MergeMode = true;
         fa.PixelSnapH = true;
@@ -57,9 +58,35 @@ void loadFonts(const char* exeDir, float scale) {
         return f;
     };
 
-    fontUi = addWithIcons("IBMPlexSans-Regular.ttf", 16.0f);
-    fontUiMed = addWithIcons("IBMPlexSans-Medium.ttf", 16.0f);
-    fontBig = addWithIcons("IBMPlexSans-SemiBold.ttf", 20.0f);
+    // Detect authentic Valve TF2 fonts from the user's Steam TF2 install (never bundled in repo).
+    std::string tf2Res;
+    const char* kTf2Dirs[] = {
+        "C:/Program Files (x86)/Steam/steamapps/common/Team Fortress 2/tf/resource/",
+        "C:/Program Files/Steam/steamapps/common/Team Fortress 2/tf/resource/",
+        "D:/SteamLibrary/steamapps/common/Team Fortress 2/tf/resource/",
+        "E:/SteamLibrary/steamapps/common/Team Fortress 2/tf/resource/",
+    };
+    for (const char* cand : kTf2Dirs) {
+        if (fileExists(std::string(cand) + "tf2build.ttf")) {
+            tf2Res = cand;
+            break;
+        }
+    }
+
+    fontUi = addWithIconsPath(dir + "IBMPlexSans-Regular.ttf", 15.5f);
+    if (!tf2Res.empty() && fileExists(tf2Res + "tf2secondary.ttf")) {
+        fontUiMed = addWithIconsPath(tf2Res + "tf2secondary.ttf", 17.5f, 0.82f);
+    } else {
+        fontUiMed = addWithIconsPath(dir + "IBMPlexSans-Medium.ttf", 16.0f);
+    }
+    if (!tf2Res.empty() && fileExists(tf2Res + "tf2build.ttf")) {
+        fontTf2 = addWithIconsPath(tf2Res + "tf2build.ttf", 16.5f, 0.82f);
+        fontBig = addWithIconsPath(tf2Res + "tf2build.ttf", 22.0f, 0.78f);
+        PB_INFO("Loaded authentic Valve TF2 fonts from %s", tf2Res.c_str());
+    } else {
+        fontTf2 = addWithIconsPath(dir + "IBMPlexSans-SemiBold.ttf", 16.5f);
+        fontBig = addWithIconsPath(dir + "IBMPlexSans-SemiBold.ttf", 20.0f);
+    }
     fontMono = io.Fonts->AddFontFromFileTTF((dir + "IBMPlexMono-Regular.ttf").c_str(),
                                             std::round(14.5f * scale), &text);
     io.FontDefault = fontUi;
@@ -69,7 +96,7 @@ void loadFonts(const char* exeDir, float scale) {
 void rebuildFonts(const char* exeDir, float scale) {
     ImGuiIO& io = ImGui::GetIO();
     io.Fonts->Clear();  // the renderer backend re-uploads the atlas next frame
-    fontUi = fontUiMed = fontBig = fontMono = nullptr;
+    fontUi = fontUiMed = fontBig = fontTf2 = fontMono = nullptr;
     loadFonts(exeDir, scale);
     applyStyle(scale);
 }
@@ -143,9 +170,9 @@ void applyStyle(float scale) {
     c[ImGuiCol_ResizeGripActive] = col::acc;
     c[ImGuiCol_Tab] = col::bg1;
     c[ImGuiCol_TabHovered] = col::bg3;
-    c[ImGuiCol_TabActive] = col::bg3;
-    c[ImGuiCol_TabUnfocused] = col::bg1;
-    c[ImGuiCol_TabUnfocusedActive] = col::bg2;
+    c[ImGuiCol_TabSelected] = col::bg3;
+    c[ImGuiCol_TabDimmed] = col::bg1;
+    c[ImGuiCol_TabDimmedSelected] = col::bg2;
     c[ImGuiCol_DockingPreview] = ImVec4(col::acc.x, col::acc.y, col::acc.z, 0.32f);
     c[ImGuiCol_DockingEmptyBg] = col::bg0;
     c[ImGuiCol_PlotLines] = col::dim;

@@ -1,0 +1,10262 @@
+#include "app/Editor.h"
+
+#include <algorithm>
+#include <cstdio>
+#include <cstdlib>
+#include <chrono>
+#include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <functional>
+#include <initializer_list>
+#include <unordered_map>
+#include <utility>
+
+#include <imgui.h>
+#include <imgui_internal.h>
+#include <ImGuizmo.h>
+
+#include <glm/gtc/matrix_transform.hpp>
+
+#include "IconsFontAwesome6.h"
+#include "app/PropWidgets.h"
+#include "app/Ui.h"
+#include "core/File.h"
+#include "core/Log.h"
+#include "gpu/Gl.h"
+#include "decompile/BspSource.h"
+#include <stb_image_write.h>
+
+#include "import/ModelImport.h"
+#include "import/ObjModel.h"
+#include "map/MapMesh.h"
+#include "ai/AiBackend.h"
+#include "ai/Greybox.h"
+#include "ai/MaterialSuggest.h"
+#include "net/Http.h"
+#include "net/Json.h"
+#include "publish/AssetScan.h"
+#include "publish/Workshop.h"
+#include "map/Raycast.h"
+#include "model/StudioModel.h"
+#include "platform/FileDialog.h"
+
+namespace fs = std::filesystem;
+
+namespace pb {
+namespace {
+constexpr float kDeg2Rad = 3.14159265358979323846f / 180.0f;
+
+const char* kTf2Maps =
+    "C:/Program Files (x86)/Steam/steamapps/common/Team Fortress 2/tf/maps";
+
+void dropCallback(GLFWwindow* w, int count, const char** paths);
+}  // namespace
+
+namespace {
+void dropCallback(GLFWwindow* w, int count, const char** paths) {
+    auto* self = static_cast<Editor*>(glfwGetWindowUserPointer(w));
+    if (self && count > 0 && paths && paths[0]) self->openMap(paths[0]);
+}
+}  // namespace
+
+void Editor::promptOpenMap() {
+    const char* dir = fs::exists(kTf2Maps) ? kTf2Maps : nullptr;
+    const std::string picked = openFileDialog(
+        "Open a map",
+        "Source maps (*.bsp *.vmf)\0*.bsp;*.vmf\0Compiled BSP\0*.bsp\0Hammer VMF\0*.vmf\0"
+        "All files\0*.*\0\0",
+        dir);
+    if (!picked.empty()) openMap(picked);
+}
+
+bool Editor::init(GLFWwindow* window) {
+    window_ = window;
+    if (!renderer_.init()) return false;
+    glfwSetWindowUserPointer(window, this);
+    glfwSetDropCallback(window, dropCallback);
+
+    sourceFs_.mountDefaults(executableDir());
+    materials_.init(&sourceFs_);
+    modelThumbs_.init(160);
+    loadFgd();
+
+    const char* titles[4] = {"3D View", "Top (x/y)", "Front (x/z)", "Side (y/z)"};
+    const ViewKind kinds[4] = {ViewKind::Perspective, ViewKind::Top, ViewKind::Front,
+                               ViewKind::Side};
+    for (int i = 0; i < 4; ++i) {
+        views_[i].title = titles[i];
+        views_[i].kind = kinds[i];
+        views_[i].camera.kind = kinds[i];
+    }
+    return true;
+}
+
+void Editor::shutdown() {
+    if (decompileThread_.joinable()) decompileThread_.join();
+    if (aiThread_.joinable()) aiThread_.join();
+    prefs_.save();
+    renderer_.clearWorld();
+}
+
+void Editor::attachSettings(Settings s, float effectiveScale) {
+    prefs_ = std::move(s);
+    uiScale_ = effectiveScale;
+    showWelcome_ = prefs_.showWelcome;
+    applyPrefs();
+}
+
+void Editor::applyPrefs() {
+    gridSize_ = std::clamp(prefs_.gridSize, 1, 4096);
+    snap_ = prefs_.snap;
+    flySpeed_ = prefs_.flySpeed;
+    autosaveOn_ = prefs_.autosave;
+    autosaveMins_ = prefs_.autosaveMins;
+    settings_.shadeMode = static_cast<ShadeMode>(std::clamp(prefs_.shadeMode, 0, 3));
+    gizmoSize_ = std::clamp(prefs_.gizmoSize, 0.08f, 0.4f);
+    gizmoStyle_ = std::clamp(prefs_.gizmoStyle, 0, 2);
+    perfMode_ = std::clamp(prefs_.perfMode, 0, 2);
+    mode_ = static_cast<Mode>(std::clamp(prefs_.workspaceDial, 0, 2));
+    settings_.showGrid = prefs_.showGrid;
+    settings_.showProps = prefs_.showProps;
+    settings_.showPointEntities = prefs_.showPointEntities;
+    settings_.wireOverlay = prefs_.wireOverlay;
+    settings_.exposure = prefs_.exposure;
+    meshOpts_.lightmapGain = prefs_.lightmapGain;
+    meshOpts_.bakeProps = prefs_.bakeProps;
+    suppressAutoDecompile_ = !prefs_.autoDecompile;
+}
+
+void Editor::requestUiScale(float scale) {
+    scale = std::clamp(scale, 0.75f, 2.5f);
+    if (scale == uiScale_) return;
+    uiScale_ = scale;
+    scaleDirty_ = true;
+    prefs_.uiScale = scale;
+    prefs_.save();
+}
+
+bool Editor::takeFontRebuild(float& outScale) {
+    if (!scaleDirty_) return false;
+    outScale = uiScale_;
+    scaleDirty_ = false;
+    return true;
+}
+
+bool Editor::openMap(const std::string& path) {
+    clearSelection();
+    const std::string ext = [&] {
+        std::string e = fs::path(path).extension().string();
+        std::transform(e.begin(), e.end(), e.begin(), ::tolower);
+        return e;
+    }();
+
+    if (ext == ".pbproj") {
+        openProject(path);
+        return hasDoc();
+    }
+
+    if (ext == ".vmf") {
+        std::string err;
+        if (!doc_.loadVmf(path, &err)) {
+            status_ = "Failed to load VMF: " + err;
+            return false;
+        }
+        bsp_ = BspFile{};
+        history_.reset(doc_);
+        buildAndUpload(meshOpts_);
+        frameAllViews();
+        status_ = doc_.name() + "  —  " + std::to_string(doc_.worldSolids().size()) +
+                  " brushes, " + std::to_string(doc_.entities().size()) + " entities";
+        prefs_.pushRecent(path);
+        prefs_.save();
+        showWelcome_ = false;
+        return true;
+    }
+
+    if (ext != ".bsp") {
+        status_ = "Open a .bsp or .vmf: " + path;
+        PB_WARN("%s", status_.c_str());
+        return false;
+    }
+
+    std::string err;
+    if (!bsp_.load(path, &err)) {
+        status_ = "Failed to load: " + err;
+        return false;
+    }
+    doc_.clear();
+    buildAndUpload(meshOpts_);
+    frameAllViews();
+    status_ = bsp_.name() + "  —  " + std::to_string(mesh_.drawnFaces) + " faces, " +
+              std::to_string(mesh_.pointEntities.size()) + " point ents, " +
+              std::to_string(mesh_.props.size()) + " props";
+    prefs_.pushRecent(path);
+    prefs_.save();
+    showWelcome_ = false;
+
+    // Q1: auto-decompile to editable brushes in the background.
+    if (!suppressAutoDecompile_ && !decompileRunning_ &&
+        decompile::available(executableDir())) {
+        decompileRunning_ = true;
+        decompileDone_ = false;
+        decompileVmf_.clear();
+        decompileErr_.clear();
+        const std::string exeDir = executableDir();
+        const std::string bsp = path;
+        status_ = bsp_.name() + " — decompiling to editable brushes…";
+        decompileThread_ = std::thread([this, exeDir, bsp] {
+            std::string err2;
+            decompileVmf_ = decompile::bspToVmf(exeDir, bsp, &err2);
+            decompileErr_ = err2;
+            decompileDone_ = true;
+        });
+    }
+    return true;
+}
+
+void Editor::pollDecompile() {
+    if (!decompileDone_) return;
+    if (decompileThread_.joinable()) decompileThread_.join();
+    decompileDone_ = false;
+    decompileRunning_ = false;
+
+    if (decompileVmf_.empty()) {
+        status_ = "Decompile failed: " + decompileErr_ + " (viewing the raw BSP)";
+        return;
+    }
+    std::string err;
+    if (doc_.loadVmf(decompileVmf_, &err)) {
+        history_.reset(doc_);
+        clearSelection();
+        buildAndUpload(meshOpts_);
+        status_ = doc_.name() + " — editable: " +
+                  std::to_string(doc_.worldSolids().size()) + " brushes, " +
+                  std::to_string(doc_.entities().size()) + " entities  "
+                  "(decompile is approximate)";
+    } else {
+        status_ = "Loaded decompile but parse failed: " + err;
+    }
+}
+
+bool Editor::heavyDoc() const {
+    // Rough: a decompiled map or anything with a lot of geometry / props.
+    return doc_.worldSolids().size() + doc_.entities().size() > 900 ||
+           mesh_.indices.size() > 600000 || mesh_.props.size() > 120;
+}
+bool Editor::fastEdit() const {
+    return perfMode_ == 2 || (perfMode_ == 0 && heavyDoc());
+}
+
+namespace {
+size_t hashProps(const std::vector<bsp::PropInstance>& props) {
+    size_t h = 1469598103934665603ull;
+    auto mix = [&](size_t v) { h = (h ^ v) * 1099511628211ull; };
+    for (const auto& p : props) {
+        mix(std::hash<std::string>{}(p.model));
+        mix(std::hash<float>{}(p.pos.x) ^ (std::hash<float>{}(p.pos.y) << 1) ^
+            (std::hash<float>{}(p.pos.z) << 2));
+        mix(std::hash<float>{}(p.anglesPYR.x + p.anglesPYR.y * 7.0f +
+                               p.anglesPYR.z * 53.0f + p.scale * 131.0f));
+    }
+    return h;
+}
+}  // namespace
+
+void Editor::buildAndUpload(const MeshBuildOptions& opts) {
+    const auto t0 = std::chrono::steady_clock::now();
+    if (doc_.active()) {
+        auto modelForClass = [this](const std::string& cls) -> std::string {
+            const fgd::EntityClass* ec = fgd_.flattened(cls);
+            return ec ? ec->studioModel : std::string();
+        };
+        mesh_ = map::buildDocMesh(doc_, materials_, modelForClass);
+        // Fast mode on a prop-dense map: don't bake model geometry at all
+        // (they draw as their bounding boxes). Turns an 18 s decompile bake
+        // into ~1 s; edits stay instant either way via the cache below.
+        const bool bakeHere = opts.bakeProps && !mesh_.props.empty() &&
+                              !(perfMode_ == 2 && mesh_.props.size() > 200);
+        if (bakeHere) {
+            const size_t key = hashProps(mesh_.props);
+            if (key == propBlobKey_ && !propBlob_.verts.empty()) {
+                // Props unchanged — splice the cached geometry back in instead
+                // of re-transforming every model. This is the big edit-latency
+                // win on decompiled maps.
+                const uint32_t vbase = (uint32_t)mesh_.vertices.size();
+                mesh_.vertices.insert(mesh_.vertices.end(),
+                                      propBlob_.verts.begin(), propBlob_.verts.end());
+                for (const auto& b : propBlob_.batches) {
+                    bsp::DrawBatch nb = b;
+                    nb.firstIndex = (uint32_t)mesh_.indices.size();
+                    for (uint32_t k = 0; k < b.indexCount; ++k)
+                        mesh_.indices.push_back(vbase +
+                            propBlob_.indices[b.firstIndex + k]);
+                    mesh_.batches.push_back(std::move(nb));
+                }
+                for (auto& p : mesh_.props) p.baked = true;
+            } else {
+                // First time, or props changed — do the real bake and snapshot
+                // the appended range so the next edit is cheap.
+                const uint32_t v0 = (uint32_t)mesh_.vertices.size();
+                const uint32_t i0 = (uint32_t)mesh_.indices.size();
+                const size_t b0 = mesh_.batches.size();
+                model::bakePropModels(mesh_, sourceFs_);
+                propBlob_ = {};
+                propBlob_.verts.assign(mesh_.vertices.begin() + v0, mesh_.vertices.end());
+                propBlob_.indices.reserve(mesh_.indices.size() - i0);
+                for (size_t k = i0; k < mesh_.indices.size(); ++k)
+                    propBlob_.indices.push_back(mesh_.indices[k] - v0);
+                for (size_t k = b0; k < mesh_.batches.size(); ++k) {
+                    bsp::DrawBatch cb = mesh_.batches[k];
+                    cb.firstIndex -= i0;
+                    propBlob_.batches.push_back(std::move(cb));
+                }
+                propBlobKey_ = key;
+            }
+        }
+    } else {
+        mesh_ = buildWorldMesh(bsp_, opts);
+        if (opts.bakeProps) model::bakePropModels(mesh_, sourceFs_);
+    }
+
+    // Baked prop geometry is appended after the mesh computes its bounds; grow
+    // the framing bounds to include it so a lone dropped prop isn't a speck.
+    if (doc_.active() && !mesh_.vertices.empty()) {
+        glm::vec3 mn(1e30f), mx(-1e30f);
+        for (const auto& v : mesh_.vertices) {
+            mn = glm::min(mn, v.pos);
+            mx = glm::max(mx, v.pos);
+        }
+        if (mn.x <= mx.x) {
+            mesh_.boundsMin = glm::min(mesh_.boundsMin, mn);
+            mesh_.boundsMax = glm::max(mesh_.boundsMax, mx);
+            mesh_.playBoundsMin = glm::min(mesh_.playBoundsMin, mn - glm::vec3(64));
+            mesh_.playBoundsMax = glm::max(mesh_.playBoundsMax, mx + glm::vec3(64));
+        }
+    }
+
+    renderer_.upload(mesh_, &materials_);
+
+    int textured = 0, missing = 0, shown = 0;
+    for (const auto& b : mesh_.batches) {
+        const auto& info = materials_.get(b.material);
+        if (info.width > 0) {
+            ++textured;
+        } else {
+            ++missing;
+            if (shown++ < 12) PB_WARN("no texture for material: %s", b.material.c_str());
+        }
+    }
+    const double ms = std::chrono::duration<double, std::milli>(
+                          std::chrono::steady_clock::now() - t0)
+                          .count();
+    if (ms > 30.0)
+        PB_INFO("mesh rebuild: %.0f ms  (%zu verts, %zu tris, %s)", ms,
+                mesh_.vertices.size(), mesh_.indices.size() / 3,
+                fastEdit() ? "fast" : "quality");
+}
+
+void Editor::frameAllViews() {
+    for (auto& v : views_) v.camera.frameBounds(mesh_.playBoundsMin, mesh_.playBoundsMax);
+
+    // Open the 3D view inside the map at a spawn, the way Hammer does.
+    if (mesh_.hasSpawn) {
+        Camera& c = views_[0].camera;
+        c.pos = mesh_.spawnPos;
+        c.yawDeg = mesh_.spawnYaw;
+        c.pitchDeg = -8.0f;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Frame
+// ---------------------------------------------------------------------------
+void Editor::frame() {
+    pollDecompile();
+    compiler_.poll();
+    pollAi();
+    // Compile just finished? If vbsp left a leak pointfile, load and show it.
+    if (compileWasRunning_ && !compiler_.running()) {
+        const std::string lf = compiler_.leakFile();
+        if (!lf.empty()) loadPointfile(lf);
+    }
+    compileWasRunning_ = compiler_.running();
+    ImGuizmo::BeginFrame();
+    docMeshDirty_ = false;
+    ImGuiViewport* vp = ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos(vp->WorkPos);
+    ImGui::SetNextWindowSize(vp->WorkSize);
+    ImGui::SetNextWindowViewport(vp->ID);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+    ImGuiWindowFlags host = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoCollapse |
+                            ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
+                            ImGuiWindowFlags_NoBringToFrontOnFocus |
+                            ImGuiWindowFlags_NoNavFocus;
+    ImGui::Begin("##PootisHost", nullptr, host);
+    ImGui::PopStyleVar(3);
+
+    drawTopBar();
+
+    const ImGuiID dockId = ImGui::GetID("PootisDockV3");
+    if (layoutDirty_ || !ImGui::DockBuilderGetNode(dockId)) {
+        buildDockLayout(dockId, ImGui::GetContentRegionAvail());
+        layoutDirty_ = false;
+    }
+    ImGui::DockSpace(dockId, ImVec2(0, 0), ImGuiDockNodeFlags_PassthruCentralNode);
+    ImGui::End();
+
+    // A modal G/R/S transform owns the keyboard until it commits or cancels.
+    updateModalXform();
+
+    // ---- global keyboard shortcuts -------------------------------------------
+    // Raw key state (not ImGui's focus-routed chords) so they fire no matter
+    // which panel has focus. Suppressed only while typing in a text field.
+    if (mx_.op == 0) {
+        ImGuiIO& io = ImGui::GetIO();
+        const bool ctrl = io.KeyCtrl;
+        const bool shift = io.KeyShift;
+        const bool typing = io.WantTextInput;
+        auto tap = [&](ImGuiKey k) { return ImGui::IsKeyPressed(k, false); };
+        auto ck = [&](ImGuiKey k) { return !typing && ctrl && tap(k); };
+        auto pk = [&](ImGuiKey k) { return !typing && !ctrl && tap(k); };
+
+        if (ck(ImGuiKey_O)) promptOpenMap();
+        if (ck(ImGuiKey_Z)) { shift ? redo() : undo(); }
+        if (ck(ImGuiKey_Y)) redo();
+        if (ck(ImGuiKey_S) && hasDoc()) saveMap(shift);  // Ctrl+Shift+S = Save As
+        if (ck(ImGuiKey_K)) showPalette_ = true;
+        if (ck(ImGuiKey_C)) copySelection();
+        if (ck(ImGuiKey_V)) pasteClipboard();
+        if (ck(ImGuiKey_X)) { copySelection(); deleteSelection(); }
+        if (ck(ImGuiKey_D)) duplicateSelection();
+        if (ck(ImGuiKey_A) && hasDoc()) {
+            selection_.clear();
+            for (int i = 0; i < (int)doc_.worldSolids().size(); ++i)
+                selection_.push_back({-1, i});
+            rebuildSelectionWire();
+            status_ = "Selected all brushes";
+        }
+        if (ck(ImGuiKey_B) && hasDoc()) {
+            showCompile_ = true;
+            if (!compiler_.running()) startCompile();
+        }
+        if (pk(ImGuiKey_Delete) || pk(ImGuiKey_Backspace)) deleteSelection();
+        if (pk(ImGuiKey_F) && hasMap()) frameAllViews();
+        if (pk(ImGuiKey_F1)) showKeys_ = !showKeys_;
+        if (!typing && tap(ImGuiKey_Escape)) {
+            if (!placing_.empty()) { placing_.clear(); roadPts_.clear(); roadActive_ = false; }
+            else clearSelection();
+        }
+        if (pk(ImGuiKey_LeftBracket)) rotateSelection(2, shift ? 15.0f : -15.0f);
+        if (pk(ImGuiKey_RightBracket)) rotateSelection(2, shift ? -15.0f : 15.0f);
+        // Blender-style modal transform: G move / R rotate / S scale — with a
+        // selection, not while RMB-flying, not while typing.
+        if (hasDoc() && !typing && !ctrl && !selection_.empty() &&
+            tool_ == Tool::Select &&
+            !ImGui::IsMouseDown(ImGuiMouseButton_Right)) {
+            if (tap(ImGuiKey_G)) beginModalXform(1);
+            if (tap(ImGuiKey_R)) beginModalXform(2);
+            if (tap(ImGuiKey_S)) beginModalXform(3);
+            // Pro gizmo mode still on W/E/R.
+            if (mode_ == Mode::Full) {
+                if (tap(ImGuiKey_W)) gizmoMode_ = 0;
+                if (tap(ImGuiKey_E)) gizmoMode_ = 1;
+            }
+        }
+    }
+
+    autosaveTick();
+    drawKeysOverlay();
+    drawSettingsWindow();
+
+    if (mode_ != Mode::Full) {
+        drawBuildKit();
+        drawTextureBrowser();  // tabbed with Build Kit; feeds the Surface tool
+        drawSelectionPanel();
+        drawHistoryPanel();
+        if (mode_ == Mode::Standard) {  // one step up: the grown-up panels appear
+            drawOutliner();
+            drawMapCheckPanel();
+        }
+    } else {
+        drawProperties();
+        drawOutliner();
+        drawTextureBrowser();
+        drawModelBrowser();
+        drawMaterialList();
+        drawEntityCatalog();
+        drawHistoryPanel();
+        drawMapCheckPanel();
+        drawLogPanel();
+        drawPrefabPanel();
+        drawVisgroupsPanel();
+    }
+    for (int i = 0; i < 4; ++i)
+        if (viewOpen_[i]) drawViewportPanel(views_[i], i == 0 ? nullptr : &viewOpen_[i]);
+
+    // Manual drag-and-drop: a menu card set dragPlace_ while being dragged;
+    // when the mouse is released over a viewport, drop it there. (ImGui's own
+    // drag-drop target proved unreliable across docked windows here.)
+    if (!dragPlace_.empty() && !ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+        const ImVec2 m = ImGui::GetMousePos();
+        for (auto& v : views_) {
+            const glm::vec2 mn = v.contentMin, sz = v.contentSize;
+            if (sz.x > 1 && m.x >= mn.x && m.x < mn.x + sz.x && m.y >= mn.y &&
+                m.y < mn.y + sz.y) {
+                const glm::vec3 at = dropWorldPoint(v, m);
+                PB_INFO("drop '%s' @ (%.0f %.0f %.0f)", dragPlace_.c_str(), at.x, at.y,
+                        at.z);
+                placeFromPayload(dragPlace_, at);
+                break;
+            }
+        }
+        dragPlace_.clear();
+    }
+
+    drawStatusBar();
+    drawCompileWindow();
+    drawModelImportDialog();
+    drawWorkshopWindow();
+    drawCommandPalette();
+    drawWelcome();
+
+    if (focusPanelFrames_ > 0) {
+        ImGui::SetWindowFocus(focusPanel_.c_str());
+        --focusPanelFrames_;
+    }
+
+    // Live preview while dragging (gizmo, bbox handles, body-move, sub-object).
+    // History is recorded once on release.
+    const bool dragging =
+        gizmoUsing_ || resizeHandle_ >= 0 || moveDrag_ != 0 || subDragging_ ||
+        mx_.op != 0;
+    if (docMeshDirty_ && dragging) {
+        // Heavy map: the selection wireframe follows the cursor every frame, but
+        // the solid mesh only rebuilds on release — a full rebuild per frame is
+        // what makes big maps feel stuck.
+        if (fastEdit()) {
+            rebuildSelectionWire();
+        } else {
+            MeshBuildOptions o = meshOpts_;
+            if (mesh_.props.size() > 40) o.bakeProps = false;
+            buildAndUpload(o);
+            rebuildSelectionWire();
+        }
+    }
+}
+
+void Editor::buildDockLayout(unsigned int dockId, const ImVec2& size) {
+    ImGui::DockBuilderRemoveNode(dockId);
+    ImGui::DockBuilderAddNode(dockId, ImGuiDockNodeFlags_DockSpace);
+    ImGui::DockBuilderSetNodeSize(dockId, size.x > 0 ? size : ImVec2(1600, 900));
+
+    if (mode_ != Mode::Full) {
+        ImGuiID left, rest, right, center;
+        left = ImGui::DockBuilderSplitNode(dockId, ImGuiDir_Left, 0.28f, nullptr, &rest);
+        right = ImGui::DockBuilderSplitNode(rest, ImGuiDir_Right, 0.22f, nullptr, &center);
+        ImGui::DockBuilderDockWindow("Build Kit", left);
+        ImGui::DockBuilderDockWindow("Textures", left);  // reachable for the Surface tool
+        ImGui::DockBuilderDockWindow("Selection", right);
+        ImGui::DockBuilderDockWindow("History", right);
+        // Standard tier: the outliner + map check tab in on the right.
+        ImGui::DockBuilderDockWindow("Contents", right);
+        ImGui::DockBuilderDockWindow("Map Check", right);
+        ImGui::DockBuilderDockWindow("Top (x/y)", center);
+        ImGui::DockBuilderDockWindow("Front (x/z)", center);
+        ImGui::DockBuilderDockWindow("Side (y/z)", center);
+        ImGui::DockBuilderDockWindow("3D View", center);
+    } else {
+        ImGuiID left, center;
+        left = ImGui::DockBuilderSplitNode(dockId, ImGuiDir_Left, 0.215f, nullptr, &center);
+        ImGui::DockBuilderDockWindow("Properties", left);
+        ImGui::DockBuilderDockWindow("Contents", left);
+        ImGui::DockBuilderDockWindow("Textures", left);
+        ImGui::DockBuilderDockWindow("Models", left);
+        ImGui::DockBuilderDockWindow("Materials", left);
+        ImGui::DockBuilderDockWindow("Entities", left);
+        ImGui::DockBuilderDockWindow("History", left);
+        ImGui::DockBuilderDockWindow("Map Check", left);
+        ImGui::DockBuilderDockWindow("Log", left);
+        ImGui::DockBuilderDockWindow("Prefabs", left);
+        ImGui::DockBuilderDockWindow("Visgroups", left);
+        // 3D is primary; Top/Front/Side tab onto it and are opened on demand.
+        ImGui::DockBuilderDockWindow("3D View", center);
+        ImGui::DockBuilderDockWindow("Top (x/y)", center);
+        ImGui::DockBuilderDockWindow("Front (x/z)", center);
+        ImGui::DockBuilderDockWindow("Side (y/z)", center);
+    }
+    ImGui::DockBuilderFinish(dockId);
+}
+
+// ---------------------------------------------------------------------------
+// Top bar
+// ---------------------------------------------------------------------------
+void Editor::drawTopBar() {
+    using namespace pb::ui;
+    const float row = ImGui::GetFrameHeight();
+    const float barH = std::round(row + dp(18.0f));
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, col::bg1);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(dp(12.0f), 0));
+    ImGui::BeginChild("##topbar", ImVec2(0, barH), ImGuiChildFlags_None,
+                      ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+    ImGui::PopStyleVar();
+
+    // Narrow window: drop the wordmark, collapse file buttons + 2D toggles to
+    // icons so Publish / Build & play never get clipped.
+    const bool narrow = ImGui::GetWindowWidth() < dp(1580.0f);
+
+    ImGui::SetCursorPosY((barH - row) * 0.5f);
+
+    // Brand
+    ImGui::PushStyleColor(ImGuiCol_Text, col::acc);
+    if (fontBig) ImGui::PushFont(fontBig);
+    ImGui::TextUnformatted(ICON_FA_CUBES);
+    if (fontBig) ImGui::PopFont();
+    ImGui::PopStyleColor();
+    if (!narrow) {
+        ImGui::SameLine(0, dp(8.0f));
+        if (fontUiMed) ImGui::PushFont(fontUiMed);
+        ImGui::SetCursorPosY((barH - ImGui::GetTextLineHeight()) * 0.5f);
+        ImGui::TextUnformatted("Pootis Builder");
+        if (fontUiMed) ImGui::PopFont();
+    }
+
+    ImGui::SameLine(0, dp(narrow ? 12.0f : 18.0f));
+    ImGui::SetCursorPosY((barH - row) * 0.5f);
+    if (toolButton(narrow ? ICON_FA_FOLDER_OPEN : ICON_FA_FOLDER_OPEN "  Open",
+                   false, "Open a .bsp  (Ctrl+O)"))
+        promptOpenMap();
+    ImGui::SameLine(0, dp(2.0f));
+    if (toolButton(narrow ? ICON_FA_DOWNLOAD : ICON_FA_DOWNLOAD "  Import", false,
+                   narrow ? "Import" : nullptr))
+        ImGui::OpenPopup("importMenu");
+    if (ImGui::BeginPopup("importMenu")) {
+        if (ImGui::MenuItem(ICON_FA_MAP "  Map  (.bsp / .vmf)")) promptOpenMap();
+        if (ImGui::MenuItem(ICON_FA_CUBE "  3D model  (.obj)")) openModelImport();
+        ImGui::EndPopup();
+    }
+    ImGui::SameLine(0, dp(2.0f));
+    if (toolButton(narrow ? ICON_FA_FLOPPY_DISK : ICON_FA_FLOPPY_DISK "  Save",
+                   false,
+                   "Save the map to .vmf  (Ctrl+S,  Ctrl+Shift+S = Save As)")) {
+        if (hasDoc())
+            saveMap(ImGui::GetIO().KeyShift);
+        else
+            status_ = "Open or start a map first.";
+    }
+
+    // The complexity dial: Guided -> Standard -> Full.
+    ImGui::SameLine(0, dp(18.0f));
+    ImGui::SetCursorPosY((barH - row) * 0.5f);
+    {
+        // The dial keeps its labels even when narrow — they're the main
+        // signpost for "there's more editor here when you want it".
+        const char* const modes[] = {ICON_FA_SEEDLING "  Guided",
+                                     ICON_FA_TABLE_CELLS_LARGE "  Standard",
+                                     ICON_FA_PEN_RULER "  Full"};
+        int r = segmented("mode", modes, 3, static_cast<int>(mode_), row);
+        if (r >= 0 && r != static_cast<int>(mode_)) {
+            mode_ = static_cast<Mode>(r);
+            layoutDirty_ = true;
+            prefs_.workspaceDial = r;
+            prefs_.save();
+        }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("How much of the editor to show — same map, same "
+                              "tools, just more of them as you turn it up.");
+    }
+
+    // 2D view toggles — 3D is always up; Top / Front / Side open on demand.
+    // Narrow: fold into one "2D ▾" popup.
+    ImGui::SameLine(0, dp(14.0f));
+    ImGui::SetCursorPosY((barH - row) * 0.5f);
+    {
+        struct V { int idx; const char* lbl; };
+        static const V vs[] = {{1, "Top"}, {2, "Front"}, {3, "Side"}};
+        const bool anyOpen = viewOpen_[1] || viewOpen_[2] || viewOpen_[3];
+        auto toggleView = [&](int idx) {
+            viewOpen_[idx] = !viewOpen_[idx];
+            if (viewOpen_[idx]) ImGui::SetWindowFocus(views_[idx].title);
+        };
+        if (narrow) {
+            if (toolButton(ICON_FA_BORDER_ALL "  2D", anyOpen, "Open a 2D view"))
+                ImGui::OpenPopup("##views2d");
+            if (ImGui::BeginPopup("##views2d")) {
+                for (int k = 0; k < 3; ++k)
+                    if (ImGui::MenuItem(vs[k].lbl, nullptr, viewOpen_[vs[k].idx]))
+                        toggleView(vs[k].idx);
+                ImGui::EndPopup();
+            }
+        } else {
+            for (int k = 0; k < 3; ++k) {
+                if (k) ImGui::SameLine(0, dp(2.0f));
+                if (toolButton(vs[k].lbl, viewOpen_[vs[k].idx],
+                               "Show / hide this 2D view"))
+                    toggleView(vs[k].idx);
+            }
+        }
+    }
+
+    // Tool strip — Standard and Full (Guided is pure Build Kit).
+    if (mode_ != Mode::Guided) {
+        ImGui::SameLine(0, dp(14.0f));
+        ImGui::SetCursorPosY((barH - row) * 0.5f);
+        const char* const tools[] = {ICON_FA_ARROW_POINTER, ICON_FA_CUBE,
+                                     ICON_FA_BEZIER_CURVE,   ICON_FA_SCISSORS,
+                                     ICON_FA_IMAGE,          ICON_FA_LIGHTBULB};
+        int r = segmented("tool", tools, 6, static_cast<int>(tool_), row);
+        if (r >= 0 && r != static_cast<int>(tool_)) {
+            tool_ = static_cast<Tool>(r);
+            handlesDirty_ = true;
+            subDragging_ = false;
+        }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Select / Block / Vertex / Clip / Surface / Entity");
+
+        if (tool_ == Tool::Vertex) {
+            ImGui::SameLine(0, dp(10.0f));
+            ImGui::SetCursorPosY((barH - row) * 0.5f);
+            const char* const subs[] = {ICON_FA_CIRCLE_DOT "  Vertex",
+                                        ICON_FA_GRIP_LINES "  Edge",
+                                        ICON_FA_SQUARE "  Face"};
+            int sr = segmented("submode", subs, 3, static_cast<int>(subMode_), row);
+            if (sr >= 0 && sr != static_cast<int>(subMode_)) {
+                subMode_ = static_cast<SubMode>(sr);
+                handlesDirty_ = true;
+                subDragging_ = false;
+            }
+        }
+    }
+
+    // Right cluster. Measure it; if it won't fit, drop the labels on the
+    // lower-priority buttons so Publish and Build & play always stay whole.
+    char gridLabel[48];
+    std::snprintf(gridLabel, sizeof(gridLabel), ICON_FA_TABLE_CELLS "  Grid %d", gridSize_);
+    const char* snapLabel = snap_ ? ICON_FA_CHECK "  Snap" : ICON_FA_XMARK "  Snap";
+    auto bw = [&](const char* s) {
+        // CalcTextSize under-reports icon-font runs (the FA merge advance is
+        // tuned wider than the metric), so pad generously.
+        return ImGui::CalcTextSize(s, nullptr, true).x +
+               ImGui::GetStyle().FramePadding.x * 2.0f + dp(14.0f);
+    };
+    const float gap = dp(2.0f), gap2 = dp(8.0f);
+    const float padX = ImGui::GetStyle().WindowPadding.x;
+    ImGui::SameLine();
+    const float curX = ImGui::GetCursorPosX();
+    const float avail = ImGui::GetWindowWidth() - curX - dp(12.0f);
+
+    auto clusterW = [&](bool compact) {
+        const char* g = compact ? ICON_FA_TABLE_CELLS : gridLabel;
+        const char* s = compact ? (snap_ ? ICON_FA_CHECK : ICON_FA_XMARK) : snapLabel;
+        const char* pub = compact ? ICON_FA_CLOUD_ARROW_UP
+                                  : ICON_FA_CLOUD_ARROW_UP "  Publish";
+        return bw(g) + gap + bw(s) + gap + bw(ICON_FA_MAGNET) + gap + bw(ICON_FA_GEAR) +
+               gap + bw(ICON_FA_BARS) + gap2 + bw(pub) + gap2 +
+               bw(ICON_FA_PLAY "  Build & play") + padX + dp(28.0f);
+    };
+    const bool compact = clusterW(false) > avail;
+    ImGui::SetCursorPosX(std::max(curX + dp(12.0f),
+                                  ImGui::GetWindowWidth() - clusterW(compact)));
+    ImGui::SetCursorPosY((barH - row) * 0.5f);
+
+    if (toolButton(compact ? ICON_FA_TABLE_CELLS : gridLabel,
+                   false, compact ? "Grid size" : nullptr))
+        ImGui::OpenPopup("##gridpop");
+    if (ImGui::BeginPopup("##gridpop")) {
+        for (int g : {1, 2, 4, 8, 16, 32, 64, 128, 256, 512}) {
+            char b[16];
+            std::snprintf(b, sizeof(b), "%d", g);
+            if (ImGui::Selectable(b, g == gridSize_)) gridSize_ = g;
+        }
+        ImGui::EndPopup();
+    }
+    ImGui::SameLine(0, gap);
+    if (toolButton(compact ? (snap_ ? ICON_FA_CHECK : ICON_FA_XMARK) : snapLabel,
+                   snap_, "Snap to grid"))
+        snap_ = !snap_;
+    ImGui::SameLine(0, gap);
+    if (toolButton(ICON_FA_MAGNET, snapGeo_,
+                   "Snap to other brushes' corners while moving"))
+        snapGeo_ = !snapGeo_;
+
+    ImGui::SameLine(0, gap);
+    if (toolButton(ICON_FA_GEAR, showSettings_, "Options")) showSettings_ = !showSettings_;
+
+    ImGui::SameLine(0, gap);
+    if (toolButton(ICON_FA_BARS, false, "View menu")) ImGui::OpenPopup("##viewmenu");
+    drawViewMenuPopup();
+
+    ImGui::SameLine(0, gap2);
+    if (toolButton(compact ? ICON_FA_CLOUD_ARROW_UP
+                           : ICON_FA_CLOUD_ARROW_UP "  Publish",
+                   showWorkshop_, "Publish the map to the Steam Workshop")) {
+        showWorkshop_ = !showWorkshop_;
+        if (showWorkshop_ && wsItem_.title.empty() && hasDoc())
+            wsItem_.title = doc_.name();
+    }
+
+    ImGui::SameLine(0, gap2);
+    ImGui::PushStyleColor(ImGuiCol_Button, col::bg2);
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, col::bg3);
+    ImGui::PushStyleColor(ImGuiCol_Text, col::acc);
+    if (ImGui::Button(ICON_FA_PLAY "  Build & play", ImVec2(0, row))) {
+        showCompile_ = true;
+        if (!compiler_.running() && hasDoc()) startCompile();
+    }
+    ImGui::PopStyleColor(3);
+
+    ImGui::EndChild();
+    ImGui::PopStyleColor();
+
+    ImGui::GetWindowDrawList()->AddLine(
+        ImGui::GetCursorScreenPos(),
+        ImVec2(ImGui::GetCursorScreenPos().x + ImGui::GetWindowWidth(),
+               ImGui::GetCursorScreenPos().y),
+        pb::ui::u32(pb::ui::col::bd));
+}
+
+void Editor::drawViewMenuPopup() {
+    if (!ImGui::BeginPopup("##viewmenu")) return;
+    if (ImGui::MenuItem(ICON_FA_GEAR "  Options…")) showSettings_ = true;
+    if (ImGui::MenuItem(ICON_FA_KEYBOARD "  Keyboard shortcuts", "F1"))
+        showKeys_ = true;
+    ImGui::Separator();
+    if (ImGui::BeginMenu("3D shading")) {
+        auto item = [&](const char* label, ShadeMode m) {
+            if (ImGui::MenuItem(label, nullptr, settings_.shadeMode == m))
+                settings_.shadeMode = m;
+        };
+        item("Textured + lightmap", ShadeMode::TexturedLit);
+        item("Lightmap grid", ShadeMode::LightmapGrid);
+        item("Flat", ShadeMode::Flat);
+        item("Textured (fullbright)", ShadeMode::TexturedFull);
+        ImGui::EndMenu();
+    }
+    ImGui::MenuItem("Grid", nullptr, &settings_.showGrid);
+    ImGui::MenuItem("Static props", nullptr, &settings_.showProps);
+    ImGui::MenuItem("Point entities", nullptr, &settings_.showPointEntities);
+    ImGui::MenuItem("Wire overlay (3D)", nullptr, &settings_.wireOverlay);
+    ImGui::Separator();
+    ImGui::SetNextItemWidth(160);
+    ImGui::SliderFloat("Exposure", &settings_.exposure, 0.2f, 3.0f, "%.2f");
+    ImGui::SetNextItemWidth(160);
+    if (ImGui::SliderFloat("Lightmap gain", &meshOpts_.lightmapGain, 0.3f, 4.0f, "%.2f") &&
+        hasMap())
+        buildAndUpload(meshOpts_);
+    ImGui::Separator();
+    if (ImGui::BeginMenu(ICON_FA_MAGNIFYING_GLASS "  Interface scale")) {
+        uiScaleMenu();
+        ImGui::EndMenu();
+    }
+    ImGui::Separator();
+    if (ImGui::BeginMenu(ICON_FA_WINDOW_RESTORE "  Panels")) {
+        if (ImGui::MenuItem("History")) { ImGui::SetWindowFocus("History"); }
+        if (ImGui::MenuItem("Map Check")) { ImGui::SetWindowFocus("Map Check"); runMapCheck(); }
+        if (ImGui::MenuItem("Command palette", "Ctrl+K")) showPalette_ = true;
+        ImGui::EndMenu();
+    }
+    if (ImGui::BeginMenu(ICON_FA_FLOPPY_DISK "  Autosave")) {
+        ImGui::MenuItem("Enabled", nullptr, &autosaveOn_);
+        ImGui::SetNextItemWidth(140);
+        ImGui::SliderFloat("every (min)", &autosaveMins_, 1.0f, 30.0f, "%.0f");
+        ImGui::TextDisabled("writes <map>.autosave.vmf + rolling .bak1-3 on save");
+        ImGui::EndMenu();
+    }
+    if (ImGui::BeginMenu(ICON_FA_FOLDER_TREE "  Project (.pbproj)")) {
+        if (ImGui::MenuItem("Save project", "", false, hasDoc())) saveProject(false);
+        if (ImGui::MenuItem("Save project as…", "", false, hasDoc())) saveProject(true);
+        if (ImGui::MenuItem("Open project…")) {
+            const std::string p =
+                openFileDialog("Open project", "Pootis project\0*.pbproj\0All\0*.*\0");
+            if (!p.empty()) openProject(p);
+        }
+        ImGui::TextDisabled("bundles the vmf + cordon + camera bookmarks +");
+        ImGui::TextDisabled("compile settings + custom-content list");
+        ImGui::EndMenu();
+    }
+    if (ImGui::BeginMenu(ICON_FA_VECTOR_SQUARE "  Cordon")) {
+        ImGui::MenuItem("Cordon on (compile only the box)", nullptr, &cordonOn_);
+        ImGui::SetNextItemWidth(200);
+        ImGui::DragFloat3("min##cordon", &cordonMin_.x, 4.0f, 0, 0, "%.0f");
+        ImGui::SetNextItemWidth(200);
+        ImGui::DragFloat3("max##cordon", &cordonMax_.x, 4.0f, 0, 0, "%.0f");
+        if (ImGui::MenuItem("Set to selection", nullptr, false, !selection_.empty())) {
+            glm::vec3 a(1e30f), b(-1e30f);
+            for (const auto& r : selection_)
+                if (const map::Solid* s = doc_.resolve(r)) {
+                    a = glm::min(a, s->boundsMin);
+                    b = glm::max(b, s->boundsMax);
+                }
+            if (a.x <= b.x) {
+                cordonMin_ = a - glm::vec3(16);
+                cordonMax_ = b + glm::vec3(16);
+            }
+        }
+        if (ImGui::MenuItem("Set to whole map", nullptr, false, hasDoc())) {
+            doc_.bounds(cordonMin_, cordonMax_);
+        }
+        ImGui::EndMenu();
+    }
+    if (ImGui::BeginMenu(ICON_FA_CAMERA "  Camera")) {
+        Camera& c3d = views_[0].camera;
+        ImGui::TextDisabled("bookmarks");
+        for (int i = 0; i < 6; ++i) {
+            ImGui::PushID(i);
+            char lbl[32];
+            std::snprintf(lbl, sizeof(lbl), "Slot %d%s", i + 1,
+                          camMarks_[i].set ? "" : "  (empty)");
+            if (ImGui::MenuItem(lbl, nullptr, false, true)) {
+                if (camMarks_[i].set) {
+                    c3d.pos = camMarks_[i].pos;
+                    c3d.yawDeg = camMarks_[i].yaw;
+                    c3d.pitchDeg = camMarks_[i].pitch;
+                }
+            }
+            ImGui::SameLine();
+            if (ImGui::SmallButton("set")) {
+                camMarks_[i] = {true, c3d.pos, c3d.yawDeg, c3d.pitchDeg};
+                status_ = fmt("Camera bookmark %d saved", i + 1);
+            }
+            ImGui::PopID();
+        }
+        ImGui::Separator();
+        ImGui::TextDisabled("go to coordinate");
+        ImGui::SetNextItemWidth(180);
+        ImGui::DragFloat3("##goto", &gotoCoord_.x, 1.0f, 0, 0, "%.0f");
+        if (ImGui::MenuItem("Jump there")) {
+            for (auto& v : views_) {
+                if (v.kind == ViewKind::Perspective)
+                    v.camera.pos = gotoCoord_ - v.camera.forward() * 300.0f;
+                else
+                    v.camera.orthoCenter = gotoCoord_;
+            }
+        }
+        ImGui::EndMenu();
+    }
+    ImGui::Separator();
+    if (ImGui::MenuItem("Frame map", "F") && hasMap()) frameAllViews();
+    if (ImGui::MenuItem("Reset layout")) layoutDirty_ = true;
+    if (ImGui::MenuItem("Welcome screen")) showWelcome_ = true;
+    if (ImGui::MenuItem("Exit")) glfwSetWindowShouldClose(window_, 1);
+    ImGui::EndPopup();
+}
+
+void Editor::uiScaleMenu() {
+    const float steps[] = {0.8f, 0.9f, 1.0f, 1.1f, 1.25f, 1.5f, 1.75f, 2.0f};
+    for (float s : steps) {
+        char label[24];
+        std::snprintf(label, sizeof(label), "%d%%", static_cast<int>(s * 100 + 0.5f));
+        if (ImGui::MenuItem(label, nullptr, std::abs(s - uiScale_) < 0.001f))
+            requestUiScale(s);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Welcome screen
+// ---------------------------------------------------------------------------
+void Editor::makeTemplates(const std::string& outDir) {
+    std::error_code ec;
+    fs::create_directories(outDir, ec);
+    auto reset = [&](const char* nm) {
+        bsp_ = BspFile();
+        doc_.newBlank(nm);
+        history_.reset(doc_);
+        clearSelection();
+    };
+    auto sun = [&](glm::vec3 at) { placePiece("Sun / sky", at); };
+    // Wrap whatever's been placed in sky brushes so the map compiles leak-free.
+    auto seal = [&] { placePiece("Skybox seal", glm::vec3(0, 0, 0)); };
+
+    // 1. Empty room.
+    reset("empty_room");
+    placePiece("Room", glm::vec3(0, 0, 0));
+    placePiece("One spawn point", glm::vec3(0, 0, 0));
+    sun(glm::vec3(0, 0, 96));
+    seal();
+    doc_.saveVmf(outDir + "/empty_room.vmf");
+
+    // 2. Two-base arena with a mid point.
+    reset("arena");
+    placePiece("Floor", glm::vec3(0, 0, 0));
+    for (int i = 0; i < 6; ++i)
+        placePiece("Floor", glm::vec3((i - 3) * 256, 0, 0));
+    placePiece("RED spawn", glm::vec3(-1024, 0, 0));
+    placePiece("BLU spawn", glm::vec3(1024, 0, 0));
+    placePiece("KOTH point", glm::vec3(0, 0, 0));
+    placePiece("Health / ammo", glm::vec3(0, 320, 0));
+    sun(glm::vec3(0, 0, 192));
+    seal();
+    doc_.saveVmf(outDir + "/arena.vmf");
+
+    // 3. CTF two-base.
+    reset("ctf_2base");
+    for (int i = -4; i <= 4; ++i) placePiece("Floor", glm::vec3(i * 256, 0, 0));
+    placePiece("RED spawn", glm::vec3(-1152, 0, 0));
+    placePiece("BLU spawn", glm::vec3(1152, 0, 0));
+    placePiece("CTF setup", glm::vec3(0, 0, 0));
+    placePiece("Resupply", glm::vec3(-1152, 200, 0));
+    placePiece("Resupply", glm::vec3(1152, 200, 0));
+    sun(glm::vec3(0, 0, 192));
+    seal();
+    doc_.saveVmf(outDir + "/ctf_2base.vmf");
+
+    // 4. Payload skeleton.
+    reset("payload");
+    for (int i = 0; i < 8; ++i) placePiece("Floor", glm::vec3(i * 256 - 512, 0, 0));
+    placePiece("BLU spawn", glm::vec3(-768, 0, 0));
+    placePiece("RED spawn", glm::vec3(1408, 0, 0));
+    placePiece("Payload track", glm::vec3(-384, 0, 0));
+    placePiece("Health / ammo", glm::vec3(384, 256, 0));
+    sun(glm::vec3(0, 0, 192));
+    seal();
+    doc_.saveVmf(outDir + "/payload.vmf");
+
+    // 5. Trade / spawn box.
+    reset("trade_box");
+    roomHalf_ = 384.0f;                       // a big open room
+    placePiece("Room", glm::vec3(0, 0, 0));
+    roomHalf_ = 192.0f;
+    placePiece("RED spawn", glm::vec3(-256, 0, 0));
+    placePiece("BLU spawn", glm::vec3(256, 0, 0));
+    placePiece("Resupply", glm::vec3(0, 256, 0));
+    sun(glm::vec3(0, 0, 96));
+    seal();
+    doc_.saveVmf(outDir + "/trade_box.vmf");
+
+    // 6. Single-CP attack/defend nub.
+    reset("cp_push");
+    for (int i = -3; i <= 3; ++i) placePiece("Floor", glm::vec3(i * 256, 0, 0));
+    placePiece("BLU spawn", glm::vec3(-896, 0, 0));
+    placePiece("RED spawn", glm::vec3(896, 0, 0));
+    placePiece("Capture point", glm::vec3(384, 0, 0));
+    placePiece("Round timer", glm::vec3(0, 0, 0));
+    sun(glm::vec3(0, 0, 192));
+    seal();
+    doc_.saveVmf(outDir + "/cp_push.vmf");
+
+    // 7. ctf_turbine layout reconstruction (its own builder).
+    makeTurbine(outDir + "/turbine_lookalike.vmf");
+
+    reset("scratch");   // leave the editor on a clean blank doc
+    PB_INFO("wrote 7 templates to %s", outDir.c_str());
+}
+
+// ---------------------------------------------------------------------------
+// Turbine look-alike — a from-the-kit reconstruction of ctf_turbine's layout.
+// Built at true Hammer scale (base-to-base ~7200u along X, ~3500u wide) with
+// 180-degree rotational symmetry about Z, so the whole BLU half is authored
+// once and echoed to RED by (x,y) -> (-x,-y). Real spawn / flag / observer
+// coordinates are lifted straight from the decompiled map.
+// ---------------------------------------------------------------------------
+void Editor::makeTurbine(const std::string& outPath) {
+    bsp_ = BspFile();
+    doc_.newBlank("turbine");
+    doc_.worldExtra().set("skyname", "sky_upward");
+    history_.reset(doc_);
+    clearSelection();
+
+    const std::string F = "dev/dev_measuregeneric01b";   // floors / detail
+    const std::string Wm = "dev/dev_measurewall01a";     // walls
+    const std::string SK = "tools/toolsskybox";
+
+    // Height bands (Z, top-of-surface).
+    const float GND = 0.f, HALLC = 224.f, CEIL = 320.f, CAT = 160.f;
+    const float FLRB = -288.f, BASC = -32.f;
+    const float SKYB = -544.f, SKYT = 544.f;
+    const float T = 16.f;
+
+    auto rotMn = [](glm::vec3 mn, glm::vec3 mx) {
+        return glm::vec3(-mx.x, -mx.y, mn.z);
+    };
+    auto rotMx = [](glm::vec3 mn, glm::vec3 mx) {
+        return glm::vec3(-mn.x, -mn.y, mx.z);
+    };
+    auto W = [&](glm::vec3 mn, glm::vec3 mx, const std::string& m) {
+        map::Solid s = map::Solid::makeBox(mn, mx, m);
+        s.id = doc_.nextId();
+        if (s.valid) doc_.worldSolids().push_back(std::move(s));
+    };
+    // box + its 180-degree twin
+    auto Ws = [&](glm::vec3 mn, glm::vec3 mx, const std::string& m) {
+        W(mn, mx, m);
+        W(rotMn(mn, mx), rotMx(mn, mx), m);
+    };
+    // hollow tube (crawl vent): 4 thin slabs around an interior box
+    auto tube = [&](glm::vec3 mn, glm::vec3 mx) {
+        Ws({mn.x, mn.y, mn.z}, {mx.x, mx.y, mn.z + 8}, F);          // floor
+        Ws({mn.x, mn.y, mx.z - 8}, {mx.x, mx.y, mx.z}, F);          // ceiling
+        Ws({mn.x, mn.y, mn.z}, {mx.x, mn.y + 8, mx.z}, Wm);         // -Y wall
+        Ws({mn.x, mx.y - 8, mn.z}, {mx.x, mx.y, mx.z}, Wm);         // +Y wall
+    };
+    auto detail = [&](std::vector<map::Solid> pieces) {
+        map::MapEntity fd;
+        fd.id = doc_.nextId();
+        fd.classname = "func_detail";
+        fd.kv.set("classname", "func_detail");
+        for (auto& s : pieces) {
+            if (!s.valid) continue;
+            s.id = doc_.nextId();
+            fd.solids.push_back(std::move(s));
+        }
+        if (!fd.solids.empty()) doc_.entities().push_back(std::move(fd));
+    };
+    auto pos3 = [](glm::vec3 p) {
+        return std::to_string((int)p.x) + " " + std::to_string((int)p.y) + " " +
+               std::to_string((int)p.z);
+    };
+    auto P = [&](const char* cls, glm::vec3 at,
+                 std::initializer_list<std::pair<const char*, const char*>> kvs) {
+        map::MapEntity e;
+        e.id = doc_.nextId();
+        e.classname = cls;
+        e.origin = at;
+        e.kv.set("classname", cls);
+        e.kv.set("origin", pos3(at));
+        for (auto& kv : kvs)
+            if (kv.second && kv.second[0]) e.kv.set(kv.first, kv.second);
+        doc_.entities().push_back(std::move(e));
+    };
+    // point entity + twin; `yawKey` (if given) gets +180 on the twin
+    auto Ps = [&](const char* cls, glm::vec3 at,
+                  std::initializer_list<std::pair<const char*, const char*>> kvs,
+                  const char* twinTeam = nullptr) {
+        P(cls, at, kvs);
+        std::vector<std::pair<const char*, const char*>> t(kvs);
+        for (auto& kv : t)
+            if (twinTeam && std::string(kv.first) == "TeamNum") kv.second = twinTeam;
+        std::initializer_list<std::pair<const char*, const char*>> none{};
+        map::MapEntity e;
+        e.id = doc_.nextId();
+        e.classname = cls;
+        e.origin = glm::vec3(-at.x, -at.y, at.z);
+        e.kv.set("classname", cls);
+        e.kv.set("origin", pos3(e.origin));
+        for (auto& kv : t)
+            if (kv.second && kv.second[0]) e.kv.set(kv.first, kv.second);
+        (void)none;
+        doc_.entities().push_back(std::move(e));
+    };
+    auto BEs = [&](const char* cls, glm::vec3 mn, glm::vec3 mx,
+                   std::initializer_list<std::pair<const char*, const char*>> kvs,
+                   const char* twinTeam) {
+        for (int pass = 0; pass < 2; ++pass) {
+            glm::vec3 a = pass ? rotMn(mn, mx) : mn;
+            glm::vec3 b = pass ? rotMx(mn, mx) : mx;
+            map::MapEntity e;
+            e.id = doc_.nextId();
+            e.classname = cls;
+            e.origin = 0.5f * (a + b);
+            e.kv.set("classname", cls);
+            for (auto& kv : kvs) {
+                if (!kv.second || !kv.second[0]) continue;
+                if (pass && twinTeam && std::string(kv.first) == "TeamNum")
+                    e.kv.set(kv.first, twinTeam);
+                else
+                    e.kv.set(kv.first, kv.second);
+            }
+            map::Solid s = map::Solid::makeBox(a, b, "tools/toolstrigger");
+            s.id = doc_.nextId();
+            e.solids.push_back(std::move(s));
+            doc_.entities().push_back(std::move(e));
+        }
+    };
+
+    // ---- Sky shell (sealed box around the play space) -------------------
+    const float sxmn = -3680, sxmx = 3680, symn = -2080, symx = 2080;
+    W({sxmn - T, symn - T, SKYB - T}, {sxmx + T, symx + T, SKYB}, SK);   // ground
+    W({sxmn - T, symn - T, SKYT}, {sxmx + T, symx + T, SKYT + T}, SK);   // roof
+    W({sxmn - T, symn - T, SKYB}, {sxmx + T, symn, SKYT}, SK);
+    W({sxmn - T, symx, SKYB}, {sxmx + T, symx + T, SKYT}, SK);
+    W({sxmn - T, symn, SKYB}, {sxmn, symx, SKYT}, SK);
+    W({sxmx, symn, SKYB}, {sxmx + T, symx, SKYT}, SK);
+
+    // ---- Central turbine room ----------------------------------------------
+    const float cx = 1120, cy = 1216;                    // interior half-extents
+    W({-cx - T, -cy - T, GND - 64}, {cx + T, cy + T, GND}, F);       // floor
+    W({-cx - T, -cy - T, CEIL}, {cx + T, cy + T, CEIL + T}, F);      // ceiling
+    // +Y wall (twin makes the -Y wall); gap x[1120,1440] for the basement climb
+    Ws({-cx - T, cy, GND}, {1120, cy + T, CEIL}, Wm);
+    Ws({1440, cy, GND}, {cx + T, cy + T, CEIL}, Wm);
+    Ws({1120, cy, HALLC}, {1440, cy + T, CEIL}, Wm);                 // lintel
+    // -X wall (twin makes +X wall); central doorway y[-256,256] into the hall
+    Ws({-cx - T, -cy - T, GND}, {-cx, -256, CEIL}, Wm);
+    Ws({-cx - T, 256, GND}, {-cx, cy + T, CEIL}, Wm);
+    Ws({-cx - T, -256, HALLC + 32}, {-cx, 256, CEIL}, Wm);          // lintel
+
+    // Catwalk ring at CAT (open square in the middle = the turbine pit)
+    Ws({-cx, -cy, CAT}, {cx, -1040, CAT + T}, F);                    // +/-Y strips
+    Ws({-cx, -1040, CAT}, {-1040, 1040, CAT + T}, F);               // +/-X strips
+    // stair up to the catwalk, SW corner (mirrored to RED's NE corner)
+    {
+        std::vector<map::Solid> st;
+        for (int i = 0; i < 10; ++i) {
+            float z0 = GND + i * (CAT / 10.f);
+            float y0 = -cy + 40 + i * 40.f;
+            st.push_back(map::Solid::makeBox({-cx + 40, y0, GND},
+                                             {-cx + 200, y0 + 44, z0 + CAT / 10.f}, F));
+            st.push_back(map::Solid::makeBox(
+                glm::vec3(cx - 200, -y0 - 44, GND),
+                glm::vec3(cx - 40, -y0, z0 + CAT / 10.f), F));
+        }
+        detail(std::move(st));
+    }
+    // 4 support pillars
+    Ws({-672 - 48, -768 - 48, GND}, {-672 + 48, -768 + 48, CEIL}, Wm);
+    Ws({-672 - 48, 768 - 48, GND}, {-672 + 48, 768 + 48, CEIL}, Wm);
+    // pit rim on the floor
+    Ws({-470, -470, GND}, {470, -430, GND + 40}, F);
+    Ws({-470, 430, GND}, {470, 470, GND + 40}, F);
+    Ws({-470, -430, GND}, {-430, 430, GND + 40}, F);
+
+    // The turbine itself: stacked cylinders hung under the ceiling.
+    {
+        auto disc = [&](float rad, float z0, float z1, int sides) {
+            std::vector<std::pair<glm::vec3, float>> pl = {
+                {{0, 0, 1}, z1}, {{0, 0, -1}, -z0}};
+            for (int k = 0; k < sides; ++k) {
+                float a = (k / float(sides)) * 6.2831853f;
+                glm::vec3 n(std::cos(a), std::sin(a), 0);
+                pl.push_back({n, rad});
+            }
+            return map::Solid::fromPlanes(pl, Wm);
+        };
+        std::vector<map::Solid> t;
+        t.push_back(disc(380, CEIL - 48, CEIL, 16));       // housing
+        t.push_back(disc(150, CEIL - 150, CEIL - 48, 20)); // hub
+        detail(std::move(t));
+    }
+
+    // ---- Main hall (BLU; twin = RED) -------------------------------------
+    const float hxm = -2160, hxx = -1120, hy = 288;
+    Ws({hxm - T, -hy - T, GND - 64}, {hxx, hy + T, GND}, F);        // floor
+    Ws({hxm - T, -hy - T, HALLC}, {hxx, hy + T, HALLC + T}, F);    // ceiling
+    Ws({hxm - T, hy, GND}, {hxx, hy + T, HALLC}, Wm);              // +Y wall
+    // -Y wall, with a gap x[-2000,-1640] into the flank room
+    Ws({hxm - T, -hy - T, GND}, {-2000, -hy, HALLC}, Wm);
+    Ws({-1640, -hy - T, GND}, {hxx, -hy, HALLC}, Wm);
+    // vent mouth in the +Y hall wall
+    Ws({-1900, hy, 96}, {-1772, hy + T, 224}, F);
+
+    // ---- Spawn hub (BLU; twin = RED) -----------------------------------
+    const float sxm = -3550, sxx = -2160, sym = 96, syx = 928;
+    // floor in four pieces, leaving a stair hole x[-3450,-3150] y[600,860]
+    Ws({sxm - T, sym - T, GND - 64}, {sxx, 600, GND}, F);
+    Ws({sxm - T, 860, GND - 64}, {sxx, syx + T, GND}, F);
+    Ws({sxm - T, 600, GND - 64}, {-3450, 860, GND}, F);
+    Ws({-3150, 600, GND - 64}, {sxx, 860, GND}, F);
+    Ws({sxm - T, sym - T, HALLC}, {sxx, syx + T, HALLC + T}, F);   // ceiling
+    Ws({sxm - T, syx, GND}, {sxx, syx + T, HALLC}, Wm);           // +Y wall
+    // -Y wall, with a gap x[-3400,-2900] down into the annex
+    Ws({sxm - T, sym - T, GND}, {-3400, sym, HALLC}, Wm);
+    Ws({-2900, sym - T, GND}, {sxx, sym, HALLC}, Wm);
+    Ws({sxm - T, sym - T, GND}, {sxm, syx + T, HALLC}, Wm);      // -X back wall
+    // east wall closes spawn above the hall opening (hall is y[-288,288])
+    Ws({sxx, 300, GND}, {sxx + T, syx + T, HALLC}, Wm);
+
+    // spawn points (real team-3 coords, echoed to team 2)
+    for (int col = 0; col < 2; ++col)
+        for (int row = 0; row < 4; ++row) {
+            glm::vec3 p(-3400 + col * 120.f, 240 + row * 100.f, GND + 16);
+            Ps("info_player_teamspawn", p,
+               {{"TeamNum", "3"}, {"angles", "0 0 0"}}, "2");
+        }
+    // respawn room volume + resupply
+    BEs("func_respawnroom", {sxm, sym, GND}, {sxx, syx, HALLC},
+        {{"TeamNum", "3"}}, "2");
+    BEs("func_regenerate", {sxm, 360, GND}, {sxm + 96, 640, GND + 128},
+        {{"associatedmodel", ""}}, nullptr);
+
+    // ---- Spawn annex: the base is deeper than one room (fills the wing) ----
+    // A southward extension of the spawn hub; sealed except the doorway up.
+    const float axm = -3550, axx = -2720, aym = -720, ayx = 96;
+    Ws({axm - T, aym - T, GND - 64}, {axx + T, ayx, GND}, F);        // floor
+    Ws({axm - T, aym - T, HALLC}, {axx + T, ayx, HALLC + T}, F);    // ceiling
+    Ws({axm - T, aym - T, GND}, {axx + T, aym, HALLC}, Wm);        // -Y wall
+    Ws({axm - T, aym - T, GND}, {axm, ayx, HALLC}, Wm);           // -X wall
+    Ws({axx, aym - T, GND}, {axx + T, ayx, HALLC}, Wm);          // +X wall (solid)
+
+    // ---- Flank room off the main hall (-Y side) — fills the wing --------
+    const float kxm = -2160, kxx = -1400, kym = -1000, kyx = -288;
+    Ws({kxm - T, kym - T, GND - 64}, {kxx + T, kyx, GND}, F);       // floor
+    Ws({kxm - T, kym - T, HALLC}, {kxx + T, kyx, HALLC + T}, F);   // ceiling
+    Ws({kxm - T, kym - T, GND}, {kxm, kyx, HALLC}, Wm);           // -X wall
+    Ws({kxm - T, kym - T, GND}, {kxx + T, kym, HALLC}, Wm);      // -Y wall
+    Ws({kxx, kym - T, GND}, {kxx + T, kyx, HALLC}, Wm);         // +X wall (solid — dead-end room)
+
+    // ---- Stair room: spawn floor down to the flag room ------------------
+    Ws({-3450 - T, -1180, FLRB - 48}, {-3000 + T, 96 + T, FLRB}, F);   // lower floor
+    Ws({-3450 - T, -1180, GND}, {-3000 + T, 96 + T, GND + T}, F);       // its ceiling
+    Ws({-3450 - T, -1180, FLRB}, {-3450, 96 + T, GND}, Wm);            // -X wall
+    Ws({-3000, -1180, FLRB}, {-3000 + T, 96 + T, GND}, Wm);           // +X wall
+    {
+        std::vector<map::Solid> st;
+        for (int i = 0; i < 16; ++i) {
+            float z0 = GND - i * ((GND - FLRB) / 16.f);
+            float y0 = 40 - i * 70.f;
+            st.push_back(map::Solid::makeBox({-3400, y0 - 74, FLRB},
+                                             {-3050, y0, z0}, F));
+            st.push_back(map::Solid::makeBox(glm::vec3(3050, -y0, FLRB),
+                                             glm::vec3(3400, -y0 + 74, z0), F));
+        }
+        detail(std::move(st));
+    }
+
+    // ---- Flag room (basement) -----------------------------------------
+    const float fxm = -3550, fxx = -2650, fym = -1880, fyx = -1150;
+    Ws({fxm - T, fym - T, FLRB - 48}, {fxx + T, fyx + T, FLRB}, F);   // floor
+    Ws({fxm - T, fym - T, BASC}, {fxx + T, fyx + T, BASC + T}, F);    // ceiling
+    Ws({fxm - T, fym - T, FLRB}, {fxx + T, fym, BASC}, Wm);          // -Y wall
+    Ws({fxm - T, fym - T, FLRB}, {fxm, fyx + T, BASC}, Wm);          // -X wall
+    Ws({fxm - T, fyx, FLRB}, {-3450, fyx + T, BASC}, Wm);           // +Y wall (gap to stair room x[-3450,-3000])
+    Ws({-3000, fyx, FLRB}, {fxx + T, fyx + T, BASC}, Wm);
+    Ws({fxx, fym - T, FLRB}, {fxx + T, -1400, BASC}, Wm);           // +X wall, gap y[-1400,-1150] to mid route
+    // flag stand + intel (real origin)
+    Ws({-3080 - 72, -1520 - 72, FLRB}, {-3080 + 72, -1520 + 72, FLRB + 40}, F);
+    Ps("item_teamflag", glm::vec3(-3080, -1520, FLRB + 40),
+       {{"TeamNum", "3"}, {"targetname", "intel_blue"}, {"GameType", "1"},
+        {"ReturnTime", "60"}, {"flag_model", "models/flag/briefcase.mdl"},
+        {"flag_icon", "sd_intel_blue"}, {"trail_effect", "1"}, {"angles", "0 0 0"}},
+       "2");
+    BEs("func_capturezone", {-3400, -1780, FLRB}, {-3060, -1440, FLRB + 100},
+        {{"TeamNum", "3"}, {"targetname", "cap_blue"}, {"CapturePoint", "1"}}, "2");
+
+    // ---- Lower mid route: flag room -> centre-room SW ramp -------------
+    Ws({fxx, -1880, FLRB - 48}, {-1120, -1400, FLRB}, F);          // corridor floor
+    Ws({fxx, -1880, BASC}, {-1120, -1400, BASC + T}, F);          // corridor ceiling
+    Ws({fxx, -1880, FLRB}, {-1120, -1880 + T, BASC}, Wm);        // -Y wall
+    Ws({fxx, -1400, FLRB}, {-1440, -1400 + T, BASC}, Wm);       // +Y wall (stops before the climb)
+    {   // stepped climb up into the centre room through its -Y wall gap
+        std::vector<map::Solid> r;
+        const int steps = 12;
+        const float run = 40.f, rise = (GND - FLRB) / steps;
+        for (int i = 0; i < steps; ++i) {
+            const float x0 = -1600 + i * run;
+            const float z1 = FLRB + (i + 1) * rise;
+            r.push_back(map::Solid::makeBox({x0, -1400, FLRB},
+                                            {x0 + run + 1, -940, z1}, F));
+            r.push_back(map::Solid::makeBox(glm::vec3(-x0 - run - 1, 940, FLRB),
+                                            glm::vec3(-x0, 1400, z1), F));
+        }
+        detail(std::move(r));
+    }
+
+    // ---- Crawl vents (turbine's signature) ---------------------------
+    tube({-1920, 360, 96}, {-1180, 488, 224});     // along the hall
+    tube({-1308, 360, 96}, {-1180, 940, 224});     // turn toward mid
+    tube({-1308, 812, CAT}, {-1180, 940, 224});    // drop onto the catwalk
+
+    // ---- Upper gallery: high ground from the hall around the pit -----
+    Ws({-1120, -1040, CAT - 8}, {-928, -300, CAT + 8}, F);        // SW gallery arm
+    Ws({-1120, -1040, CAT + 8}, {-1104, -300, CAT + 88}, Wm);     // its guard rail
+
+    // ---- Lighting ---------------------------------------------------
+    P("light_environment", glm::vec3(0, 0, 440),
+      {{"_light", "251 244 227 380"}, {"_ambient", "74 84 104 120"},
+       {"pitch", "-42"}, {"angles", "0 315 0"}, {"SunSpreadAngle", "0"}});
+    P("light", glm::vec3(0, 0, 292), {{"_light", "255 244 224 500"},
+       {"_fifty_percent_distance", "260"}, {"_zero_percent_distance", "760"}});
+    Ps("light", glm::vec3(-1640, 0, 200), {{"_light", "255 238 214 320"},
+       {"_fifty_percent_distance", "180"}, {"_zero_percent_distance", "520"}});
+    Ps("light", glm::vec3(-2850, 512, 190), {{"_light", "255 238 214 300"},
+       {"_fifty_percent_distance", "170"}, {"_zero_percent_distance", "480"}});
+    Ps("light", glm::vec3(-3080, -1500, -110), {{"_light", "255 226 196 260"},
+       {"_fifty_percent_distance", "150"}, {"_zero_percent_distance", "420"}});
+    Ps("light", glm::vec3(-1900, -1640, -110), {{"_light", "255 226 196 240"},
+       {"_fifty_percent_distance", "150"}, {"_zero_percent_distance", "420"}});
+
+    // ---- Observer point (real) ------------------------------------
+    P("info_observer_point", glm::vec3(0, 712, 364), {{"angles", "12 270 0"}});
+
+    std::string err;
+    if (doc_.saveVmf(outPath, &err))
+        PB_INFO("wrote turbine look-alike: %s  (%zu solids, %zu entities)",
+                outPath.c_str(), doc_.worldSolids().size(), doc_.entities().size());
+    else
+        PB_ERROR("turbine save failed: %s", err.c_str());
+}
+
+void Editor::drawWelcome() {
+    if (!showWelcome_) return;
+    using namespace pb::ui;
+
+    ImGuiViewport* vp = ImGui::GetMainViewport();
+    ImGui::GetBackgroundDrawList()->AddRectFilled(
+        vp->Pos, ImVec2(vp->Pos.x + vp->Size.x, vp->Pos.y + vp->Size.y),
+        IM_COL32(8, 9, 11, 205));
+
+    const ImVec2 panel(std::min(760.0f * uiScale_, vp->Size.x - 40.0f),
+                       std::min(560.0f * uiScale_, vp->Size.y - 40.0f));
+    ImGui::SetNextWindowPos(ImVec2(vp->Pos.x + (vp->Size.x - panel.x) * 0.5f,
+                                   vp->Pos.y + (vp->Size.y - panel.y) * 0.5f));
+    ImGui::SetNextWindowSize(panel);
+    ImGui::SetNextWindowFocus();
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, col::bg1);
+    ImGui::PushStyleColor(ImGuiCol_Border, col::bd2);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(34, 30));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 1.0f);
+    ImGui::Begin("##welcome", nullptr,
+                 ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+                     ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse |
+                     ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoSavedSettings);
+
+    ImGui::PushStyleColor(ImGuiCol_Text, col::acc);
+    if (fontBig) ImGui::PushFont(fontBig);
+    ImGui::TextUnformatted(ICON_FA_CUBES "  Pootis Builder");
+    if (fontBig) ImGui::PopFont();
+    ImGui::PopStyleColor();
+    ImGui::PushStyleColor(ImGuiCol_Text, col::dim);
+    ImGui::TextUnformatted("A modern map editor for Team Fortress 2");
+    ImGui::PopStyleColor();
+    ImGui::Dummy(ImVec2(0, 16));
+
+    const float colW = (ImGui::GetContentRegionAvail().x - 20) / 3.0f;
+    auto bigButton = [&](const char* id, const char* icon, const char* title,
+                         const char* sub) {
+        ImGui::PushStyleColor(ImGuiCol_Button, col::bg2);
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, col::bg3);
+        const bool hit = ImGui::Button(id, ImVec2(colW, 96 * uiScale_));
+        ImGui::PopStyleColor(2);
+        const ImVec2 mn = ImGui::GetItemRectMin();
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        if (fontBig)
+            dl->AddText(fontBig, 22.0f * uiScale_, ImVec2(mn.x + 14, mn.y + 12),
+                        u32(col::acc), icon);
+        dl->AddText(ImVec2(mn.x + 14, mn.y + 42 * uiScale_), u32(col::tx), title);
+        dl->AddText(ImVec2(mn.x + 14, mn.y + 42 * uiScale_ + ImGui::GetTextLineHeight() + 2),
+                    u32(col::faint), sub);
+        return hit;
+    };
+
+    if (bigButton("##bNew", ICON_FA_FILE_CIRCLE_PLUS, "New map",
+                  "Start from an empty grid")) {
+        bsp_ = BspFile();
+        doc_.newBlank("untitled");
+        history_.reset(doc_);
+        clearSelection();
+        mode_ = Mode::Standard;
+        layoutDirty_ = true;
+        buildAndUpload(meshOpts_);
+        for (auto& v : views_) {
+            v.camera = Camera{};
+            v.camera.kind = v.kind;
+        }
+        status_ = "New map — pick a piece from the Build Kit and click the grid.";
+        showWelcome_ = false;
+    }
+    ImGui::SameLine(0, 10);
+    if (bigButton("##bOpen", ICON_FA_FOLDER_OPEN, "Open map", "A .bsp or .vmf"))
+        promptOpenMap();
+    ImGui::SameLine(0, 10);
+    static bool showTemplates = true;
+    if (bigButton("##bTpl", ICON_FA_LAYER_GROUP, "From a template",
+                  "Pre-built starting maps"))
+        showTemplates = !showTemplates;
+
+    // Everything between the three big buttons and the pinned bottom bar
+    // scrolls as one region, so RECENT is always reachable no matter how many
+    // templates or recent files there are.
+    const float bottomH = ImGui::GetFrameHeightWithSpacing() +
+                          ImGui::GetStyle().ItemSpacing.y * 2.0f + dp(14.0f);
+    ImGui::Dummy(ImVec2(0, 6));
+    ImGui::BeginChild("##welcomebody", ImVec2(0, -bottomH), ImGuiChildFlags_None);
+
+    if (showTemplates) {
+        ImGui::Dummy(ImVec2(0, 12));
+        sectionLabel("TEMPLATES");
+        ImGui::Dummy(ImVec2(0, 4));
+        struct Tpl { const char* file; const char* name; const char* sub; };
+        static const Tpl tpls[] = {
+            {"empty_room", "Empty room", "One sealed room + spawn + sun"},
+            {"arena", "Arena", "Two spawns + a KOTH point"},
+            {"ctf_2base", "CTF — two bases", "Both flags + capture zones"},
+            {"payload", "Payload", "BLU to RED, working cart"},
+            {"cp_push", "Attack / defend", "One point + a round timer"},
+            {"trade_box", "Trade box", "A big room, both spawns"},
+            {"turbine_lookalike", "Turbine (greybox)", "ctf_turbine's layout, to scale"},
+        };
+        const float tw = (ImGui::GetContentRegionAvail().x - 20) / 3.0f;
+        for (int i = 0; i < IM_ARRAYSIZE(tpls); ++i) {
+            if (i % 3) ImGui::SameLine(0, 10);
+            ImGui::PushID(tpls[i].file);
+            ImGui::PushStyleColor(ImGuiCol_Button, col::bg2);
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, col::bg3);
+            const bool hit = ImGui::Button("##t", ImVec2(tw, 66 * uiScale_));
+            ImGui::PopStyleColor(2);
+            const ImVec2 mn = ImGui::GetItemRectMin();
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+            dl->AddText(ImVec2(mn.x + 12, mn.y + 9), u32(col::tx), tpls[i].name);
+            dl->AddText(nullptr, 0.0f,
+                        ImVec2(mn.x + 12, mn.y + 11 + ImGui::GetTextLineHeight()),
+                        u32(col::faint), tpls[i].sub, nullptr, tw - 20.0f);
+            if (hit) {
+                std::string p = executableDir() + "/assets/templates/" +
+                                std::string(tpls[i].file) + ".vmf";
+                if (!fileExists(p))
+                    p = executableDir() + "/../assets/templates/" +
+                        std::string(tpls[i].file) + ".vmf";
+                if (openMap(p)) {
+                    mode_ = Mode::Standard;
+                    layoutDirty_ = true;
+                    showWelcome_ = false;
+                    doc_.markDirty();
+                    status_ = std::string("Loaded template: ") + tpls[i].name;
+                } else {
+                    status_ = "Template not found — build with --make-templates";
+                }
+            }
+            ImGui::PopID();
+        }
+    }
+
+    ImGui::Dummy(ImVec2(0, 18));
+    sectionLabel("RECENT");
+    ImGui::Dummy(ImVec2(0, 4));
+    if (prefs_.recent.empty()) {
+        ImGui::PushStyleColor(ImGuiCol_Text, col::faint);
+        ImGui::TextUnformatted("Nothing yet — the maps you open show up here.");
+        ImGui::PopStyleColor();
+    } else {
+        int removeIdx = -1;
+        const float rowH = ImGui::GetTextLineHeight() * 2.0f + 12.0f;
+        for (size_t i = 0; i < prefs_.recent.size(); ++i) {
+            const std::string& path = prefs_.recent[i];
+            const std::string name = fs::path(path).filename().string();
+            const std::string dir = fs::path(path).parent_path().string();
+            ImGui::PushID(static_cast<int>(i));
+            if (ImGui::Selectable("##r", false, 0, ImVec2(0, rowH))) {
+                if (fs::exists(path)) openMap(path);
+                else status_ = "That file has moved: " + path;
+            }
+            const ImVec2 mn = ImGui::GetItemRectMin();
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+            dl->AddText(ImVec2(mn.x + 8, mn.y + 4), u32(col::tx), name.c_str());
+            dl->AddText(ImVec2(mn.x + 8, mn.y + 6 + ImGui::GetTextLineHeight()),
+                        u32(col::faint), dir.c_str());
+            ImGui::SameLine();
+            ImGui::SetCursorPosX(ImGui::GetCursorPosX() +
+                                 ImGui::GetContentRegionAvail().x - 26 * uiScale_);
+            ImGui::SetCursorPosY(ImGui::GetCursorPosY() + (rowH - ImGui::GetFrameHeight()) * 0.5f);
+            if (ImGui::SmallButton(ICON_FA_XMARK)) removeIdx = static_cast<int>(i);
+            ImGui::PopID();
+        }
+        if (removeIdx >= 0) {
+            prefs_.recent.erase(prefs_.recent.begin() + removeIdx);
+            prefs_.save();
+        }
+    }
+
+    ImGui::EndChild();  // ##welcomebody
+
+    ImGui::Separator();
+    ImGui::AlignTextToFramePadding();
+    ImGui::PushStyleColor(ImGuiCol_Text, col::dim);
+    ImGui::TextUnformatted("Interface scale");
+    ImGui::PopStyleColor();
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(120 * uiScale_);
+    char cur[16];
+    std::snprintf(cur, sizeof(cur), "%d%%", static_cast<int>(uiScale_ * 100 + 0.5f));
+    if (ImGui::BeginCombo("##scale", cur)) {
+        uiScaleMenu();
+        ImGui::EndCombo();
+    }
+    ImGui::SameLine(0, 24);
+    if (ImGui::Checkbox("Show this on startup", &prefs_.showWelcome)) prefs_.save();
+
+    if (hasMap()) {
+        ImGui::SameLine();
+        float bw = 168 * uiScale_;
+        ImGui::SetCursorPosX(ImGui::GetWindowContentRegionMax().x - bw);
+        if (ImGui::Button(ICON_FA_ARROW_RIGHT "  Continue editing", ImVec2(bw, 0)))
+            showWelcome_ = false;
+    }
+
+    ImGui::End();
+    ImGui::PopStyleVar(2);
+    ImGui::PopStyleColor(2);
+}
+
+// ---------------------------------------------------------------------------
+// Viewport panels
+// ---------------------------------------------------------------------------
+void Editor::drawViewportPanel(ViewPanel& p, bool* pOpen) {
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+    const bool visible = ImGui::Begin(p.title, pOpen);
+    ImGui::PopStyleVar();
+    if (!visible) {
+        p.hovered = false;
+        ImGui::End();
+        return;
+    }
+
+    const ImVec2 avail = ImGui::GetContentRegionAvail();
+    const int w = std::max(16, static_cast<int>(avail.x));
+    const int h = std::max(16, static_cast<int>(avail.y));
+    const float aspect = h > 0 ? static_cast<float>(w) / h : 1.0f;
+    p.contentMin = {ImGui::GetCursorScreenPos().x, ImGui::GetCursorScreenPos().y};
+    p.contentSize = {static_cast<float>(w), static_cast<float>(h)};
+    p.hovered = ImGui::IsWindowHovered();
+
+    handleViewportInput(p);
+
+    p.fb.resize(w, h);
+    p.fb.bind();
+    renderer_.renderView(p.camera, w, h, settings_);
+    Framebuffer::unbind();
+
+    const ImVec2 imgTL = ImGui::GetCursorScreenPos();
+    ImGui::Image(static_cast<ImTextureID>(static_cast<intptr_t>(p.fb.colorTexture())),
+                 ImVec2(static_cast<float>(w), static_cast<float>(h)), ImVec2(0, 1),
+                 ImVec2(1, 0));
+
+    (void)imgTL;  // drop handling is done manually in frame() via dragPlace_
+
+    drawGizmo(p, aspect);
+
+    // Corner label like Hammer.
+    ImVec2 tl(p.contentMin.x, p.contentMin.y);
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    dl->AddText(ImVec2(tl.x + 8, tl.y + 6), IM_COL32(210, 210, 210, 200), p.title);
+
+    drawEntityTags(p, aspect, dl);
+    drawSubObjectOverlay(p, aspect, dl);
+    drawFaceOverlay(p, aspect, dl);
+    drawClipOverlay(p, aspect, dl);
+    drawBlockOverlay(p, aspect, dl);
+
+    // Snap-to-geometry indicator: a ring on the vertex a move locked onto.
+    if (snapMarkOn_ && (moveDrag_ != 0 || mx_.op != 0)) {
+        const glm::mat4 vpm = p.camera.proj(aspect) * p.camera.view();
+        const glm::vec4 c = vpm * glm::vec4(snapMark_, 1.0f);
+        if (c.w > 1e-4f) {
+            const ImVec2 s(
+                p.contentMin.x + (c.x / c.w * 0.5f + 0.5f) * p.contentSize.x,
+                p.contentMin.y + (1.0f - (c.y / c.w * 0.5f + 0.5f)) * p.contentSize.y);
+            dl->AddCircle(s, pb::ui::dp(9.0f), IM_COL32(120, 220, 255, 255), 12, 2.0f);
+            dl->AddLine(ImVec2(s.x - 12, s.y), ImVec2(s.x + 12, s.y),
+                        IM_COL32(120, 220, 255, 200));
+            dl->AddLine(ImVec2(s.x, s.y - 12), ImVec2(s.x, s.y + 12),
+                        IM_COL32(120, 220, 255, 200));
+        }
+    }
+    drawSelectionDims(p, aspect, dl);
+    drawCordonOverlay(p, aspect, dl);
+    drawRoadOverlay(p, aspect, dl);
+    drawLeakOverlay(p, aspect, dl);
+    drawPlacePreview(p, aspect, dl);
+    drawModalXformHud(p, dl);
+
+    if (!hasMap() && p.kind == ViewKind::Perspective) {
+        const char* msg = "Open a .bsp  —  File > Open BSP  (Ctrl+O)  or drag one in";
+        const ImVec2 ts = ImGui::CalcTextSize(msg);
+        dl->AddText(ImVec2(tl.x + (p.contentSize.x - ts.x) * 0.5f,
+                           tl.y + (p.contentSize.y - ts.y) * 0.5f),
+                    IM_COL32(180, 180, 185, 220), msg);
+    }
+
+    // Floating top-left toolbar (like Blender's header): pick mode always,
+    // plus the Move/Rotate/Scale switcher once something is selected.
+    if (hasDoc() && tool_ == Tool::Select) {
+        ImGui::SetCursorScreenPos(ImVec2(tl.x + 8, tl.y + 26));
+        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(3, 3));
+        const ImVec2 bsz(pb::ui::dp(26.0f), pb::ui::dp(22.0f));
+        auto tbtn = [&](const char* ic, bool on, const char* tip, int id) {
+            ImGui::PushStyleColor(ImGuiCol_Button,
+                                  on ? pb::ui::col::acc : pb::ui::col::bg2);
+            ImGui::PushStyleColor(ImGuiCol_Text,
+                                  on ? pb::ui::col::bg1 : pb::ui::col::tx);
+            ImGui::PushID(id);
+            const bool hit = ImGui::Button(ic, bsz);
+            ImGui::PopID();
+            ImGui::PopStyleColor(2);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tip);
+            return hit;
+        };
+        if (tbtn(ICON_FA_OBJECT_GROUP, selectWholePiece_,
+                 "Pick the whole piece", 20))
+            selectWholePiece_ = true;
+        ImGui::SameLine();
+        if (tbtn(ICON_FA_OBJECT_UNGROUP, !selectWholePiece_,
+                 "Pick one part at a time", 21))
+            selectWholePiece_ = false;
+
+        if (!selection_.empty()) {
+            ImGui::SameLine(0, pb::ui::dp(10.0f));
+            struct G { const char* ic; const char* tip; };
+            static const G gs[] = {{ICON_FA_UP_DOWN_LEFT_RIGHT, "Move  (W)"},
+                                   {ICON_FA_ROTATE, "Rotate  (E)"},
+                                   {ICON_FA_MAXIMIZE, "Scale  (R)"}};
+            for (int g = 0; g < 3; ++g) {
+                if (g) ImGui::SameLine();
+                if (tbtn(gs[g].ic, gizmoMode_ == g, gs[g].tip, g)) gizmoMode_ = g;
+            }
+        }
+        ImGui::PopStyleVar();
+    }
+    ImGui::End();
+}
+
+void Editor::drawEntityTags(ViewPanel& p, float aspect, ImDrawList* dl) {
+    if (!hasDoc() || doc_.entities().empty()) return;
+    // Always show entity markers on a hand-built map; on a big decompile (1000+
+    // entities) the 3D view only shows them when "Point entities" is on, or it
+    // becomes an unreadable scribble.
+    const bool few = doc_.entities().size() <= 200;
+    if (p.kind == ViewKind::Perspective && !settings_.showPointEntities && !few)
+        return;
+    const glm::mat4 vp = p.camera.proj(aspect) * p.camera.view();
+    const ImVec2 tl(p.contentMin.x, p.contentMin.y);
+    const ImVec2 br(tl.x + p.contentSize.x, tl.y + p.contentSize.y);
+
+    // Project a world point to viewport pixels; ok=false when behind the eye.
+    auto project = [&](const glm::vec3& w, bool& ok) -> ImVec2 {
+        const glm::vec4 c = vp * glm::vec4(w, 1.0f);
+        ok = c.w > 1e-4f;
+        if (!ok) return {};
+        return ImVec2(tl.x + (c.x / c.w * 0.5f + 0.5f) * p.contentSize.x,
+                      tl.y + (1.0f - (c.y / c.w * 0.5f + 0.5f)) * p.contentSize.y);
+    };
+    auto onScreen = [&](const ImVec2& s) {
+        return s.x >= tl.x - 64 && s.x <= br.x + 64 && s.y >= tl.y - 64 &&
+               s.y <= br.y + 64;
+    };
+    auto entColor = [&](const std::string& cls, glm::vec3 def) {
+        if (const fgd::EntityClass* ec = fgd_.flattened(cls); ec && ec->hasColor)
+            return ec->color;
+        return def;
+    };
+
+    // --- entity centres, by targetname, for connection lines ------------------
+    auto centreOf = [&](const map::MapEntity& e) {
+        if (e.solids.empty()) return e.origin;
+        glm::vec3 mn(1e30f), mx(-1e30f);
+        for (const auto& s : e.solids) {
+            mn = glm::min(mn, s.boundsMin);
+            mx = glm::max(mx, s.boundsMax);
+        }
+        return 0.5f * (mn + mx);
+    };
+    std::vector<glm::vec3> centres(doc_.entities().size());
+    std::vector<std::pair<std::string, glm::vec3>> named;
+    for (size_t i = 0; i < doc_.entities().size(); ++i) {
+        centres[i] = centreOf(doc_.entities()[i]);
+        const std::string tn = doc_.entities()[i].kv.get("targetname");
+        if (!tn.empty()) named.emplace_back(tn, centres[i]);
+    }
+    std::unordered_multimap<std::string, int> byName;
+    byName.reserve(doc_.entities().size());
+    for (int i = 0; i < (int)doc_.entities().size(); ++i) {
+        const std::string& tn = doc_.entities()[i].kv.get("targetname");
+        if (!tn.empty()) byName.emplace(tn, i);
+    }
+
+    // --- I/O connection lines (drawn first, behind the boxes) ----------------
+    // On a small map every wire is useful context; on a real (often 1000+
+    // entity) decompiled map only the selection's own wiring is drawn, or the
+    // view would be an unreadable scribble.
+    // `linked` collects every entity index at either end of a drawn connection
+    // so the label pass can name just those + the selection.
+    std::vector<char> linked(doc_.entities().size(), 0);
+    const bool wireAll = doc_.entities().size() <= 60;
+    const ImU32 wireCol = IM_COL32(196, 150, 230, 165);
+    const ImU32 wireSel = IM_COL32(255, 190, 120, 235);
+    for (size_t i = 0; i < doc_.entities().size(); ++i) {
+        const auto& e = doc_.entities()[i];
+        if (e.connections.empty()) continue;
+        if (!wireAll && (int)i != selectedEntity_) continue;
+        for (const auto& conn : e.connections) {
+            std::string tgt = conn.second;
+            const size_t comma = tgt.find_first_of(",\x1b");
+            if (comma != std::string::npos) tgt = tgt.substr(0, comma);
+            if (tgt.empty()) continue;
+            auto range = byName.equal_range(tgt);
+            for (auto it = range.first; it != range.second; ++it) {
+                const int j = it->second;
+                bool a, b;
+                const ImVec2 s0 = project(centres[i], a);
+                const ImVec2 s1 = project(centres[j], b);
+                if (!a || !b) continue;
+                const bool hot = (int)i == selectedEntity_ || j == selectedEntity_;
+                if (hot) { linked[i] = 1; linked[j] = 1; }
+                dl->AddLine(s0, s1, hot ? wireSel : wireCol, hot ? 2.0f : 1.3f);
+                const ImVec2 d(s1.x - s0.x, s1.y - s0.y);
+                const float L = std::sqrt(d.x * d.x + d.y * d.y);
+                if (L > 1.0f) {
+                    const ImVec2 u(d.x / L, d.y / L), n(-u.y, u.x);
+                    const ImVec2 tip(s1.x - u.x * 13, s1.y - u.y * 13);
+                    dl->AddTriangleFilled(s1, ImVec2(tip.x + n.x * 6, tip.y + n.y * 6),
+                                          ImVec2(tip.x - n.x * 6, tip.y - n.y * 6),
+                                          hot ? wireSel : wireCol);
+                }
+            }
+        }
+    }
+
+    // --- path_track / path_corner route lines -------------------------------
+    // These chain via the `target` key (not the I/O block), so trace them
+    // separately and draw the route as a bright polyline with arrowheads.
+    {
+        const ImU32 routeCol = IM_COL32(120, 230, 120, 230);
+        for (int i = 0; i < (int)doc_.entities().size(); ++i) {
+            const std::string& c = doc_.entities()[i].classname;
+            if (c != "path_track" && c != "path_corner" && c != "move_rope" &&
+                c != "keyframe_rope")
+                continue;
+            const std::string tgt = doc_.entities()[i].kv.get("target");
+            if (tgt.empty()) continue;
+            auto range = byName.equal_range(tgt);
+            for (auto it = range.first; it != range.second; ++it) {
+                bool a, b;
+                const ImVec2 s0 = project(centres[i], a);
+                const ImVec2 s1 = project(centres[it->second], b);
+                if (!a || !b) continue;
+                dl->AddLine(s0, s1, routeCol, 2.5f);
+                const ImVec2 d(s1.x - s0.x, s1.y - s0.y);
+                const float L = std::sqrt(d.x * d.x + d.y * d.y);
+                if (L > 12.0f) {
+                    const ImVec2 u(d.x / L, d.y / L), n(-u.y, u.x);
+                    const ImVec2 mid((s0.x + s1.x) * 0.5f, (s0.y + s1.y) * 0.5f);
+                    dl->AddTriangleFilled(
+                        ImVec2(mid.x + u.x * 8, mid.y + u.y * 8),
+                        ImVec2(mid.x - u.x * 4 + n.x * 5, mid.y - u.y * 4 + n.y * 5),
+                        ImVec2(mid.x - u.x * 4 - n.x * 5, mid.y - u.y * 4 - n.y * 5),
+                        routeCol);
+                }
+            }
+        }
+    }
+
+    // --- per-entity helper box + label -------------------------------------
+    // A hand-built map labels every entity; a big decompile labels just the
+    // selection + what's wired to it (or the view is an unreadable scribble).
+    const bool labelAll = few && selectedEntity_ < 0;
+    std::vector<ImVec2> labelled;
+    auto crowded = [&](const ImVec2& s) {
+        for (const auto& q : labelled)
+            if (std::fabs(q.x - s.x) < 60.0f && std::fabs(q.y - s.y) < 15.0f)
+                return true;
+        return false;
+    };
+
+    for (int i = 0; i < static_cast<int>(doc_.entities().size()); ++i) {
+        const auto& e = doc_.entities()[i];
+        const bool sel = (i == selectedEntity_);
+        const bool brush = !e.solids.empty();
+
+        bool ok;
+        const ImVec2 sp = project(centres[i], ok);
+        if (!ok || !onScreen(sp)) continue;
+
+        const glm::vec3 rgb = entColor(e.classname, glm::vec3(0.90f, 0.82f, 0.62f));
+        const ImU32 col =
+            sel ? IM_COL32(255, 170, 80, 255)
+                : IM_COL32((int)(rgb.r * 255), (int)(rgb.g * 255), (int)(rgb.b * 255),
+                           235);
+
+        if (!brush) {
+            // Wire box sized from the FGD (fallback to a small cube).
+            glm::vec3 mn(-8), mx(8);
+            if (const fgd::EntityClass* ec = fgd_.flattened(e.classname);
+                ec && ec->hasSize) {
+                mn = ec->sizeMin;
+                mx = ec->sizeMax;
+            }
+            const glm::vec3 o = e.origin;
+            const glm::vec3 cs[8] = {
+                o + glm::vec3(mn.x, mn.y, mn.z), o + glm::vec3(mx.x, mn.y, mn.z),
+                o + glm::vec3(mx.x, mx.y, mn.z), o + glm::vec3(mn.x, mx.y, mn.z),
+                o + glm::vec3(mn.x, mn.y, mx.z), o + glm::vec3(mx.x, mn.y, mx.z),
+                o + glm::vec3(mx.x, mx.y, mx.z), o + glm::vec3(mn.x, mx.y, mx.z)};
+            ImVec2 pv[8];
+            bool all = true;
+            for (int k = 0; k < 8; ++k) {
+                bool cok;
+                pv[k] = project(cs[k], cok);
+                all = all && cok;
+            }
+            if (all) {
+                static const int E[12][2] = {{0, 1}, {1, 2}, {2, 3}, {3, 0},
+                                             {4, 5}, {5, 6}, {6, 7}, {7, 4},
+                                             {0, 4}, {1, 5}, {2, 6}, {3, 7}};
+                const ImU32 boxc = sel ? col
+                                       : IM_COL32((int)(rgb.r * 255), (int)(rgb.g * 255),
+                                                  (int)(rgb.b * 255), 120);
+                for (auto& ed : E)
+                    dl->AddLine(pv[ed[0]], pv[ed[1]], boxc, sel ? 2.0f : 1.0f);
+            }
+
+            // Facing tick from angles "P Y R" (selected entity only).
+            const std::string ang = sel ? e.kv.get("angles") : std::string();
+            if (!ang.empty()) {
+                float pit = 0, yaw = 0, rol = 0;
+                std::sscanf(ang.c_str(), "%f %f %f", &pit, &yaw, &rol);
+                const float cy = std::cos(yaw * kDeg2Rad), sy = std::sin(yaw * kDeg2Rad);
+                const float cp = std::cos(pit * kDeg2Rad), spp = std::sin(pit * kDeg2Rad);
+                const glm::vec3 dir(cp * cy, cp * sy, -spp);
+                bool eok;
+                const ImVec2 e1 = project(e.origin + dir * 40.0f, eok);
+                if (eok) dl->AddLine(sp, e1, col, sel ? 2.0f : 1.5f);
+            }
+        }
+
+        // Clear diamond marker (bigger + outlined so model-less entities like
+        // path_track / lights actually read in the 3D view).
+        if (!brush) {
+            const float rr = sel ? 8.0f : 6.0f;
+            const ImVec2 dpts[4] = {{sp.x, sp.y - rr}, {sp.x + rr, sp.y},
+                                    {sp.x, sp.y + rr}, {sp.x - rr, sp.y}};
+            dl->AddConvexPolyFilled(dpts, 4, col);
+            dl->AddPolyline(dpts, 4, IM_COL32(15, 15, 18, 235), ImDrawFlags_Closed,
+                            1.6f);
+        } else {
+            dl->AddRectFilled(ImVec2(sp.x - 3, sp.y - 3), ImVec2(sp.x + 3, sp.y + 3),
+                              col);
+        }
+        if (sel)
+            dl->AddRect(ImVec2(sp.x - 9, sp.y - 9), ImVec2(sp.x + 9, sp.y + 9), col, 0,
+                        0, 2.0f);
+
+        const bool wantLabel = sel || labelAll || (i < (int)linked.size() && linked[i]);
+        if (!wantLabel) continue;
+        if (!sel && crowded(sp)) continue;
+        labelled.push_back(sp);
+        const std::string& tn = e.kv.get("targetname");
+        // Path nodes chain tightly — the targetname alone (the diamond already
+        // shows the class) keeps the route readable. Everything else gets
+        // "class  name".
+        const bool pathNode = e.classname == "path_track" ||
+                              e.classname == "path_corner";
+        const std::string lbl =
+            tn.empty() ? e.classname
+                       : (pathNode ? tn : e.classname + "  " + tn);
+        // Stagger the label vertically for dense chains so they don't stack.
+        const float dy = pathNode ? ((i & 1) ? 9.0f : -13.0f) : -7.0f;
+        dl->AddText(ImVec2(sp.x + 8, sp.y + dy + 1), IM_COL32(20, 20, 22, 220),
+                    lbl.c_str());
+        dl->AddText(ImVec2(sp.x + 7, sp.y + dy), col, lbl.c_str());
+    }
+}
+
+void Editor::drawGizmo(ViewPanel& p, float aspect) {
+    if (!hasDoc() || selection_.empty() || tool_ != Tool::Select) return;
+    // Only one viewport drives the gizmo. Manipulate() hit-tests the shared
+    // mouse position, so running it in all four let an unhovered view grab the
+    // drag. While a drag is live it stays pinned to the view that started it.
+    if (gizmoUsing_ ? gizmoView_ != static_cast<int>(p.kind) : !p.hovered) return;
+
+    ImGuizmo::SetOrthographic(p.kind != ViewKind::Perspective);
+    ImGuizmo::SetDrawlist();
+    ImGuizmo::SetRect(p.contentMin.x, p.contentMin.y, p.contentSize.x, p.contentSize.y);
+    ImGuizmo::SetID(static_cast<int>(p.kind));
+    ImGuizmo::SetGizmoSizeClipSpace(gizmoSize_ * pb::ui::g_scale);
+    ImGuizmo::AllowAxisFlip(false);
+    {
+        ImGuizmo::Style& gs = ImGuizmo::GetStyle();
+        const float k = gizmoStyle_ == 1 ? 1.6f : gizmoStyle_ == 2 ? 0.6f : 1.0f;
+        gs.TranslationLineThickness = 5.0f * k;
+        gs.TranslationLineArrowSize = 8.0f * k;
+        gs.RotationLineThickness = 4.0f * k;
+        gs.ScaleLineThickness = 5.0f * k;
+        gs.HatchedAxisLineThickness = 6.0f * k;
+        gs.CenterCircleSize = 7.0f * (gizmoStyle_ == 2 ? 0.8f : 1.0f);
+    }
+
+    const glm::mat4 view = p.camera.view();
+    const glm::mat4 proj = p.camera.proj(aspect);
+
+    const ImGuizmo::OPERATION op = gizmoMode_ == 1   ? ImGuizmo::ROTATE
+                                   : gizmoMode_ == 2 ? ImGuizmo::SCALE
+                                                     : ImGuizmo::TRANSLATE;
+
+    // Idle: park the gizmo on the selection centre. Dragging: keep the matrix
+    // we've been accumulating so the pivot doesn't chase the deforming solids.
+    glm::mat4 m = gizmoUsing_ ? gizmoMat_
+                              : glm::translate(glm::mat4(1.0f), selectionCenter());
+    const glm::mat4 before = m;
+
+    float snapv[3] = {float(gridSize_), float(gridSize_), float(gridSize_)};
+    if (gizmoMode_ == 1) snapv[0] = snapv[1] = snapv[2] = 5.0f;   // 5 deg
+    if (gizmoMode_ == 2) snapv[0] = snapv[1] = snapv[2] = 0.05f;  // 5%
+
+    ImGuizmo::Manipulate(&view[0][0], &proj[0][0], op, ImGuizmo::WORLD, &m[0][0],
+                         nullptr, snap_ ? snapv : nullptr);
+
+    if (!gizmoUsing_ && ImGuizmo::IsUsing()) {
+        // Drag just started — snapshot the selection and the pre-drag matrix.
+        gizmoUsing_ = true;
+        gizmoView_ = static_cast<int>(p.kind);
+        gizmoStart_ = before;
+        gizmoRefs_.clear();
+        gizmoSnap_.clear();
+        for (const auto& r : selection_)
+            if (const map::Solid* s = doc_.resolve(r)) {
+                gizmoRefs_.push_back(r);
+                gizmoSnap_.push_back(*s);
+            }
+    }
+
+    if (gizmoUsing_) {
+        gizmoMat_ = m;
+        // One cumulative transform off the snapshot — no per-frame delta to
+        // accumulate error, so rotate/scale land exactly where the gizmo says.
+        const glm::mat4 x = m * glm::inverse(gizmoStart_);
+        for (size_t i = 0; i < gizmoRefs_.size(); ++i)
+            if (map::Solid* s = doc_.resolve(gizmoRefs_[i])) {
+                *s = gizmoSnap_[i];
+                s->transform(x);
+            }
+        docMeshDirty_ = true;
+
+        if (!ImGuizmo::IsUsing()) {  // released
+            gizmoUsing_ = false;
+            gizmoView_ = -1;
+            gizmoRefs_.clear();
+            gizmoSnap_.clear();
+            afterEdit(gizmoMode_ == 1 ? "Rotate" : gizmoMode_ == 2 ? "Scale" : "Move");
+        }
+    }
+}
+
+glm::vec3 Editor::snapVec(const glm::vec3& v) const {
+    if (!snap_ || gridSize_ <= 0) return v;
+    const float g = float(gridSize_);
+    return glm::round(v / g) * g;
+}
+
+float Editor::snapF(float v) const {
+    if (!snap_ || gridSize_ <= 0) return v;
+    const float g = float(gridSize_);
+    return std::round(v / g) * g;
+}
+
+// --------------------------------------------------------------------------
+// Sub-object (Vertex / Edge / Face) editing
+// --------------------------------------------------------------------------
+void Editor::rebuildHandles() {
+    handlesDirty_ = false;
+    handles_ = {};
+    subHot_ = -1;
+    if (tool_ != Tool::Vertex || selection_.size() != 1) {
+        subSel_ = -1;
+        return;
+    }
+    if (const map::Solid* s = doc_.resolve(selection_[0]))
+        handles_ = map::extractHandles(*s, 0.5f);
+    const int n = subMode_ == SubMode::Vertex ? (int)handles_.verts.size()
+                  : subMode_ == SubMode::Edge ? (int)handles_.edges.size()
+                                              : (int)handles_.faces.size();
+    if (subSel_ >= n) subSel_ = -1;
+}
+
+namespace {
+// Screen position of a world point in viewport p; ok=false when behind eye.
+ImVec2 projectPt(const ViewKind, const glm::mat4& vp, const glm::vec2& cmin,
+                 const glm::vec2& csize, const glm::vec3& w, bool& ok) {
+    const glm::vec4 c = vp * glm::vec4(w, 1.0f);
+    ok = c.w > 1e-4f;
+    if (!ok) return {};
+    return ImVec2(cmin.x + (c.x / c.w * 0.5f + 0.5f) * csize.x,
+                  cmin.y + (1.0f - (c.y / c.w * 0.5f + 0.5f)) * csize.y);
+}
+}  // namespace
+
+void Editor::handleSubObjectInput(ViewPanel& p) {
+    if (tool_ != Tool::Vertex) return;
+    if (handlesDirty_) rebuildHandles();
+    if (selection_.size() != 1) return;
+    map::Solid* s = doc_.resolve(selection_[0]);
+    if (!s) return;
+
+    ImGuiIO& io = ImGui::GetIO();
+    const glm::mat4 vp = p.camera.proj(p.contentSize.x / std::max(1.0f, p.contentSize.y)) *
+                         p.camera.view();
+    const ImVec2 mouse = ImGui::GetMousePos();
+
+    // Handle world position for index i in the current sub-mode.
+    auto handlePos = [&](int i) -> glm::vec3 {
+        if (i < 0) return glm::vec3(0);
+        if (subMode_ == SubMode::Vertex) return handles_.verts[i].pos;
+        if (subMode_ == SubMode::Edge)
+            return 0.5f * (handles_.verts[handles_.edges[i].a].pos +
+                           handles_.verts[handles_.edges[i].b].pos);
+        return handles_.faces[i].centroid;
+    };
+    auto vertIdxFor = [&](int i) {
+        std::vector<int> out;
+        if (i < 0) return out;
+        if (subMode_ == SubMode::Vertex) out = {i};
+        else if (subMode_ == SubMode::Edge)
+            out = {handles_.edges[i].a, handles_.edges[i].b};
+        else out = handles_.faces[i].verts;
+        return out;
+    };
+    const int count = subMode_ == SubMode::Vertex ? (int)handles_.verts.size()
+                      : subMode_ == SubMode::Edge ? (int)handles_.edges.size()
+                                                  : (int)handles_.faces.size();
+
+    // Hover test.
+    subHot_ = -1;
+    float bestD = 12.0f;
+    for (int i = 0; i < count; ++i) {
+        bool ok;
+        const ImVec2 sp = projectPt(p.kind, vp, p.contentMin, p.contentSize,
+                                    handlePos(i), ok);
+        if (!ok) continue;
+        const float d = std::hypot(sp.x - mouse.x, sp.y - mouse.y);
+        if (d < bestD) { bestD = d; subHot_ = i; }
+    }
+
+    // Drag plane: screen-parallel through the handle.
+    auto planeHit = [&](const ImVec2& m, const glm::vec3& through) {
+        glm::vec3 ro, rd;
+        p.camera.pixelRay({m.x - p.contentMin.x, m.y - p.contentMin.y}, p.contentSize,
+                          ro, rd);
+        const glm::vec3 n = p.kind == ViewKind::Perspective
+                                ? -p.camera.forward()
+                                : p.camera.orthoForwardAxis();
+        const float den = glm::dot(n, rd);
+        if (std::fabs(den) < 1e-6f) return through;
+        const float t = (glm::dot(n, through) - glm::dot(n, ro)) / den;
+        return ro + rd * t;
+    };
+
+    if (ImGui::IsMouseClicked(ImGuiMouseButton_Left) && p.hovered) {
+        subSel_ = subHot_;
+        if (subSel_ >= 0) {
+            subDragging_ = true;
+            subDragView_ = p.kind;
+            subDragStartPos_ = subCurPos_ = handlePos(subSel_);
+            subDragStartHit_ = planeHit(mouse, subDragStartPos_);
+        }
+    }
+
+    if (subDragging_ && p.kind != subDragView_) return;
+    if (subDragging_ && ImGui::IsMouseDown(ImGuiMouseButton_Left) && subSel_ >= 0) {
+        const glm::vec3 hit = planeHit(mouse, subDragStartPos_);
+        glm::vec3 want = subDragStartPos_ + (hit - subDragStartHit_);
+        if (snap_) want = snapVec(want);
+        const glm::vec3 delta = want - subCurPos_;
+        if (glm::dot(delta, delta) > 1e-10f) {
+            map::moveVertexHandles(*s, handles_, vertIdxFor(subSel_), delta);
+            subCurPos_ = want;
+            docMeshDirty_ = true;
+            // keep handle cache positions in step so the overlay tracks the drag
+            for (int vi : vertIdxFor(subSel_))
+                if (vi >= 0 && vi < (int)handles_.verts.size())
+                    handles_.verts[vi].pos += delta;
+            for (auto& fh : handles_.faces) {
+                glm::vec3 c(0);
+                for (int vi : fh.verts) c += handles_.verts[vi].pos;
+                if (!fh.verts.empty()) fh.centroid = c / (float)fh.verts.size();
+            }
+        }
+    }
+
+    if (subDragging_ && ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
+        subDragging_ = false;
+        if (glm::distance(subCurPos_, subDragStartPos_) > 1e-3f) {
+            afterEdit(subMode_ == SubMode::Vertex ? "Edit vertex"
+                      : subMode_ == SubMode::Edge ? "Edit edge"
+                                                  : "Edit face");
+            handlesDirty_ = true;
+        }
+    }
+}
+
+void Editor::drawSubObjectOverlay(ViewPanel& p, float aspect, ImDrawList* dl) {
+    if (tool_ != Tool::Vertex || selection_.size() != 1) return;
+    if (handlesDirty_) rebuildHandles();
+    const glm::mat4 vp = p.camera.proj(aspect) * p.camera.view();
+
+    auto pr = [&](const glm::vec3& w, bool& ok) {
+        return projectPt(p.kind, vp, p.contentMin, p.contentSize, w, ok);
+    };
+
+    const ImU32 cCold = IM_COL32(120, 200, 255, 230);
+    const ImU32 cHot = IM_COL32(255, 235, 150, 255);
+    const ImU32 cSel = IM_COL32(255, 150, 60, 255);
+
+    if (subMode_ == SubMode::Edge) {
+        for (int i = 0; i < (int)handles_.edges.size(); ++i) {
+            bool a, b;
+            const ImVec2 pa = pr(handles_.verts[handles_.edges[i].a].pos, a);
+            const ImVec2 pb = pr(handles_.verts[handles_.edges[i].b].pos, b);
+            if (!a || !b) continue;
+            const ImU32 c = i == subSel_ ? cSel : i == subHot_ ? cHot : cCold;
+            dl->AddLine(pa, pb, c, i == subSel_ ? 3.0f : 1.6f);
+            const ImVec2 m((pa.x + pb.x) * 0.5f, (pa.y + pb.y) * 0.5f);
+            dl->AddRectFilled(ImVec2(m.x - 3, m.y - 3), ImVec2(m.x + 3, m.y + 3), c);
+        }
+    } else if (subMode_ == SubMode::Face) {
+        for (int i = 0; i < (int)handles_.faces.size(); ++i) {
+            const auto& fh = handles_.faces[i];
+            const ImU32 c = i == subSel_ ? cSel : i == subHot_ ? cHot : cCold;
+            for (size_t k = 0; k < fh.verts.size(); ++k) {
+                bool a, b;
+                const ImVec2 pa = pr(handles_.verts[fh.verts[k]].pos, a);
+                const ImVec2 pb =
+                    pr(handles_.verts[fh.verts[(k + 1) % fh.verts.size()]].pos, b);
+                if (a && b) dl->AddLine(pa, pb, c, i == subSel_ ? 2.5f : 1.0f);
+            }
+            bool ok;
+            const ImVec2 cc = pr(fh.centroid, ok);
+            if (ok) {
+                dl->AddCircleFilled(cc, i == subSel_ ? 6.0f : 4.0f, c);
+            }
+        }
+    } else {  // Vertex
+        for (int i = 0; i < (int)handles_.verts.size(); ++i) {
+            bool ok;
+            const ImVec2 sp = pr(handles_.verts[i].pos, ok);
+            if (!ok) continue;
+            const ImU32 c = i == subSel_ ? cSel : i == subHot_ ? cHot : cCold;
+            const float r = i == subSel_ ? 5.0f : i == subHot_ ? 4.5f : 3.5f;
+            dl->AddRectFilled(ImVec2(sp.x - r, sp.y - r), ImVec2(sp.x + r, sp.y + r), c);
+            dl->AddRect(ImVec2(sp.x - r, sp.y - r), ImVec2(sp.x + r, sp.y + r),
+                        IM_COL32(20, 25, 35, 220));
+        }
+    }
+
+    // Readout of the current handle position while dragging.
+    if (subDragging_) {
+        char b[64];
+        std::snprintf(b, sizeof(b), "%.0f  %.0f  %.0f", subCurPos_.x, subCurPos_.y,
+                      subCurPos_.z);
+        const ImVec2 tl(p.contentMin.x + 8, p.contentMin.y + p.contentSize.y - 24);
+        dl->AddText(ImVec2(tl.x + 1, tl.y + 1), IM_COL32(0, 0, 0, 200), b);
+        dl->AddText(tl, IM_COL32(255, 210, 140, 255), b);
+    }
+}
+
+// --------------------------------------------------------------------------
+// Texture / Face-edit tool
+// --------------------------------------------------------------------------
+void Editor::handleTextureTool(ViewPanel& p) {
+    if (tool_ != Tool::Texture || !hasDoc() || !p.hovered) return;
+    ImGuiIO& io = ImGui::GetIO();
+    if (!ImGui::IsMouseReleased(ImGuiMouseButton_Left) ||
+        ImGui::IsMouseDragPastThreshold(ImGuiMouseButton_Left, 4.0f))
+        return;
+
+    const ImVec2 m = ImGui::GetMousePos();
+    glm::vec3 ro, rd;
+    p.camera.pixelRay({m.x - p.contentMin.x, m.y - p.contentMin.y}, p.contentSize, ro,
+                      rd);
+
+    map::SolidRef hitRef;
+    int hitFace = -1;
+    float bestT = 1e30f;
+    auto test = [&](const map::Solid& s, int ent, int idx) {
+        float t;
+        int fi;
+        if (s.valid && map::raySolidFace(ro, rd, s, t, fi) && t < bestT) {
+            bestT = t;
+            hitRef = {ent, idx};
+            hitFace = fi;
+        }
+    };
+    const auto& ws = doc_.worldSolids();
+    for (int i = 0; i < (int)ws.size(); ++i) test(ws[i], -1, i);
+    for (int e = 0; e < (int)doc_.entities().size(); ++e) {
+        const auto& es = doc_.entities()[e].solids;
+        for (int i = 0; i < (int)es.size(); ++i) test(es[i], e, i);
+    }
+
+    if (hitFace < 0) {
+        if (!io.KeyShift && !io.KeyAlt) texFaces_.clear();
+        return;
+    }
+
+    // Alt-click = eyedropper: lift the whole projection off the clicked face
+    // (material + axes + scale + rotation + lightmap scale) into the panel /
+    // clipboard, without changing the selection.
+    if (io.KeyAlt) {
+        if (const map::Solid* s = doc_.resolve(hitRef);
+            s && hitFace < (int)s->faces.size()) {
+            texClip_ = s->faces[hitFace];
+            texClipSet_ = true;
+            std::snprintf(texMaterial_, sizeof(texMaterial_), "%s",
+                          texClip_.material.c_str());
+            status_ = "Sampled " + texClip_.material + " — Paste onto selected faces";
+        }
+        return;
+    }
+
+    const std::pair<map::SolidRef, int> pick{hitRef, hitFace};
+    auto it = std::find(texFaces_.begin(), texFaces_.end(), pick);
+    if (io.KeyShift) {
+        if (it != texFaces_.end())
+            texFaces_.erase(it);
+        else
+            texFaces_.push_back(pick);
+    } else {
+        texFaces_ = {pick};
+    }
+    // Load the clicked face's material into the panel field.
+    if (const map::Solid* s = doc_.resolve(hitRef);
+        s && hitFace < (int)s->faces.size())
+        std::snprintf(texMaterial_, sizeof(texMaterial_), "%s",
+                      s->faces[hitFace].material.c_str());
+    status_ = std::to_string(texFaces_.size()) + " face(s) selected";
+}
+
+void Editor::drawFaceOverlay(ViewPanel& p, float aspect, ImDrawList* dl) {
+    if (tool_ != Tool::Texture || texFaces_.empty()) return;
+    const glm::mat4 vp = p.camera.proj(aspect) * p.camera.view();
+    auto pr = [&](const glm::vec3& w, bool& ok) {
+        return projectPt(p.kind, vp, p.contentMin, p.contentSize, w, ok);
+    };
+    for (const auto& [ref, fi] : texFaces_) {
+        const map::Solid* s = doc_.resolve(ref);
+        if (!s || fi >= (int)s->faces.size()) continue;
+        const auto& f = s->faces[fi];
+        if (f.verts.size() < 3) continue;
+        std::vector<ImVec2> poly;
+        bool all = true;
+        for (const auto& v : f.verts) {
+            bool ok;
+            poly.push_back(pr(v, ok));
+            all = all && ok;
+        }
+        if (!all) continue;
+        dl->AddConvexPolyFilled(poly.data(), (int)poly.size(),
+                                IM_COL32(90, 170, 255, 60));
+        for (size_t k = 0; k < poly.size(); ++k)
+            dl->AddLine(poly[k], poly[(k + 1) % poly.size()],
+                        IM_COL32(120, 200, 255, 235), 2.0f);
+    }
+}
+
+void Editor::applyToTexFaces(const std::function<void(map::BrushFace&)>& fn,
+                             const char* undoLabel, bool commit) {
+    if (texFaces_.empty()) return;
+    for (const auto& [ref, fi] : texFaces_) {
+        map::Solid* s = doc_.resolve(ref);
+        if (s && fi < (int)s->faces.size()) fn(s->faces[fi]);
+    }
+    if (commit)
+        afterEdit(undoLabel);
+    else
+        buildAndUpload(meshOpts_);  // live preview, no undo entry yet
+}
+
+void Editor::drawFaceEditPanel() {
+    using namespace pb::ui;
+    if (fontUiMed) ImGui::PushFont(fontUiMed);
+    ImGui::PushStyleColor(ImGuiCol_Text, col::acc);
+    ImGui::TextUnformatted(ICON_FA_IMAGE "  Face edit");
+    ImGui::PopStyleColor();
+    if (fontUiMed) ImGui::PopFont();
+
+    if (texFaces_.empty()) {
+        ImGui::PushStyleColor(ImGuiCol_Text, col::faint);
+        ImGui::TextWrapped("Click a face in any viewport to texture it. "
+                           "Shift-click to add / remove faces.");
+        ImGui::PopStyleColor();
+        return;
+    }
+    ImGui::TextDisabled("%zu face(s) selected", texFaces_.size());
+
+    // Representative face for showing current values.
+    const map::Solid* rs = doc_.resolve(texFaces_[0].first);
+    if (!rs || texFaces_[0].second >= (int)rs->faces.size()) return;
+    const map::BrushFace& rf = rs->faces[texFaces_[0].second];
+    const auto& minfo = materials_.get(texMaterial_);
+
+    sectionLabel("MATERIAL");
+    ImGui::Image(static_cast<ImTextureID>(static_cast<intptr_t>(minfo.texture)),
+                 ImVec2(64, 64));
+    ImGui::SameLine();
+    ImGui::BeginGroup();
+    ImGui::SetNextItemWidth(-1);
+    ImGui::InputText("##mat", texMaterial_, sizeof(texMaterial_));
+    if (ImGui::Button(ICON_FA_CHECK "  Apply material", ImVec2(-1, 0))) {
+        std::string mm = texMaterial_;
+        applyToTexFaces([&](map::BrushFace& f) { f.material = mm; }, "Apply material",
+                        true);
+    }
+    if (ImGui::Button("Use current browser pick", ImVec2(-1, 0)))
+        std::snprintf(texMaterial_, sizeof(texMaterial_), "%s",
+                      blockMaterial_.c_str());
+    ImGui::EndGroup();
+    ImGui::TextDisabled("%dx%d%s", minfo.width, minfo.height,
+                        minfo.found ? "" : "  (not found)");
+
+    // Eyedropper clipboard + continuous-projection helpers.
+    ImGui::PushStyleColor(ImGuiCol_Text, col::faint);
+    ImGui::TextWrapped("Alt-click a face in a viewport to sample its projection.");
+    ImGui::PopStyleColor();
+    ImGui::BeginDisabled(!texClipSet_);
+    if (ImGui::Button(ICON_FA_EYE_DROPPER "  Paste sampled projection", ImVec2(-1, 0))) {
+        const map::BrushFace c = texClip_;
+        applyToTexFaces(
+            [&](map::BrushFace& f) {
+                f.material = c.material;
+                f.uAxis = c.uAxis; f.vAxis = c.vAxis;
+                f.uScale = c.uScale; f.vScale = c.vScale;
+                f.rotation = c.rotation;
+                f.lightmapScale = c.lightmapScale;
+            },
+            "Paste projection", true);
+        std::snprintf(texMaterial_, sizeof(texMaterial_), "%s", c.material.c_str());
+    }
+    ImGui::EndDisabled();
+    if (ImGui::Button(ICON_FA_OBJECT_GROUP "  Treat selection as one surface",
+                      ImVec2(-1, 0))) {
+        // Copy the representative face's world-space axes/scale/offset onto every
+        // selected face so the texture runs continuously across the group.
+        const glm::vec4 u = rf.uAxis, v = rf.vAxis;
+        const float us = rf.uScale, vs = rf.vScale, rot = rf.rotation;
+        applyToTexFaces(
+            [&](map::BrushFace& f) {
+                f.uAxis = u; f.vAxis = v;
+                f.uScale = us; f.vScale = vs; f.rotation = rot;
+            },
+            "Treat as one surface", true);
+    }
+
+    sectionLabel("PROJECTION");
+    auto flabel = [](const char* t) {
+        ImGui::PushStyleColor(ImGuiCol_Text, col::faint);
+        ImGui::TextUnformatted(t);
+        ImGui::PopStyleColor();
+    };
+    flabel("Shift  X / Y  (texels)");
+    float shift[2] = {rf.uAxis.w, rf.vAxis.w};
+    ImGui::SetNextItemWidth(-1);
+    if (ImGui::DragFloat2("##shift", shift, 1.0f, 0, 0, "%.1f"))
+        applyToTexFaces(
+            [&](map::BrushFace& f) { f.uAxis.w = shift[0]; f.vAxis.w = shift[1]; },
+            "Texture shift", false);
+    if (ImGui::IsItemDeactivatedAfterEdit())
+        applyToTexFaces([&](map::BrushFace&) {}, "Texture shift", true);
+    flabel("Scale  X / Y");
+    float scale[2] = {rf.uScale, rf.vScale};
+    ImGui::SetNextItemWidth(-1);
+    if (ImGui::DragFloat2("##scale", scale, 0.01f, 0.001f, 1000.0f, "%.3f"))
+        applyToTexFaces(
+            [&](map::BrushFace& f) {
+                f.uScale = scale[0] == 0 ? 0.25f : scale[0];
+                f.vScale = scale[1] == 0 ? 0.25f : scale[1];
+            },
+            "Texture scale", false);
+    if (ImGui::IsItemDeactivatedAfterEdit())
+        applyToTexFaces([&](map::BrushFace&) {}, "Texture scale", true);
+    flabel("Rotation");
+    float rot = rf.rotation;
+    ImGui::SetNextItemWidth(-1);
+    if (ImGui::DragFloat("##rot", &rot, 1.0f, -360.0f, 360.0f, "%.0f deg")) {
+        const float delta = rot - rf.rotation;
+        applyToTexFaces([&](map::BrushFace& f) { map::faceRotateUV(f, delta); },
+                        "Texture rotate", false);
+    }
+    if (ImGui::IsItemDeactivatedAfterEdit())
+        applyToTexFaces([&](map::BrushFace&) {}, "Texture rotate", true);
+    flabel("Lightmap scale");
+    float lm = rf.lightmapScale;
+    ImGui::SetNextItemWidth(-1);
+    if (ImGui::DragFloat("##lm", &lm, 1.0f, 1.0f, 512.0f, "%.0f"))
+        applyToTexFaces([&](map::BrushFace& f) { f.lightmapScale = lm; },
+                        "Lightmap scale", false);
+    if (ImGui::IsItemDeactivatedAfterEdit())
+        applyToTexFaces([&](map::BrushFace&) {}, "Lightmap scale", true);
+
+    sectionLabel("ALIGN");
+    if (ImGui::Button("World", ImVec2(-1, 0)))
+        applyToTexFaces([&](map::BrushFace& f) { map::faceAlignWorld(f); },
+                        "Align to world", true);
+    if (ImGui::Button("Face", ImVec2(-1, 0)))
+        applyToTexFaces([&](map::BrushFace& f) { map::faceAlignToFace(f); },
+                        "Align to face", true);
+
+    sectionLabel("JUSTIFY");
+    const int tw = minfo.width, th = minfo.height;
+    struct J { const char* label; int mode; };
+    const J js[] = {{"Fit", 0},  {"Top", 1},    {"Bottom", 2},
+                    {"Left", 3}, {"Right", 4},  {"Center", 5}};
+    for (int i = 0; i < 6; ++i) {
+        if (i % 3) ImGui::SameLine();
+        if (ImGui::Button(js[i].label, ImVec2(88, 0))) {
+            const int mode = js[i].mode;
+            applyToTexFaces(
+                [&](map::BrushFace& f) { map::faceJustifyUV(f, tw, th, mode); },
+                "Justify texture", true);
+        }
+    }
+
+    // --- Displacement ----------------------------------------------------
+    sectionLabel("DISPLACEMENT");
+    bool anyDisp = false, anyQuad = false;
+    for (const auto& [ref, fi] : texFaces_) {
+        const map::Solid* s = doc_.resolve(ref);
+        if (!s || fi >= (int)s->faces.size()) continue;
+        anyDisp = anyDisp || s->faces[fi].hasDisp;
+        anyQuad = anyQuad || s->faces[fi].verts.size() == 4;
+    }
+    if (!anyDisp) {
+        ImGui::PushStyleColor(ImGuiCol_Text, col::faint);
+        ImGui::TextWrapped(anyQuad ? "Turn the selected 4-sided face(s) into "
+                                     "editable terrain."
+                                   : "Select a single 4-sided face to make "
+                                     "terrain from it.");
+        ImGui::PopStyleColor();
+        ImGui::BeginDisabled(!anyQuad);
+        for (int p = 2; p <= 4; ++p) {
+            if (p > 2) ImGui::SameLine();
+            char lbl[24];
+            std::snprintf(lbl, sizeof(lbl), "Power %d", p);
+            if (ImGui::Button(lbl, ImVec2(90, 0)))
+                applyToTexFaces(
+                    [&](map::BrushFace& f) {
+                        if (f.verts.size() == 4) map::faceMakeDisplacement(f, p);
+                    },
+                    "Make displacement", true);
+        }
+        ImGui::EndDisabled();
+    } else {
+        ImGui::SetNextItemWidth(-1);
+        ImGui::SliderFloat("##dispR", &dispRadius_, 32.0f, 1024.0f, "radius %.0f");
+        ImGui::SetNextItemWidth(-1);
+        ImGui::SliderFloat("##dispA", &dispAmount_, 4.0f, 256.0f, "step %.0f");
+        if (ImGui::Button(ICON_FA_ARROW_UP "  Raise", ImVec2(-1, 0)))
+            sculptSelectedDisp(+dispAmount_);
+        if (ImGui::Button(ICON_FA_ARROW_DOWN "  Lower", ImVec2(-1, 0)))
+            sculptSelectedDisp(-dispAmount_);
+        ImGui::PushStyleColor(ImGuiCol_Text, col::faint);
+        ImGui::TextWrapped("Nudges the grid around each face's centre. "
+                           "(Interactive brush next.)");
+        ImGui::PopStyleColor();
+        if (ImGui::Button(ICON_FA_TRASH "  Remove displacement", ImVec2(-1, 0)))
+            applyToTexFaces(
+                [&](map::BrushFace& f) { f.hasDisp = false; f.dispInfo = map::KvNode{}; },
+                "Remove displacement", true);
+    }
+}
+
+void Editor::sculptSelectedDisp(float amount) {
+    if (texFaces_.empty()) return;
+    for (const auto& [ref, fi] : texFaces_) {
+        map::Solid* s = doc_.resolve(ref);
+        if (!s || fi >= (int)s->faces.size()) continue;
+        map::BrushFace& f = s->faces[fi];
+        if (!f.hasDisp || f.verts.size() != 4) continue;
+        glm::vec3 c(0.0f);
+        for (const auto& v : f.verts) c += v;
+        c *= 0.25f;
+        map::faceSculptDisplacement(f, c, dispRadius_, amount);
+    }
+    afterEdit(amount >= 0 ? "Raise displacement" : "Lower displacement");
+}
+
+// --------------------------------------------------------------------------
+// Clip tool  (draw a cut line in a 2D view; Tab cycles keep-front / back /
+// both; Enter applies to the selected brushes)
+// --------------------------------------------------------------------------
+void Editor::handleClipTool(ViewPanel& p) {
+    if (tool_ != Tool::Clip || !hasDoc() || p.kind == ViewKind::Perspective) return;
+    if (selection_.empty()) return;
+    ImGuiIO& io = ImGui::GetIO();
+
+    if (ImGui::IsKeyPressed(ImGuiKey_Tab)) clipMode_ = (clipMode_ + 1) % 3;
+
+    if (p.hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+        clipDragging_ = true;
+        clipArmed_ = false;
+        clipView_ = p.kind;
+        clipA_ = clipB_ = snapVec(viewPlanePoint(p, ImGui::GetMousePos()));
+    }
+    if (clipDragging_ && clipView_ == p.kind) {
+        clipB_ = snapVec(viewPlanePoint(p, ImGui::GetMousePos()));
+        if (ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
+            clipDragging_ = false;
+            clipArmed_ = glm::distance(clipA_, clipB_) > 1.0f;
+        }
+    }
+
+    if (clipArmed_ && (ImGui::IsKeyPressed(ImGuiKey_Enter) ||
+                       ImGui::IsKeyPressed(ImGuiKey_KeypadEnter))) {
+        applyClip();
+        clipArmed_ = false;
+    }
+    if (ImGui::IsKeyPressed(ImGuiKey_Escape)) { clipArmed_ = false; clipDragging_ = false; }
+}
+
+void Editor::applyClip() {
+    if (!clipArmed_ || selection_.empty()) return;
+    // Clip plane: contains the drawn line, perpendicular to the view.
+    glm::vec3 fwd;
+    switch (clipView_) {
+        case ViewKind::Top:   fwd = glm::vec3(0, 0, 1); break;
+        case ViewKind::Front: fwd = glm::vec3(0, 1, 0); break;
+        case ViewKind::Side:  fwd = glm::vec3(1, 0, 0); break;
+        default:              fwd = glm::vec3(0, 0, 1); break;
+    }
+    const glm::vec3 dir = clipB_ - clipA_;
+    glm::vec3 n = glm::cross(glm::normalize(dir), fwd);
+    if (glm::length(n) < 1e-4f) return;
+    n = glm::normalize(n);
+    const float d = glm::dot(n, clipA_);
+    const std::string mat = blockMaterial_;
+
+    // "Both" back-halves go back into the same container as their front half.
+    std::vector<map::Solid> addedWorld;
+    std::map<int, std::vector<map::Solid>> addedEnt;
+    for (const auto& r : selection_) {
+        map::Solid* s = doc_.resolve(r);
+        if (!s) continue;
+        if (clipMode_ == 2) {
+            map::Solid back = *s;
+            if (back.clip(-n, -d, mat)) {
+                back.id = doc_.nextId();
+                if (r.entity < 0) addedWorld.push_back(std::move(back));
+                else addedEnt[r.entity].push_back(std::move(back));
+            }
+            if (!s->clip(n, d, mat)) *s = map::Solid();  // front gone
+        } else if (clipMode_ == 0) {
+            s->clip(n, d, mat);
+        } else {
+            s->clip(-n, -d, mat);
+        }
+    }
+
+    auto dropEmpty = [](std::vector<map::Solid>& v) {
+        v.erase(std::remove_if(v.begin(), v.end(),
+                               [](const map::Solid& s) { return s.faces.empty(); }),
+                v.end());
+    };
+    dropEmpty(doc_.worldSolids());
+    for (auto& s : addedWorld) doc_.worldSolids().push_back(std::move(s));
+    for (auto& [ei, halves] : addedEnt)
+        if (ei >= 0 && ei < (int)doc_.entities().size())
+            for (auto& h : halves) doc_.entities()[ei].solids.push_back(std::move(h));
+    for (int i = (int)doc_.entities().size() - 1; i >= 0; --i) {
+        auto& e = doc_.entities()[i];
+        if (e.solids.empty()) continue;  // point entity — leave it
+        dropEmpty(e.solids);
+        if (e.solids.empty()) doc_.entities().erase(doc_.entities().begin() + i);
+    }
+
+    selection_.clear();
+    clearSelection();
+    afterEdit("Clip");
+    status_ = "Clipped";
+}
+
+void Editor::drawClipOverlay(ViewPanel& p, float aspect, ImDrawList* dl) {
+    if (tool_ != Tool::Clip || p.kind == ViewKind::Perspective) return;
+    if (!(clipDragging_ || clipArmed_) || clipView_ != p.kind) return;
+    const glm::mat4 vp = p.camera.proj(aspect) * p.camera.view();
+    bool a, b;
+    const ImVec2 pa = projectPt(p.kind, vp, p.contentMin, p.contentSize, clipA_, a);
+    const ImVec2 pb = projectPt(p.kind, vp, p.contentMin, p.contentSize, clipB_, b);
+    if (!a || !b) return;
+    dl->AddLine(pa, pb, IM_COL32(255, 90, 90, 240), 2.0f);
+    // extend the line across the viewport
+    ImVec2 d(pb.x - pa.x, pb.y - pa.y);
+    const float L = std::sqrt(d.x * d.x + d.y * d.y);
+    if (L > 1.0f) {
+        d.x /= L; d.y /= L;
+        dl->AddLine(ImVec2(pa.x - d.x * 4000, pa.y - d.y * 4000),
+                    ImVec2(pb.x + d.x * 4000, pb.y + d.y * 4000),
+                    IM_COL32(255, 90, 90, 90), 1.0f);
+    }
+    const char* mode = clipMode_ == 0 ? "keep FRONT" : clipMode_ == 1 ? "keep BACK"
+                                                                      : "keep BOTH";
+    char msg[64];
+    std::snprintf(msg, sizeof(msg), "Clip: %s   (Tab mode / Enter apply)", mode);
+    dl->AddText(ImVec2(p.contentMin.x + 8, p.contentMin.y + 24),
+                IM_COL32(255, 150, 150, 255), msg);
+}
+
+// Block tool: a depth field + live drag dimensions, so you can lay a wall to
+// an exact size without touching the 3D view.
+void Editor::drawBlockOverlay(ViewPanel& p, float aspect, ImDrawList* dl) {
+    if (tool_ != Tool::Block || p.kind == ViewKind::Perspective) return;
+    (void)aspect;
+    const ImVec2 tl(p.contentMin.x + pb::ui::dp(8.0f),
+                    p.contentMin.y + pb::ui::dp(26.0f));
+    ImGui::SetCursorScreenPos(tl);
+    ImGui::PushItemWidth(pb::ui::dp(90.0f));
+    ImGui::PushStyleColor(ImGuiCol_FrameBg, IM_COL32(24, 27, 32, 235));
+    float d = newBrushDepth_;
+    if (ImGui::DragFloat("##blockdepth", &d, 4.0f, 8.0f, 4096.0f, "depth %.0f"))
+        newBrushDepth_ = snapF(std::max(8.0f, d));
+    ImGui::PopStyleColor();
+    ImGui::PopItemWidth();
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("How thick the new brush is on the axis you can't see "
+                          "in this view.");
+
+    if (blockDragging_ && p.kind == blockView_) {
+        const glm::vec3 a = snapVec(blockA_), b = snapVec(blockB_);
+        const glm::vec3 s = glm::abs(b - a);
+        const glm::vec3 rt = p.camera.orthoRightAxis(), up = p.camera.orthoUpAxis();
+        const float w = std::fabs(glm::dot(s, rt)), h = std::fabs(glm::dot(s, up));
+        const glm::mat4 vp = p.camera.proj(p.contentSize.x /
+                                           std::max(1.0f, p.contentSize.y)) *
+                             p.camera.view();
+        bool ok;
+        const ImVec2 mid = projectPt(p.kind, vp, p.contentMin, p.contentSize,
+                                     0.5f * (a + b), ok);
+        if (ok) {
+            char buf[64];
+            std::snprintf(buf, sizeof(buf), "%.0f x %.0f  (deep %.0f)", w, h,
+                          newBrushDepth_);
+            dl->AddRectFilled(ImVec2(mid.x + 10, mid.y - 8),
+                              ImVec2(mid.x + 14 + ImGui::CalcTextSize(buf).x,
+                                     mid.y + 10),
+                              IM_COL32(20, 22, 26, 230), 3.0f);
+            dl->AddText(ImVec2(mid.x + 12, mid.y - 6),
+                        IM_COL32(255, 235, 200, 255), buf);
+        }
+    }
+}
+
+void Editor::handleBlockTool(ViewPanel& p) {
+    if (tool_ != Tool::Block || !hasDoc() || p.kind == ViewKind::Perspective) return;
+    ImGuiIO& io = ImGui::GetIO();
+
+    const glm::vec3 fwd = p.camera.orthoForwardAxis();
+    const glm::vec3 planePt = p.camera.orthoCenter;
+    const float planeD = glm::dot(fwd, planePt);
+    auto worldAt = [&](const ImVec2& m) {
+        glm::vec3 ro, rd;
+        p.camera.pixelRay({m.x - p.contentMin.x, m.y - p.contentMin.y}, p.contentSize,
+                          ro, rd);
+        const float denom = glm::dot(fwd, rd);
+        const float t = std::fabs(denom) > 1e-6f ? (planeD - glm::dot(fwd, ro)) / denom
+                                                 : 0.0f;
+        return ro + rd * t;
+    };
+
+    if (ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !io.KeyShift) {
+        blockDragging_ = true;
+        blockView_ = p.kind;
+        blockA_ = blockB_ = worldAt(ImGui::GetMousePos());
+    }
+    if (blockDragging_ && p.kind == blockView_) {
+        blockB_ = worldAt(ImGui::GetMousePos());
+
+        // Preview: the box from A..B, third axis extruded by newBrushDepth_.
+        glm::vec3 a = snapVec(blockA_), b = snapVec(blockB_);
+        const glm::vec3 up = glm::abs(fwd);  // the missing axis
+        glm::vec3 mn = glm::min(a, b), mx = glm::max(a, b);
+        for (int i = 0; i < 3; ++i)
+            if (up[i] > 0.5f) {
+                mn[i] = snapVec(glm::vec3(planeD))[i];
+                mx[i] = mn[i] + newBrushDepth_;
+            }
+        map::Solid preview = map::Solid::makeBox(mn, mx, blockMaterial_);
+        renderer_.setSelectionWire(map::solidWire(preview));
+
+        if (ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
+            blockDragging_ = false;
+            if (glm::length(mx - mn) > 1.0f &&
+                (mx.x - mn.x) > 0.5f && (mx.y - mn.y) > 0.5f && (mx.z - mn.z) > 0.5f) {
+                preview.id = doc_.nextId();
+                doc_.worldSolids().push_back(std::move(preview));
+                selection_ = {{-1, static_cast<int>(doc_.worldSolids().size()) - 1}};
+                afterEdit("Create brush");
+                status_ = "Created brush";
+            } else {
+                clearSelection();
+            }
+        }
+    }
+}
+
+glm::vec3 Editor::dropWorldPoint(ViewPanel& p, const ImVec2& mouse) {
+    glm::vec3 ro, rd;
+    p.camera.pixelRay({mouse.x - p.contentMin.x, mouse.y - p.contentMin.y},
+                      p.contentSize, ro, rd);
+
+    if (p.kind != ViewKind::Perspective) return snapVec(viewPlanePoint(p, mouse));
+
+    // 3D view: prefer a hit on existing brushwork, then the ground, then a
+    // point a fixed distance in front of the camera so it always lands in view.
+    float bestT = 1e30f;
+    for (const auto& s : doc_.worldSolids()) {
+        float t;
+        if (s.valid && map::raySolid(ro, rd, s, t) && t > 0.0f && t < bestT) bestT = t;
+    }
+    for (const auto& e : doc_.entities())
+        for (const auto& s : e.solids) {
+            float t;
+            if (s.valid && map::raySolid(ro, rd, s, t) && t > 0.0f && t < bestT)
+                bestT = t;
+        }
+    if (bestT < 1e29f) return snapVec(ro + rd * bestT);
+
+    if (std::fabs(rd.z) > 1e-4f) {
+        const float t = -ro.z / rd.z;
+        if (t > 1.0f && t < 16384.0f) return snapVec(ro + rd * t);
+    }
+    return snapVec(ro + rd * 384.0f);
+}
+
+glm::vec3 Editor::viewPlanePoint(ViewPanel& p, const ImVec2& m) const {
+    glm::vec3 ro, rd;
+    p.camera.pixelRay({m.x - p.contentMin.x, m.y - p.contentMin.y}, p.contentSize, ro,
+                      rd);
+    glm::vec3 n;
+    float d;
+    if (p.kind == ViewKind::Perspective) {
+        n = glm::vec3(0, 0, 1);
+        d = 0.0f;  // ground plane
+    } else {
+        n = p.camera.orthoForwardAxis();
+        d = glm::dot(n, p.camera.orthoCenter);
+    }
+    const float den = glm::dot(n, rd);
+    const float t = std::fabs(den) > 1e-6f ? (d - glm::dot(n, ro)) / den : 0.0f;
+    return ro + rd * t;
+}
+
+void Editor::placePiece(const std::string& piece, const glm::vec3& atRaw,
+                        bool commit) {
+    if (!doc_.active()) doc_.newBlank("untitled");
+    const glm::vec3 at = snapVec(atRaw);
+    const std::string floorMat = "dev/dev_measuregeneric01b";
+    const std::string wallMat = "dev/dev_measurewall01a";
+
+    std::vector<map::Solid> made;
+    std::vector<map::MapEntity> madeEnts;
+    bool asFuncDetail = false;
+
+    auto box = [&](glm::vec3 mn, glm::vec3 mx, const std::string& mat) {
+        made.push_back(map::Solid::makeBox(mn, mx, mat));
+    };
+    // Point entity at a world position with any number of extra key/values.
+    auto ent = [&](const char* cls, glm::vec3 pos,
+                   std::initializer_list<std::pair<const char*, const char*>> kvs)
+        -> map::MapEntity& {
+        map::MapEntity e;
+        e.id = doc_.nextId();
+        e.classname = cls;
+        e.origin = pos;
+        e.kv.set("classname", cls);
+        e.kv.set("origin", std::to_string((int)pos.x) + " " +
+                               std::to_string((int)pos.y) + " " +
+                               std::to_string((int)pos.z));
+        for (const auto& kv : kvs)
+            if (kv.second && kv.second[0]) e.kv.set(kv.first, kv.second);
+        madeEnts.push_back(std::move(e));
+        return madeEnts.back();
+    };
+    // Brush entity (a box solid tagged with a classname) at a world box.
+    auto brushEnt = [&](const char* cls, glm::vec3 mn, glm::vec3 mx,
+                        std::initializer_list<std::pair<const char*, const char*>> kvs)
+        -> map::MapEntity& {
+        map::MapEntity e;
+        e.id = doc_.nextId();
+        e.classname = cls;
+        e.origin = 0.5f * (mn + mx);
+        e.kv.set("classname", cls);
+        for (const auto& kv : kvs)
+            if (kv.second && kv.second[0]) e.kv.set(kv.first, kv.second);
+        map::Solid s = map::Solid::makeBox(mn, mx, "tools/toolstrigger");
+        s.id = doc_.nextId();
+        e.solids.push_back(std::move(s));
+        madeEnts.push_back(std::move(e));
+        return madeEnts.back();
+    };
+    auto room = [&](glm::vec3 c, glm::vec3 halfInterior, float th) {
+        const glm::vec3 mn = c - halfInterior, mx = c + halfInterior;
+        box({mn.x - th, mn.y - th, mn.z - th}, {mx.x + th, mx.y + th, mn.z}, floorMat);
+        box({mn.x - th, mn.y - th, mx.z}, {mx.x + th, mx.y + th, mx.z + th}, floorMat);
+        box({mn.x - th, mn.y - th, mn.z}, {mx.x + th, mn.y, mx.z}, wallMat);
+        box({mn.x - th, mx.y, mn.z}, {mx.x + th, mx.y + th, mx.z}, wallMat);
+        box({mn.x - th, mn.y, mn.z}, {mn.x, mx.y, mx.z}, wallMat);
+        box({mx.x, mn.y, mn.z}, {mx.x + th, mx.y, mx.z}, wallMat);
+    };
+
+    if (piece == "Floor" || piece == "Route") {
+        const float hw = piece == "Route" ? 256.0f : 128.0f;
+        const float hd = piece == "Route" ? 64.0f : 128.0f;
+        box({at.x - hw, at.y - hd, at.z - 16}, {at.x + hw, at.y + hd, at.z}, floorMat);
+    } else if (piece == "Wall") {
+        box({at.x - 128, at.y - 8, at.z}, {at.x + 128, at.y + 8, at.z + 128}, wallMat);
+    } else if (piece == "Ceiling") {
+        box({at.x - 128, at.y - 128, at.z}, {at.x + 128, at.y + 128, at.z + 16},
+            floorMat);
+    } else if (piece == "Pillar") {
+        box({at.x - 32, at.y - 32, at.z}, {at.x + 32, at.y + 32, at.z + 192}, wallMat);
+    } else if (piece == "Room") {
+        const float rh = roomHalf_;
+        room(at + glm::vec3(0, 0, rh), glm::vec3(rh, rh, rh), 16.0f);
+    } else if (piece == "Ramp") {
+        const float x0 = at.x - 128, x1 = at.x + 128, y0 = at.y - 64, y1 = at.y + 64;
+        const float z0 = at.z, z1 = at.z + 128;
+        glm::vec3 sn = glm::normalize(glm::vec3(-(z1 - z0), 0, (x1 - x0)));
+        made.push_back(map::Solid::fromPlanes(
+            {{{0, 0, -1}, -z0},
+             {{1, 0, 0}, x1},
+             {{0, 1, 0}, y1},
+             {{0, -1, 0}, -y0},
+             {sn, glm::dot(sn, glm::vec3(x0, at.y, z0))}},
+            floorMat));
+    } else if (piece == "Hill" || piece == "Mountain") {
+        // A faceted mound: stacked, shrinking, jittered octagonal prisms.
+        const int layers = std::clamp(hillLayers_, 3, 16);
+        const int sides = 8;
+        auto noise = [](float a, float b) {
+            const float s = std::sin(a * 12.9898f + b * 78.233f) * 43758.5453f;
+            return s - std::floor(s);  // 0..1, deterministic
+        };
+        for (int i = 0; i < layers; ++i) {
+            const float t0 = float(i) / layers;
+            const float t1 = float(i + 1) / layers;
+            const float z0 = at.z + t0 * hillHeight_;
+            const float z1 = at.z + t1 * hillHeight_ + 0.5f;
+            const float baseR = hillRadius_ * (1.0f - t0 * 0.92f);
+            const float aoff = noise(float(i), 3.1f) * 0.7f;  // twist each layer
+            std::vector<std::pair<glm::vec3, float>> planes;
+            planes.push_back({{0, 0, 1}, z1});
+            planes.push_back({{0, 0, -1}, -z0});
+            for (int k = 0; k < sides; ++k) {
+                const float ang = aoff + (k / float(sides)) * 6.2831853f;
+                const glm::vec3 n(std::cos(ang), std::sin(ang), 0.0f);
+                const float jitter = 1.0f + hillRough_ * (noise(float(i), float(k)) - 0.5f);
+                const float r = std::max(24.0f, baseR * jitter);
+                planes.push_back({n, glm::dot(n, at) + r});
+            }
+            map::Solid s = map::Solid::fromPlanes(planes, floorMat);
+            if (s.valid) made.push_back(std::move(s));
+        }
+        asFuncDetail = true;
+    } else if (piece == "Stairs") {
+        const int n = std::clamp(stairSteps_, 2, 40);
+        const float w = stairWidth_ * 0.5f;
+        for (int i = 0; i < n; ++i) {
+            const float z0 = at.z + i * stairRise_;
+            const float y0 = at.y + i * stairRun_;
+            box({at.x - w, y0, at.z}, {at.x + w, y0 + stairRun_ + 0.5f,
+                                       z0 + stairRise_}, floorMat);
+        }
+        asFuncDetail = true;
+    } else if (piece == "Cylinder" || piece == "Pillar (round)") {
+        const int s = std::clamp(cylSides_, 3, 32);
+        std::vector<std::pair<glm::vec3, float>> planes = {
+            {{0, 0, 1}, at.z + cylHeight_}, {{0, 0, -1}, -at.z}};
+        for (int k = 0; k < s; ++k) {
+            const float a = (k / float(s)) * 6.2831853f;
+            const glm::vec3 nrm(std::cos(a), std::sin(a), 0);
+            planes.push_back({nrm, glm::dot(nrm, at) + cylRadius_});
+        }
+        map::Solid c = map::Solid::fromPlanes(planes, wallMat);
+        if (c.valid) made.push_back(std::move(c));
+    } else if (piece == "Dome") {
+        const int s = std::clamp(cylSides_, 4, 24);
+        const int rings = 6;
+        for (int r = 0; r < rings; ++r) {
+            const float t0 = r / float(rings), t1 = (r + 1) / float(rings);
+            const float z0 = at.z + std::sin(t0 * 1.5708f) * cylHeight_;
+            const float z1 = at.z + std::sin(t1 * 1.5708f) * cylHeight_ + 0.5f;
+            const float rad = std::cos(t0 * 1.5708f) * cylRadius_;
+            std::vector<std::pair<glm::vec3, float>> planes = {
+                {{0, 0, 1}, z1}, {{0, 0, -1}, -z0}};
+            for (int k = 0; k < s; ++k) {
+                const float a = (k / float(s)) * 6.2831853f;
+                const glm::vec3 nrm(std::cos(a), std::sin(a), 0);
+                planes.push_back({nrm, glm::dot(nrm, at) + std::max(8.0f, rad)});
+            }
+            map::Solid c = map::Solid::fromPlanes(planes, wallMat);
+            if (c.valid) made.push_back(std::move(c));
+        }
+        asFuncDetail = true;
+    } else if (piece == "Arch" || piece == "Curved wall") {
+        const int n = std::clamp(archSegs_, 2, 32);
+        const float span = glm::radians(archSpan_);
+        const float a0 = -span * 0.5f;
+        for (int i = 0; i < n; ++i) {
+            const float ai = a0 + span * (i + 0.5f) / n;
+            const float step = span / n;
+            const glm::vec3 c(at.x + std::cos(ai) * archRadius_, at.y,
+                              at.z + std::sin(ai) * archRadius_ + archRadius_);
+            const glm::vec3 tangent(-std::sin(ai), 0, std::cos(ai));
+            const glm::vec3 radial(std::cos(ai), 0, std::sin(ai));
+            const glm::vec3 up(0, 1, 0);
+            const float halfLen = archRadius_ * step * 0.55f;
+            std::vector<std::pair<glm::vec3, float>> pl = {
+                {tangent, glm::dot(tangent, c) + halfLen},
+                {-tangent, glm::dot(-tangent, c) + halfLen},
+                {radial, glm::dot(radial, c) + archThick_ * 0.5f},
+                {-radial, glm::dot(-radial, c) + archThick_ * 0.5f},
+                {up, glm::dot(up, c) + archHeight_ * 0.5f},
+                {-up, glm::dot(-up, c) + archHeight_ * 0.5f}};
+            map::Solid s = map::Solid::fromPlanes(pl, wallMat);
+            if (s.valid) made.push_back(std::move(s));
+        }
+        asFuncDetail = true;
+    } else if (piece == "Wedge") {
+        const float x0 = at.x - 128, x1 = at.x + 128, y0 = at.y - 96, y1 = at.y + 96;
+        const float z0 = at.z, z1 = at.z + 160;
+        glm::vec3 sn = glm::normalize(glm::vec3((z1 - z0), 0, (x1 - x0)));
+        made.push_back(map::Solid::fromPlanes(
+            {{{0, 0, -1}, -z0}, {{-1, 0, 0}, -x0}, {{0, 1, 0}, y1},
+             {{0, -1, 0}, -y0}, {sn, glm::dot(sn, glm::vec3(x1, at.y, z0))}},
+            floorMat));
+    } else if (piece == "Doorway") {
+        // A wall with a 64x112 gap in the middle.
+        const float W = 128, H = 160, T = 8, gw = 40, gh = 112;
+        box({at.x - W, at.y - T, at.z}, {at.x - gw, at.y + T, at.z + H}, wallMat);
+        box({at.x + gw, at.y - T, at.z}, {at.x + W, at.y + T, at.z + H}, wallMat);
+        box({at.x - gw, at.y - T, at.z + gh}, {at.x + gw, at.y + T, at.z + H}, wallMat);
+    } else if (piece == "Platform") {
+        box({at.x - 96, at.y - 96, at.z + 96}, {at.x + 96, at.y + 96, at.z + 112},
+            floorMat);
+        for (int i = 0; i < 4; ++i) {
+            const float sx = (i & 1) ? 80.0f : -80.0f;
+            const float sy = (i & 2) ? 80.0f : -80.0f;
+            box({at.x + sx - 8, at.y + sy - 8, at.z},
+                {at.x + sx + 8, at.y + sy + 8, at.z + 96}, wallMat);
+        }
+        asFuncDetail = true;
+    } else if (piece == "Cover") {
+        box({at.x - 96, at.y - 8, at.z}, {at.x + 96, at.y + 8, at.z + 44}, wallMat);
+    } else if (piece == "Window") {
+        // A wall with a chest-high rectangular opening.
+        const float W = 128, H = 160, T = 8, gw = 56, sill = 44, head = 128;
+        box({at.x - W, at.y - T, at.z}, {at.x - gw, at.y + T, at.z + H}, wallMat);
+        box({at.x + gw, at.y - T, at.z}, {at.x + W, at.y + T, at.z + H}, wallMat);
+        box({at.x - gw, at.y - T, at.z}, {at.x + gw, at.y + T, at.z + sill}, wallMat);
+        box({at.x - gw, at.y - T, at.z + head}, {at.x + gw, at.y + T, at.z + H},
+            wallMat);
+    } else if (piece == "Spiral stairs") {
+        const int n = std::clamp(stairSteps_ * 2, 8, 48);
+        const float R = std::max(48.0f, stairWidth_ * 0.5f);
+        const float rise = std::max(6.0f, stairRise_);
+        for (int i = 0; i < n; ++i) {
+            const float a0 = (i / float(n)) * 6.2831853f * 1.5f;  // 540deg climb
+            const glm::vec3 c(at.x + std::cos(a0) * R * 0.5f,
+                              at.y + std::sin(a0) * R * 0.5f, 0.0f);
+            const float z0 = at.z + i * rise;
+            std::vector<std::pair<glm::vec3, float>> pl = {
+                {{0, 0, 1}, z0 + rise + 0.5f}, {{0, 0, -1}, -at.z}};
+            for (int k = 0; k < 4; ++k) {
+                const float aa = a0 + k * 1.5708f + 0.7854f;
+                const glm::vec3 nn(std::cos(aa), std::sin(aa), 0);
+                pl.push_back({nn, glm::dot(nn, c) + R * 0.72f});
+            }
+            map::Solid s = map::Solid::fromPlanes(pl, floorMat);
+            if (s.valid) made.push_back(std::move(s));
+        }
+        box({at.x - 12, at.y - 12, at.z}, {at.x + 12, at.y + 12,
+             at.z + n * rise + 16}, wallMat);  // centre post
+        asFuncDetail = true;
+    } else if (piece == "Fence" || piece == "Railing") {
+        const float L = 128, postH = 48;
+        box({at.x - L, at.y - 3, at.z + postH - 6}, {at.x + L, at.y + 3,
+             at.z + postH}, wallMat);                                   // top rail
+        box({at.x - L, at.y - 3, at.z + postH * 0.5f - 3},
+            {at.x + L, at.y + 3, at.z + postH * 0.5f + 3}, wallMat);    // mid rail
+        for (int i = -2; i <= 2; ++i)
+            box({at.x + i * 56.0f - 3, at.y - 3, at.z},
+                {at.x + i * 56.0f + 3, at.y + 3, at.z + postH}, wallMat);
+        asFuncDetail = true;
+    } else if (piece == "Crate stack") {
+        const std::string crate = wallMat;
+        box({at.x - 48, at.y - 48, at.z}, {at.x + 48, at.y + 48, at.z + 96}, crate);
+        box({at.x - 40, at.y + 8, at.z + 96}, {at.x + 40, at.y + 88, at.z + 160},
+            crate);
+        box({at.x + 8, at.y - 72, at.z}, {at.x + 88, at.y + 8, at.z + 72}, crate);
+        asFuncDetail = true;
+    } else if (piece == "Spawn door") {
+        // Team-coloured one-way wall across a spawn exit.
+        brushEnt("func_respawnroomvisualizer", {at.x - 64, at.y - 4, at.z},
+                 {at.x + 64, at.y + 4, at.z + 128},
+                 {{"TeamNum", "0"}, {"solid_to_enemies", "1"}});
+    } else if (piece == "No-build zone") {
+        brushEnt("func_nobuild", {at.x - 128, at.y - 128, at.z},
+                 {at.x + 128, at.y + 128, at.z + 128}, {{"spawnflags", "1"}});
+    } else if (piece == "Death pit") {
+        // A recessed instant-kill trigger with a low rim so it reads as a pit.
+        box({at.x - 200, at.y - 200, at.z - 8}, {at.x + 200, at.y - 168, at.z + 24},
+            wallMat);
+        box({at.x - 200, at.y + 168, at.z - 8}, {at.x + 200, at.y + 200, at.z + 24},
+            wallMat);
+        box({at.x - 200, at.y - 168, at.z - 8}, {at.x - 168, at.y + 168, at.z + 24},
+            wallMat);
+        box({at.x + 168, at.y - 168, at.z - 8}, {at.x + 200, at.y + 168, at.z + 24},
+            wallMat);
+        brushEnt("trigger_hurt", {at.x - 168, at.y - 168, at.z - 256},
+                 {at.x + 168, at.y + 168, at.z + 16},
+                 {{"damage", "1000"}, {"damagecap", "1000"}, {"spawnflags", "1"}});
+    } else if (piece == "Skybox seal" || piece == "Sky seal" ||
+               piece == "Seal with sky") {
+        // Drop any previous sky shell so re-running this just re-fits it.
+        auto isSky = [](const map::Solid& s) {
+            if (s.faces.empty()) return false;
+            for (const auto& f : s.faces)
+                if (f.material != "tools/toolsskybox") return false;
+            return true;
+        };
+        auto& ws = doc_.worldSolids();
+        ws.erase(std::remove_if(ws.begin(), ws.end(), isSky), ws.end());
+
+        glm::vec3 mn, mx;
+        doc_.bounds(mn, mx);
+        if (mx.x <= mn.x) { mn = at - glm::vec3(1024); mx = at + glm::vec3(1024); }
+        // Also enclose every point entity (a high light_environment, an outlying
+        // spawn) so the seal never leaves something poking through.
+        for (const auto& e : doc_.entities()) {
+            if (!e.solids.empty()) continue;
+            mn = glm::min(mn, e.origin - glm::vec3(64));
+            mx = glm::max(mx, e.origin + glm::vec3(64));
+        }
+        mn -= glm::vec3(128);
+        mx += glm::vec3(256);
+        const float t = 32;
+        const char* sky = "tools/toolsskybox";
+        box({mn.x - t, mn.y - t, mn.z - t}, {mx.x + t, mx.y + t, mn.z}, sky);
+        box({mn.x - t, mn.y - t, mx.z}, {mx.x + t, mx.y + t, mx.z + t}, sky);
+        box({mn.x - t, mn.y - t, mn.z}, {mx.x + t, mn.y, mx.z}, sky);
+        box({mn.x - t, mx.y, mn.z}, {mx.x + t, mx.y + t, mx.z}, sky);
+        box({mn.x - t, mn.y, mn.z}, {mn.x, mx.y, mx.z}, sky);
+        box({mx.x, mn.y, mn.z}, {mx.x + t, mx.y, mx.z}, sky);
+    } else if (piece == "Clip wall") {
+        box({at.x - 128, at.y - 8, at.z}, {at.x + 128, at.y + 8, at.z + 160},
+            "tools/toolsclip");
+    } else if (piece == "Water") {
+        box({at.x - 256, at.y - 256, at.z - 64}, {at.x + 256, at.y + 256, at.z},
+            "nature/water_movingplane");
+    } else if (piece == "Trigger box") {
+        brushEnt("trigger_multiple", {at.x - 96, at.y - 96, at.z},
+                 {at.x + 96, at.y + 96, at.z + 128},
+                 {{"spawnflags", "1"}, {"wait", "1"}});
+    } else if (piece == "Ladder") {
+        brushEnt("func_ladder", {at.x - 20, at.y - 4, at.z},
+                 {at.x + 20, at.y + 8, at.z + 192}, {});
+        box({at.x - 22, at.y + 6, at.z}, {at.x + 22, at.y + 12, at.z + 192}, wallMat);
+    } else if (piece == "Working door") {
+        brushEnt("func_door", {at.x - 48, at.y - 6, at.z},
+                 {at.x + 48, at.y + 6, at.z + 112},
+                 {{"movedir", "0 0 90"}, {"speed", "100"}, {"wait", "4"},
+                  {"spawnflags", "0"}, {"lip", "8"}});
+    } else if (piece == "Button") {
+        brushEnt("func_button", {at.x - 16, at.y - 4, at.z + 40},
+                 {at.x + 16, at.y + 4, at.z + 72},
+                 {{"speed", "5"}, {"wait", "3"}, {"spawnflags", "1024"}});
+    } else if (piece == "Lever") {
+        // A wall lever: a tall thin func_button that toggles and stays.
+        brushEnt("func_button", {at.x - 6, at.y - 10, at.z + 32},
+                 {at.x + 6, at.y + 10, at.z + 88},
+                 {{"speed", "40"}, {"wait", "-1"}, {"spawnflags", "32"},
+                  {"sounds", "3"}});
+    } else if (piece == "Elevator") {
+        char dist[16];
+        std::snprintf(dist, sizeof(dist), "%d", (int)elevTravel_);
+        brushEnt("func_movelinear", {at.x - 80, at.y - 80, at.z},
+                 {at.x + 80, at.y + 80, at.z + 16},
+                 {{"targetname", "lift"}, {"movedir", "0 0 90"}, {"speed", "80"},
+                  {"spawnflags", "8"}, {"movedistance", dist}});
+        auto& btn = brushEnt("func_button", {at.x - 90, at.y - 12, at.z + 40},
+                             {at.x - 82, at.y + 12, at.z + 72},
+                             {{"speed", "5"}, {"wait", "6"}});
+        btn.connections.push_back({"OnPressed", "lift,Open,,0,-1"});
+    } else if (piece == "Breakable crate") {
+        brushEnt("func_breakable", {at.x - 32, at.y - 32, at.z},
+                 {at.x + 32, at.y + 32, at.z + 64},
+                 {{"material", "1"}, {"health", "40"},
+                  {"spawnflags", "0"}, {"physdamagescale", "1.0"}});
+    } else if (piece == "Fan / rotating") {
+        auto& e = brushEnt("func_rotating", {at.x - 64, at.y - 8, at.z + 64},
+                           {at.x + 64, at.y + 8, at.z + 80},
+                           {{"maxspeed", "120"}, {"spawnflags", "1"},
+                            {"fanfriction", "20"}});
+        e.origin = at + glm::vec3(0, 0, 72);
+    } else if (piece == "Teleport pair") {
+        ent("info_teleport_destination", at + glm::vec3(256, 0, 8),
+            {{"targetname", "tp_out"}, {"angles", "0 0 0"}});
+        brushEnt("trigger_teleport", {at.x - 48, at.y - 48, at.z},
+                 {at.x + 48, at.y + 48, at.z + 108},
+                 {{"target", "tp_out"}, {"spawnflags", "1"}});
+    } else if (piece == "KOTH point") {
+        ent("team_control_point", at + glm::vec3(0, 0, 8),
+            {{"targetname", "koth_cp"}, {"point_printname", "The Hill"},
+             {"point_default_owner", "0"}, {"point_index", "0"}});
+        brushEnt("trigger_capture_area", {at.x - 128, at.y - 128, at.z},
+                 {at.x + 128, at.y + 128, at.z + 128},
+                 {{"area_cap_point", "koth_cp"}, {"team_cancap_2", "1"},
+                  {"team_cancap_3", "1"}, {"team_numcap_2", "1"},
+                  {"team_numcap_3", "1"}, {"area_time_to_cap", "6"}});
+        ent("tf_logic_koth", at + glm::vec3(0, 0, 64),
+            {{"timer_length", "180"}, {"unlock_point", "30"}});
+        ent("team_control_point_master", at + glm::vec3(64, 0, 64),
+            {{"targetname", "master_control_point"}, {"StartDisabled", "0"}});
+        box({at.x - 128, at.y - 128, at.z - 16}, {at.x + 128, at.y + 128, at.z},
+            floorMat);
+    } else if (piece == "CTF setup") {
+        for (int side = 0; side < 2; ++side) {
+            const bool red = side == 0;
+            const float sx = red ? -768.0f : 768.0f;
+            ent("item_teamflag", at + glm::vec3(sx, 0, 8),
+                {{"targetname", red ? "red_flag" : "blu_flag"},
+                 {"TeamNum", red ? "2" : "3"},
+                 {"GameType", "1"},
+                 {"ReturnTime", "60"}});
+            brushEnt("func_capturezone", {at.x + sx - 64, at.y - 64, at.z},
+                     {at.x + sx + 64, at.y + 64, at.z + 96},
+                     {{"TeamNum", red ? "3" : "2"}, {"CapturePoint", "1"}});
+            box({at.x + sx - 96, at.y - 96, at.z - 16},
+                {at.x + sx + 96, at.y + 96, at.z}, floorMat);
+        }
+    } else if (piece == "Round timer") {
+        ent("team_round_timer", at + glm::vec3(0, 0, 16),
+            {{"targetname", "round_timer"}, {"timer_length", "600"},
+             {"show_in_hud", "1"}, {"StartDisabled", "0"}});
+    } else if (piece == "Arena logic") {
+        // Arena mode: the rules entity + a centre point that unlocks mid-round.
+        ent("tf_logic_arena", at + glm::vec3(0, 0, 64),
+            {{"targetname", "arena_logic"}, {"CapEnableDelay", "60"}});
+        ent("team_control_point", at + glm::vec3(0, 0, 8),
+            {{"targetname", "arena_cap"}, {"point_printname", "Arena Point"},
+             {"point_default_owner", "0"}, {"point_index", "0"}});
+        ent("team_control_point_master", at + glm::vec3(64, 0, 64),
+            {{"targetname", "master_control_point"}, {"StartDisabled", "0"}});
+        brushEnt("trigger_capture_area", {at.x - 128, at.y - 128, at.z},
+                 {at.x + 128, at.y + 128, at.z + 128},
+                 {{"area_cap_point", "arena_cap"}, {"team_cancap_2", "1"},
+                  {"team_cancap_3", "1"}, {"team_numcap_2", "1"},
+                  {"team_numcap_3", "1"}, {"area_time_to_cap", "4"}});
+        box({at.x - 128, at.y - 128, at.z - 16}, {at.x + 128, at.y + 128, at.z},
+            floorMat);
+    } else if (piece == "Moving platform") {
+        // A platform that slides sideways between two points, on a button.
+        char dist[16];
+        std::snprintf(dist, sizeof(dist), "%d", (int)std::max(128.0f, elevTravel_));
+        brushEnt("func_movelinear", {at.x - 96, at.y - 96, at.z},
+                 {at.x + 96, at.y + 96, at.z + 16},
+                 {{"targetname", "platform"}, {"movedir", "0 0 0"},
+                  {"speed", "75"}, {"spawnflags", "8"}, {"movedistance", dist},
+                  {"blockdamage", "0"}});
+        auto& btn = brushEnt("func_button", {at.x - 108, at.y - 12, at.z + 40},
+                             {at.x - 100, at.y + 12, at.z + 72},
+                             {{"speed", "5"}, {"wait", "8"}});
+        btn.connections.push_back({"OnPressed", "platform,Open,,0,-1"});
+        btn.connections.push_back({"OnPressed", "platform,Close,,6,-1"});
+    } else if (piece == "One spawn point") {
+        ent("info_player_teamspawn", at + glm::vec3(0, 0, 8),
+            {{"TeamNum", "0"}, {"angles", "0 0 0"}});
+    } else if (piece == "RED spawn" || piece == "BLU spawn") {
+        const bool red = piece[0] == 'R';
+        const char* team = red ? "2" : "3";
+        room(at + glm::vec3(0, 0, 96), glm::vec3(192, 192, 96), 16.0f);
+        for (int i = 0; i < 4; ++i)
+            ent("info_player_teamspawn",
+                at + glm::vec3((i % 2) * 64 - 32, (i / 2) * 64 - 32, 8),
+                {{"TeamNum", team}, {"angles", "0 0 0"}});
+        // A resupply locker so the spawn actually refills players.
+        brushEnt("func_regenerate",
+                 {at.x - 32, at.y + 150, at.z}, {at.x + 32, at.y + 182, at.z + 96},
+                 {{"associatedmodel", ""}, {"TeamNum", team}});
+    } else if (piece == "Resupply") {
+        brushEnt("func_regenerate", {at.x - 32, at.y - 16, at.z},
+                 {at.x + 32, at.y + 16, at.z + 96}, {});
+    } else if (piece == "Health / ammo") {
+        ent("item_healthkit_medium", at + glm::vec3(-24, 0, 8), {});
+        ent("item_ammopack_medium", at + glm::vec3(24, 0, 8), {});
+    } else if (piece == "Capture point") {
+        // A control point + the trigger that captures it, wired together.
+        ent("team_control_point", at + glm::vec3(0, 0, 8),
+            {{"targetname", "control_point_1"},
+             {"point_default_owner", "0"},
+             {"point_printname", "Point A"},
+             {"point_group", "0"},
+             {"point_index", "0"}});
+        brushEnt("trigger_capture_area", {at.x - 96, at.y - 96, at.z},
+                 {at.x + 96, at.y + 96, at.z + 128},
+                 {{"area_cap_point", "control_point_1"},
+                  {"team_cap_2", "1"},
+                  {"team_cap_3", "1"},
+                  {"team_numcap_2", "1"},
+                  {"team_numcap_3", "1"}});
+        box({at.x - 128, at.y - 128, at.z - 16}, {at.x + 128, at.y + 128, at.z},
+            floorMat);
+    } else if (piece == "Payload track") {
+        // A working payload spine: 4 chained path_track nodes, a func_tracktrain
+        // cart sitting on the first, a cap trigger parented to it, and a
+        // team_train_watcher spanning the first->last node.
+        const int N = 4;
+        for (int i = 0; i < N; ++i) {
+            const std::string nm = "cart_path_" + std::to_string(i + 1);
+            const std::string nxt = "cart_path_" + std::to_string(i + 2);
+            ent("path_track", at + glm::vec3(i * 320.0f, 0, 8),
+                {{"targetname", nm.c_str()},
+                 {"target", i < N - 1 ? nxt.c_str() : ""},
+                 {"orientationtype", "1"}});
+        }
+        brushEnt("func_tracktrain", {at.x - 48, at.y - 40, at.z},
+                 {at.x + 48, at.y + 40, at.z + 90},
+                 {{"targetname", "cart"},
+                  {"target", "cart_path_1"},
+                  {"startspeed", "90"},
+                  {"speed", "90"},
+                  {"bank", "0"},
+                  {"orientationtype", "1"},
+                  {"wheels", "50"},
+                  {"height", "24"}});
+        brushEnt("trigger_capture_area", {at.x - 128, at.y - 128, at.z},
+                 {at.x + 128, at.y + 128, at.z + 128},
+                 {{"targetname", "cart_cap"},
+                  {"parentname", "cart"},
+                  {"area_cap_point", "control_point_1"},
+                  {"team_cancap_3", "1"},
+                  {"team_numcap_3", "1"}});
+        ent("team_train_watcher", at + glm::vec3(0, 0, 8),
+            {{"targetname", "cart_watcher"},
+             {"train", "cart"},
+             {"start_node", "cart_path_1"},
+             {"goal_node", ("cart_path_" + std::to_string(N)).c_str()},
+             {"linked_pathtrack_1", "cart_path_1"}});
+        ent("team_control_point", at + glm::vec3(N * 320.0f - 320.0f, 0, 8),
+            {{"targetname", "control_point_1"},
+             {"point_printname", "The Point"},
+             {"point_default_owner", "2"},
+             {"point_index", "0"}});
+    } else if (piece == "Point light") {
+        ent("light", at + glm::vec3(0, 0, 128),
+            {{"_light", "255 255 224 200"}, {"_constant_attn", "0"},
+             {"_linear_attn", "0"}, {"_quadratic_attn", "1"}});
+    } else if (piece == "Spot light") {
+        ent("light_spot", at + glm::vec3(0, 0, 160),
+            {{"_light", "255 255 224 300"}, {"pitch", "-90"},
+             {"angles", "-90 0 0"}, {"_cone", "45"}, {"_inner_cone", "30"}});
+    } else if (piece == "Sun / sky") {
+        ent("light_environment", at + glm::vec3(0, 0, 160),
+            {{"pitch", "-45"}, {"angles", "0 220 0"},
+             {"_light", "247 233 200 350"}, {"_ambient", "180 190 210 60"},
+             {"_lightHDR", "-1 -1 -1 1"}, {"_ambientHDR", "-1 -1 -1 1"}});
+    } else {
+        box({at.x - 64, at.y - 64, at.z}, {at.x + 64, at.y + 64, at.z + 64}, floorMat);
+    }
+
+    selection_.clear();
+    if (asFuncDetail && !made.empty()) {
+        // One func_detail entity holding all the pieces (keeps vis fast).
+        map::MapEntity fd;
+        fd.id = doc_.nextId();
+        fd.classname = "func_detail";
+        fd.kv.set("classname", "func_detail");
+        for (auto& s : made) {
+            s.id = doc_.nextId();
+            fd.solids.push_back(std::move(s));
+        }
+        doc_.entities().push_back(std::move(fd));
+        const int ei = static_cast<int>(doc_.entities().size()) - 1;
+        const int ns = static_cast<int>(doc_.entities()[ei].solids.size());
+        for (int i = 0; i < ns; ++i) selection_.push_back({ei, i});
+    } else {
+        for (auto& s : made) {
+            s.id = doc_.nextId();
+            doc_.worldSolids().push_back(std::move(s));
+            selection_.push_back(
+                {-1, static_cast<int>(doc_.worldSolids().size()) - 1});
+        }
+    }
+    for (auto& e : madeEnts) doc_.entities().push_back(std::move(e));
+
+    if (commit) afterEdit(("Add " + piece).c_str());
+    status_ = "Placed " + piece;
+}
+
+void Editor::finalizeRoad() {
+    if (roadPts_.size() < 2) {
+        status_ = "Need at least 2 points for a road.";
+        return;
+    }
+    if (!doc_.active()) { doc_.newBlank("untitled"); history_.reset(doc_); }
+
+    // Catmull-Rom through the clicked points (clamped endpoints).
+    auto pt = [&](int i) {
+        return roadPts_[std::clamp(i, 0, (int)roadPts_.size() - 1)];
+    };
+    auto cr = [](const glm::vec3& p0, const glm::vec3& p1, const glm::vec3& p2,
+                 const glm::vec3& p3, float t) {
+        const float t2 = t * t, t3 = t2 * t;
+        return 0.5f * ((2.0f * p1) + (-p0 + p2) * t +
+                       (2.0f * p0 - 5.0f * p1 + 4.0f * p2 - p3) * t2 +
+                       (-p0 + 3.0f * p1 - 3.0f * p2 + p3) * t3);
+    };
+    std::vector<glm::vec3> path;
+    const int per = 8;  // samples per input span
+    for (int i = 0; i + 1 < (int)roadPts_.size(); ++i)
+        for (int s = 0; s < per; ++s)
+            path.push_back(cr(pt(i - 1), pt(i), pt(i + 1), pt(i + 2), s / float(per)));
+    path.push_back(roadPts_.back());
+
+    const float hw = roadWidth_ * 0.5f, ht = roadThick_ * 0.5f;
+
+    // Per-vertex tangents, so each segment's end caps are mitred to the
+    // bisector of the two directions meeting there — no gaps on the outside
+    // of a bend.
+    const int N = (int)path.size();
+    std::vector<glm::vec3> tan(N, glm::vec3(1, 0, 0));
+    for (int i = 0; i < N; ++i) {
+        glm::vec3 in = i > 0 ? path[i] - path[i - 1] : glm::vec3(0);
+        glm::vec3 out = i + 1 < N ? path[i + 1] - path[i] : glm::vec3(0);
+        if (glm::length(in) > 1e-4f) in = glm::normalize(in);
+        if (glm::length(out) > 1e-4f) out = glm::normalize(out);
+        glm::vec3 t = in + out;
+        tan[i] = glm::length(t) > 1e-4f ? glm::normalize(t)
+                 : (glm::length(out) > 1e-4f ? out : in);
+    }
+
+    std::vector<map::Solid> segs;
+    for (int i = 0; i + 1 < N; ++i) {
+        const glm::vec3 a = path[i], b = path[i + 1];
+        glm::vec3 f = b - a;
+        const float len = glm::length(f);
+        if (len < 1.0f) continue;
+        f /= len;
+        glm::vec3 rt = glm::normalize(glm::cross(f, glm::vec3(0, 0, 1)));
+        if (!std::isfinite(rt.x)) rt = glm::vec3(1, 0, 0);
+        glm::vec3 up = glm::normalize(glm::cross(rt, f));
+        const glm::vec3 c = 0.5f * (a + b) - up * ht;  // road top at the path
+        // Mitred end caps: outward normals along the bisector tangents.
+        glm::vec3 nEnd = tan[i + 1];
+        glm::vec3 nStart = -tan[i];
+        if (glm::dot(nEnd, f) < 0.1f) nEnd = f;      // guard against sharp folds
+        if (glm::dot(nStart, -f) < 0.1f) nStart = -f;
+        std::vector<std::pair<glm::vec3, float>> planes = {
+            {nEnd, glm::dot(nEnd, b)}, {nStart, glm::dot(nStart, a)},
+            {rt, glm::dot(rt, c) + hw}, {-rt, glm::dot(-rt, c) + hw},
+            {up, glm::dot(up, c) + ht}, {-up, glm::dot(-up, c) + ht}};
+        map::Solid seg = map::Solid::fromPlanes(planes, "dev/dev_measuregeneric01b");
+        if (seg.valid) segs.push_back(std::move(seg));
+    }
+    if (segs.empty()) { status_ = "Road had no usable segments."; return; }
+
+    map::MapEntity fd;
+    fd.id = doc_.nextId();
+    fd.classname = "func_detail";
+    fd.kv.set("classname", "func_detail");
+    for (auto& s : segs) { s.id = doc_.nextId(); fd.solids.push_back(std::move(s)); }
+    doc_.entities().push_back(std::move(fd));
+    selection_ = {{(int)doc_.entities().size() - 1, 0}};
+
+    const size_t n = roadPts_.size();
+    roadPts_.clear();
+    roadActive_ = false;
+    placing_.clear();
+    afterEdit("Add road");
+    status_ = "Built a road from " + std::to_string(n) + " points.";
+}
+
+void Editor::drawRoadOverlay(ViewPanel& p, float aspect, ImDrawList* dl) {
+    if (!roadActive_ || roadPts_.empty()) return;
+    const glm::mat4 vp = p.camera.proj(aspect) * p.camera.view();
+    auto pr = [&](const glm::vec3& w, bool& ok) {
+        return projectPt(p.kind, vp, p.contentMin, p.contentSize, w, ok);
+    };
+    const ImU32 col = IM_COL32(120, 200, 255, 235);
+    ImVec2 prev;
+    bool havePrev = false;
+    for (const auto& w : roadPts_) {
+        bool ok;
+        const ImVec2 s = pr(w, ok);
+        if (!ok) { havePrev = false; continue; }
+        dl->AddCircleFilled(s, 4.0f, col);
+        if (havePrev) dl->AddLine(prev, s, col, 2.0f);
+        prev = s;
+        havePrev = true;
+    }
+    dl->AddText(ImVec2(p.contentMin.x + 8, p.contentMin.y + 40), col,
+                "ROAD — click to add points, Enter to build");
+}
+
+void Editor::debugPackScan() {
+    if (!hasDoc()) { PB_WARN("pack-scan: no editable doc"); return; }
+    const auto refs = publish::scanCustomAssets(doc_, sourceFs_);
+    int missing = 0;
+    for (const auto& r : refs) {
+        const char* k = r.kind == publish::AssetRef::Material ? "material"
+                        : r.kind == publish::AssetRef::Texture ? "texture"
+                        : r.kind == publish::AssetRef::Model    ? "model"
+                                                                : "sound";
+        if (r.missing) {
+            ++missing;
+            PB_WARN("  MISSING %-9s %s", k, r.bspPath.c_str());
+        } else {
+            PB_INFO("  pack    %-9s %s", k, r.bspPath.c_str());
+        }
+    }
+    PB_INFO("pack-scan: %zu custom asset(s), %d missing",
+            refs.size() - missing, missing);
+}
+
+void Editor::debugGreyboxTest() {
+    int pass = 0, fail = 0;
+    auto ck = [&](const char* w, bool ok) {
+        if (ok) ++pass; else { ++fail; PB_ERROR("greybox FAIL: %s", w); }
+    };
+    const auto& kit = kitPieceNames();
+    const int grid = 64;
+
+    // A clean reply.
+    {
+        const ai::Plan p = ai::validatePlan(
+            R"({"pieces":[{"piece":"Room","x":0,"y":0,"z":0,"size":512},
+                          {"piece":"Stairs","x":600,"y":0,"z":0,"steps":9}],
+                "note":"a room and stairs"})",
+            kit, grid);
+        ck("clean reply yields both pieces", p.items.size() == 2);
+        ck("note survives", p.note == "a room and stairs");
+        ck("coords snap to the grid",
+           !p.items.empty() && std::fmod(p.items[1].pos.x, 64.0f) == 0.0f);
+        ck("steps carried", p.items.size() == 2 && p.items[1].steps == 9);
+    }
+
+    // Invented piece names must be dropped, not passed to placePiece.
+    {
+        const ai::Plan p = ai::validatePlan(
+            R"({"pieces":[{"piece":"Floor","x":0,"y":0,"z":0},
+                          {"piece":"Sniper Nest 3000","x":0,"y":0,"z":0}]})",
+            kit, grid);
+        ck("invented piece is rejected", p.items.size() == 1);
+        ck("rejection is reported",
+           p.rejected.size() == 1 && p.rejected[0] == "Sniper Nest 3000");
+    }
+
+    // Case-insensitive match against the real kit.
+    {
+        const ai::Plan p = ai::validatePlan(
+            R"({"pieces":[{"piece":"crate STACK","x":0,"y":0,"z":0}]})", kit, grid);
+        ck("piece match ignores case",
+           p.items.size() == 1 && p.items[0].piece == "Crate stack");
+    }
+
+    // Runaway coordinates get clamped inside Source's limits.
+    {
+        const ai::Plan p = ai::validatePlan(
+            R"({"pieces":[{"piece":"Floor","x":900000,"y":-900000,"z":0}]})", kit,
+            grid);
+        ck("coords are clamped",
+           p.items.size() == 1 && std::fabs(p.items[0].pos.x) <= ai::kMaxCoord &&
+               std::fabs(p.items[0].pos.y) <= ai::kMaxCoord);
+    }
+
+    // Prose and a code fence round the JSON.
+    {
+        const ai::Plan p = ai::validatePlan(
+            "Sure! Here you go:\n```json\n"
+            R"({"pieces":[{"piece":"Wall","x":0,"y":0,"z":0}]})"
+            "\n```\nHope that helps.",
+            kit, grid);
+        ck("fenced/prose-wrapped JSON still parses", p.items.size() == 1);
+    }
+
+    // A runaway plan is capped.
+    {
+        std::string big = R"({"pieces":[)";
+        for (int i = 0; i < 200; ++i) {
+            if (i) big += ',';
+            big += R"({"piece":"Floor","x":0,"y":0,"z":0})";
+        }
+        big += "]}";
+        const ai::Plan p = ai::validatePlan(big, kit, grid);
+        ck("plan length is capped", p.items.size() == ai::kMaxPieces);
+    }
+
+    // Garbage in, nothing out.
+    {
+        const ai::Plan p = ai::validatePlan("not json at all", kit, grid);
+        ck("garbage yields no pieces", p.items.empty() && !p.rejected.empty());
+    }
+
+    // Applying a plan must land as exactly one undo step.
+    {
+        bsp_ = BspFile();
+        doc_.newBlank("greyboxtest");
+        history_.reset(doc_);
+        clearSelection();
+        const size_t before = doc_.worldSolids().size();
+        ai::Plan p = ai::validatePlan(
+            R"({"pieces":[{"piece":"Room","x":0,"y":0,"z":0},
+                          {"piece":"Floor","x":1024,"y":0,"z":0},
+                          {"piece":"Wall","x":2048,"y":0,"z":0}]})",
+            kit, grid);
+        applyPlan(p);
+        const size_t after = doc_.worldSolids().size();
+        ck("plan created brushwork", after > before);
+        undo();
+        ck("one undo removes the whole plan",
+           doc_.worldSolids().size() == before);
+    }
+
+    PB_INFO("greybox-test: %d passed, %d failed", pass, fail);
+}
+
+void Editor::debugAiPoolTest() {
+    if (!materialListBuilt_) {
+        for (std::string m : sourceFs_.listFiles("materials/", ".vmt")) {
+            if (m.rfind("materials/", 0) == 0) m = m.substr(10);
+            if (m.size() > 4 && m.substr(m.size() - 4) == ".vmt") m.resize(m.size() - 4);
+            materialList_.push_back(std::move(m));
+        }
+        materialListBuilt_ = true;
+    }
+    int pass = 0, fail = 0;
+    auto ck = [&](const char* w, bool ok) {
+        if (ok) ++pass; else { ++fail; PB_ERROR("ai-pool FAIL: %s", w); }
+    };
+    ck("game materials are mounted", materialList_.size() > 1000);
+
+    const std::vector<std::string> pool =
+        ai::buildPool(materialList_, "rusty industrial metal warehouse", 180);
+    ck("pool is non-empty", !pool.empty());
+    ck("pool respects the cap", pool.size() <= 180);
+
+    // Nothing that can't sit on a brush face should survive the filter.
+    bool clean = true;
+    for (const auto& m : pool)
+        if (m.rfind("vgui/", 0) == 0 || m.rfind("hud/", 0) == 0 ||
+            m.rfind("models/", 0) == 0 || m.find("backpack/") != std::string::npos)
+            clean = false;
+    ck("pool has no ui/model junk", clean);
+
+    // The mood's own keywords should actually be represented.
+    int hits = 0;
+    for (const auto& m : pool)
+        if (m.find("metal") != std::string::npos ||
+            m.find("rust") != std::string::npos ||
+            m.find("industrial") != std::string::npos)
+            ++hits;
+    ck("mood keywords are represented", hits >= 5);
+
+    // Staples are mixed in even for a mood with no matches at all.
+    const std::vector<std::string> odd =
+        ai::buildPool(materialList_, "zzzqqq nonsense mood", 180);
+    bool staple = false;
+    for (const auto& m : odd)
+        if (m.rfind("concrete/", 0) == 0 || m.rfind("metal/", 0) == 0 ||
+            m.rfind("wood/", 0) == 0)
+            staple = true;
+    ck("an unmatched mood still gets buildable staples", staple);
+
+    // Deterministic: the same mood must shortlist the same way twice.
+    const std::vector<std::string> again =
+        ai::buildPool(materialList_, "rusty industrial metal warehouse", 180);
+    ck("shortlisting is deterministic", again == pool);
+
+    // The other validated input list: skyboxes the game actually ships.
+    const auto& skies = skyNames();
+    ck("skyboxes enumerated", skies.size() > 10);
+    bool sane = true;
+    for (const auto& sk : skies)
+        if (sk.empty() || sk.find('/') != std::string::npos ||
+            sk.compare(sk.size() - 2, 2, "up") == 0)
+            sane = false;
+    ck("sky names are bare (no path, no up/dn suffix)", sane);
+
+    PB_INFO("ai-pool: %d passed, %d failed", pass, fail);
+}
+
+void Editor::debugNetTest() {
+    int pass = 0, fail = 0;
+    auto ck = [&](const char* w, bool ok) {
+        if (ok) ++pass; else { ++fail; PB_ERROR("net-test FAIL: %s", w); }
+    };
+
+    // Build a body the way an OpenAI-compatible request is built, round-trip it.
+    const std::string tricky = "a \"quoted\" line\nand a tab\there";
+    json::Value msg = json::Value::object();
+    msg.set("role", json::Value::str("user"));
+    msg.set("content", json::Value::str(tricky));
+    json::Value msgs = json::Value::array();
+    msgs.push(msg);
+    json::Value body = json::Value::object();
+    body.set("model", json::Value::str("test-model"));
+    body.set("messages", msgs);
+    body.set("stream", json::Value::boolean(false));
+    body.set("temperature", json::Value::number(0.25));
+
+    std::string err;
+    const json::Value rt = json::parse(body.dump(), &err);
+    ck("round-trip parses", err.empty());
+    ck("string survives escaping",
+       rt["messages"][0]["content"].asString() == tricky);
+    ck("bool survives", rt["stream"].asBool(true) == false);
+    ck("number survives", std::fabs(rt["temperature"].asNumber() - 0.25) < 1e-9);
+
+    // Missing keys must chain safely rather than crash.
+    ck("missing keys chain to null",
+       rt["nope"]["deeper"][3]["x"].asString().empty());
+
+    // Replies shaped like the two APIs we target.
+    const json::Value oai = json::parse(
+        R"({"choices":[{"message":{"role":"assistant","content":"hello é"}}]})");
+    ck("openai reply shape reads",
+       oai["choices"][0]["message"]["content"].asString() == "hello \xc3\xa9");
+    const json::Value ant =
+        json::parse(R"({"content":[{"type":"text","text":"hi"}]})");
+    ck("anthropic reply shape reads", ant["content"][0]["text"].asString() == "hi");
+
+    err.clear();
+    ck("malformed json is rejected",
+       json::parse(R"({"a":)", &err).isNull() && !err.empty());
+
+    // Connectivity probe — informational, never a failure (no server is fine).
+    struct Probe { const char* name; const char* url; };
+    static const Probe kProbes[] = {
+        {"Ollama", "http://127.0.0.1:11434/api/tags"},
+        {"LM Studio", "http://127.0.0.1:1234/v1/models"},
+    };
+    for (const auto& pr : kProbes) {
+        const net::Response r = net::get(pr.url, {}, 1200);
+        if (r.ok())
+            PB_INFO("  %s: up (%zu bytes)", pr.name, r.body.size());
+        else if (!r.error.empty())
+            PB_INFO("  %s: not running (%s)", pr.name, r.error.c_str());
+        else
+            PB_INFO("  %s: HTTP %ld", pr.name, r.status);
+    }
+
+    PB_INFO("net-test: %d passed, %d failed", pass, fail);
+}
+
+void Editor::debugPickTest() {
+    bsp_ = BspFile();
+    doc_.newBlank("picktest");
+    history_.reset(doc_);
+    clearSelection();
+    const char* kMdl = "models/props_gameplay/resupply_locker.mdl";
+    placeFgdEntity("prop_static", glm::vec3(0));
+    if (doc_.entities().empty()) { PB_ERROR("pick-test: no entity placed"); return; }
+    doc_.entities().back().kv.set("model", kMdl);
+
+    int pass = 0, fail = 0;
+    auto ck = [&](const char* w, bool ok) {
+        if (ok) ++pass; else { ++fail; PB_ERROR("pick-test FAIL: %s", w); }
+    };
+
+    glm::vec3 mn, mx;
+    entityPickBounds(doc_.entities().back(), mn, mx);
+    const glm::vec3 size = mx - mn;
+    ck("model bounds resolved", size.x > 1.0f && size.y > 1.0f && size.z > 1.0f);
+    // A resupply locker is ~80 units tall — far outside the old +-16 default.
+    ck("click box is model-sized, not the +-16 default", size.z > 40.0f);
+
+    // A ray aimed at the top of the model must hit the new box and miss the old.
+    const glm::vec3 aim(0.0f, 0.0f, mx.z - size.z * 0.15f);
+    const glm::vec3 ro = aim + glm::vec3(0.0f, -512.0f, 0.0f);
+    const glm::vec3 rd(0.0f, 1.0f, 0.0f);
+    float t = 0.0f;
+    ck("ray hits the model box", map::rayAabb(ro, rd, mn, mx, t));
+    ck("ray missed the old +-16 box",
+       !map::rayAabb(ro, rd, glm::vec3(-16.0f), glm::vec3(16.0f), t));
+
+    // Identity: clicking a prop must say what it is, not just "prop_static".
+    {
+        map::MapEntity& e = doc_.entities().back();
+        e.kv.set("targetname", "locker_a");
+        const std::string d = describeEntity(e);
+        ck("identity names the class", d.find("prop_static") != std::string::npos);
+        ck("identity names the targetname",
+           d.find("locker_a") != std::string::npos);
+        ck("identity names the model",
+           d.find("resupply_locker") != std::string::npos);
+        ck("identity drops the path and extension",
+           d.find("models/") == std::string::npos &&
+               d.find(".mdl") == std::string::npos);
+    }
+
+    PB_INFO("pick-test: %d passed, %d failed", pass, fail);
+}
+
+void Editor::debugLeakTest() {
+    const std::string tmp =
+        (std::filesystem::temp_directory_path() / "pb_leak.lin").string();
+    {
+        std::ofstream f(tmp);
+        f << "0 0 0\n128 0 0\n128 256 0\n128 256 512\n";
+    }
+    const bool ok = loadPointfile(tmp) && leakLine_.size() == 4 &&
+                    std::fabs(leakLine_[2].y - 256.0f) < 0.01f &&
+                    std::fabs(leakLine_[3].z - 512.0f) < 0.01f;
+    PB_INFO("leak-test: %d passed, %d failed", ok ? 1 : 0, ok ? 0 : 1);
+}
+
+bool Editor::loadPointfile(const std::string& path) {
+    leakLine_.clear();
+    std::ifstream f(path);
+    if (!f) {
+        status_ = "No pointfile at " + path;
+        return false;
+    }
+    std::string line;
+    while (std::getline(f, line)) {
+        float x, y, z;
+        if (std::sscanf(line.c_str(), " %f %f %f", &x, &y, &z) == 3)
+            leakLine_.push_back({x, y, z});
+    }
+    if (leakLine_.empty()) {
+        status_ = "Pointfile had no points: " + path;
+        return false;
+    }
+    status_ = "Leak trace loaded — " + std::to_string(leakLine_.size()) +
+              " points. Follow the line to the hole.";
+    frameLeak();
+    return true;
+}
+
+void Editor::frameLeak() {
+    if (leakLine_.size() < 2) return;
+    // Aim at the first segment — the end of the trace nearest the leaked entity.
+    const glm::vec3 a = leakLine_.front();
+    const glm::vec3 b = leakLine_[std::min<size_t>(1, leakLine_.size() - 1)];
+    const glm::vec3 mid = 0.5f * (a + b);
+    for (auto& v : views_) {
+        if (v.kind == ViewKind::Perspective) {
+            glm::vec3 dir = glm::normalize(b - a + glm::vec3(0.001f));
+            v.camera.pos = mid - dir * 512.0f + glm::vec3(0, 0, 256.0f);
+            v.camera.yawDeg =
+                glm::degrees(std::atan2(dir.y, dir.x));
+            v.camera.pitchDeg = -22.0f;
+        } else {
+            v.camera.orthoCenter = mid;
+        }
+    }
+}
+
+void Editor::drawLeakOverlay(ViewPanel& p, float aspect, ImDrawList* dl) {
+    if (leakLine_.size() < 2) return;
+    const glm::mat4 vp = p.camera.proj(aspect) * p.camera.view();
+    auto pr = [&](const glm::vec3& w, bool& ok) {
+        return projectPt(p.kind, vp, p.contentMin, p.contentSize, w, ok);
+    };
+    const ImU32 col = IM_COL32(255, 70, 120, 240);
+    const ImU32 glow = IM_COL32(255, 70, 120, 70);
+    ImVec2 prev;
+    bool havePrev = false;
+    for (size_t i = 0; i < leakLine_.size(); ++i) {
+        bool ok;
+        const ImVec2 s = pr(leakLine_[i], ok);
+        if (!ok) { havePrev = false; continue; }
+        if (havePrev) {
+            dl->AddLine(prev, s, glow, 6.0f);
+            dl->AddLine(prev, s, col, 2.5f);
+        }
+        prev = s;
+        havePrev = true;
+    }
+    bool ok0;
+    const ImVec2 s0 = pr(leakLine_.front(), ok0);
+    if (ok0) {
+        dl->AddCircleFilled(s0, 5.0f, col);
+        dl->AddText(ImVec2(s0.x + 8, s0.y - 6), col, "leaked entity");
+    }
+    dl->AddText(ImVec2(p.contentMin.x + 8, p.contentMin.y + 40), col,
+                "LEAK — the line exits the map through the hole");
+}
+
+namespace {
+// Approximate local AABB of a kit piece, for the drop preview ghost. Mirrors
+// the sizes in placePiece(); a generic box for anything not listed.
+void previewBox(const std::string& piece, glm::vec3& mn, glm::vec3& mx) {
+    struct B { const char* n; glm::vec3 mn, mx; };
+    static const B tbl[] = {
+        {"Floor", {-128, -128, -16}, {128, 128, 0}},
+        {"Route", {-256, -64, -16}, {256, 64, 0}},
+        {"Wall", {-128, -8, 0}, {128, 8, 128}},
+        {"Ceiling", {-128, -128, 0}, {128, 128, 16}},
+        {"Pillar", {-32, -32, 0}, {32, 32, 192}},
+        {"Cover", {-96, -8, 0}, {96, 8, 44}},
+        {"Room", {-208, -208, 0}, {208, 208, 400}},
+        {"Doorway", {-128, -8, 0}, {128, 8, 160}},
+        {"Window", {-128, -8, 0}, {128, 8, 160}},
+        {"Ramp", {-128, -64, 0}, {128, 64, 128}},
+        {"Wedge", {-128, -64, 0}, {128, 64, 128}},
+        {"Stairs", {-64, 0, 0}, {64, 192, 128}},
+        {"Spiral stairs", {-96, -96, 0}, {96, 96, 200}},
+        {"Platform", {-96, -96, 0}, {96, 96, 112}},
+        {"Skybox seal", {-64, -64, 0}, {64, 64, 64}},
+        {"Clip wall", {-128, -8, 0}, {128, 8, 160}},
+        {"Water", {-256, -256, -64}, {256, 256, 0}},
+        {"Trigger box", {-96, -96, 0}, {96, 96, 128}},
+        {"Ladder", {-22, -4, 0}, {22, 12, 192}},
+        {"Working door", {-48, -6, 0}, {48, 6, 112}},
+        {"Spawn door", {-64, -4, 0}, {64, 4, 128}},
+        {"Death pit", {-200, -200, -8}, {200, 200, 24}},
+        {"No-build zone", {-128, -128, 0}, {128, 128, 128}},
+        {"RED spawn", {-208, -208, 0}, {208, 208, 208}},
+        {"BLU spawn", {-208, -208, 0}, {208, 208, 208}},
+        {"CTF setup", {-864, -96, -16}, {864, 96, 104}},
+        {"KOTH point", {-128, -128, -16}, {128, 128, 128}},
+        {"Capture point", {-128, -128, -16}, {128, 128, 128}},
+        {"Arena logic", {-128, -128, -16}, {128, 128, 128}},
+        {"Payload track", {-64, -48, 0}, {1024, 48, 90}},
+        {"Breakable crate", {-32, -32, 0}, {32, 32, 64}},
+        {"Crate stack", {-72, -72, 0}, {88, 88, 160}},
+        {"Fence", {-128, -3, 0}, {128, 3, 48}},
+        {"Elevator", {-90, -80, 0}, {80, 80, 72}},
+        {"Moving platform", {-108, -96, 0}, {96, 96, 16}},
+        {"Resupply", {-32, -16, 0}, {32, 16, 96}},
+        {"Health / ammo", {-48, -16, 0}, {48, 16, 40}},
+    };
+    for (const auto& b : tbl)
+        if (piece == b.n) { mn = b.mn; mx = b.mx; return; }
+    mn = glm::vec3(-64, -64, 0);
+    mx = glm::vec3(64, 64, 64);
+}
+}  // namespace
+
+// Ghost outline of the pending piece at the drop point, so you can see where
+// a Floor / Wall / prop will land before you commit it.
+void Editor::drawPlacePreview(ViewPanel& p, float aspect, ImDrawList* dl) {
+    if (!hasDoc()) return;
+    // What's pending: a dragged card, or a clicked ("armed") card.
+    std::string pend = !dragPlace_.empty() ? dragPlace_ : placing_;
+    if (pend.empty() || pend.rfind("@prefab:", 0) == 0) return;
+    // Only the viewport under the cursor (headless: force one).
+    ImVec2 m = ImGui::GetMousePos();
+    const bool over =
+        m.x >= p.contentMin.x && m.x < p.contentMin.x + p.contentSize.x &&
+        m.y >= p.contentMin.y && m.y < p.contentMin.y + p.contentSize.y;
+    if (!over) {
+        if (debugPreviewAtCenter_ && p.kind == ViewKind::Perspective)
+            m = ImVec2(p.contentMin.x + p.contentSize.x * 0.5f,
+                       p.contentMin.y + p.contentSize.y * 0.5f);
+        else
+            return;
+    }
+
+    glm::vec3 lo, hi;
+    std::string label;
+    if (pend.rfind("@model:", 0) == 0) {
+        lo = glm::vec3(-32, -32, 0); hi = glm::vec3(32, 32, 72);
+        label = "prop";
+    } else if (pend.rfind("@ent:", 0) == 0) {
+        const std::string cls = pend.substr(5);
+        lo = glm::vec3(-16); hi = glm::vec3(16);
+        if (const fgd::EntityClass* ec = fgd_.flattened(cls); ec && ec->hasSize) {
+            lo = ec->sizeMin; hi = ec->sizeMax;
+        }
+        label = cls;
+    } else {
+        const std::string piece =
+            pend.rfind("@kit:", 0) == 0 ? pend.substr(5) : pend;
+        previewBox(piece, lo, hi);
+        label = piece;
+    }
+
+    const glm::vec3 at = dropWorldPoint(p, m);
+    const glm::vec3 a = at + lo, b = at + hi;
+    const glm::vec3 cs[8] = {
+        {a.x, a.y, a.z}, {b.x, a.y, a.z}, {b.x, b.y, a.z}, {a.x, b.y, a.z},
+        {a.x, a.y, b.z}, {b.x, a.y, b.z}, {b.x, b.y, b.z}, {a.x, b.y, b.z}};
+    const glm::mat4 vp = p.camera.proj(aspect) * p.camera.view();
+    ImVec2 pv[8];
+    bool okAll = true;
+    for (int k = 0; k < 8; ++k) {
+        bool ok;
+        pv[k] = projectPt(p.kind, vp, p.contentMin, p.contentSize, cs[k], ok);
+        okAll = okAll && ok;
+    }
+    if (!okAll) return;
+    static const int E[12][2] = {{0, 1}, {1, 2}, {2, 3}, {3, 0}, {4, 5}, {5, 6},
+                                 {6, 7}, {7, 4}, {0, 4}, {1, 5}, {2, 6}, {3, 7}};
+    const ImU32 line = IM_COL32(120, 220, 140, 235);
+    const ImU32 fill = IM_COL32(120, 220, 140, 40);
+    // Faint fill on the base quad.
+    dl->AddQuadFilled(pv[0], pv[1], pv[2], pv[3], fill);
+    for (auto& e : E) dl->AddLine(pv[e[0]], pv[e[1]], line, 1.6f);
+    // Drop-point tick + label.
+    bool ok;
+    const ImVec2 sp = projectPt(p.kind, vp, p.contentMin, p.contentSize, at, ok);
+    if (ok) {
+        dl->AddCircleFilled(sp, 3.0f, line);
+        char buf[96];
+        std::snprintf(buf, sizeof(buf), "%s  (%d %d %d)", label.c_str(), (int)at.x,
+                      (int)at.y, (int)at.z);
+        dl->AddText(ImVec2(sp.x + 8, sp.y - 16), IM_COL32(15, 20, 15, 210), buf);
+        dl->AddText(ImVec2(sp.x + 7, sp.y - 17), line, buf);
+    }
+}
+
+void Editor::placeFromPayload(const std::string& payload, const glm::vec3& at) {
+    if (payload.rfind("@model:", 0) == 0) {
+        const std::string mdl = payload.substr(7);
+        if (!doc_.active()) { doc_.newBlank("untitled"); history_.reset(doc_); }
+        placeFgdEntity("prop_static", at);
+        if (!doc_.entities().empty())
+            doc_.entities().back().kv.set("model", mdl);
+        afterEdit("Place prop");
+        status_ = "Placed  " + mdl.substr(mdl.rfind('/') + 1);
+        recentModels_.erase(
+            std::remove(recentModels_.begin(), recentModels_.end(), mdl),
+            recentModels_.end());
+        recentModels_.insert(recentModels_.begin(), mdl);
+        if (recentModels_.size() > 24) recentModels_.resize(24);
+    } else if (payload.rfind("@ent:", 0) == 0) {
+        placeFgdEntity(payload.substr(5), at);
+    } else if (payload.rfind("@kit:", 0) == 0) {
+        placePiece(payload.substr(5), at);
+    } else if (payload.rfind("@prefab:", 0) == 0) {
+        placePrefab(payload.substr(8), at);
+    } else {
+        placePiece(payload, at);
+    }
+}
+
+void Editor::placeFgdEntity(const std::string& cls, const glm::vec3& atRaw) {
+    if (!doc_.active()) doc_.newBlank("untitled");
+    const glm::vec3 at = snapVec(atRaw);
+    const fgd::EntityClass* ec = fgd_.flattened(cls);
+
+    map::MapEntity e;
+    e.id = doc_.nextId();
+    e.classname = cls;
+    e.origin = at;
+    e.kv.set("classname", cls);
+    e.kv.set("origin", std::to_string((int)at.x) + " " + std::to_string((int)at.y) +
+                           " " + std::to_string((int)at.z));
+    // Seed non-empty FGD defaults so the entity is valid out of the box.
+    if (ec)
+        for (const auto& v : ec->vars)
+            if (!v.defaultValue.empty() && v.key != "origin" && v.key != "targetname")
+                e.kv.set(v.key, v.defaultValue);
+
+    const bool solid = ec && ec->isSolid();
+    if (solid) {
+        map::Solid s = map::Solid::makeBox(at - glm::vec3(64, 64, 0),
+                                           at + glm::vec3(64, 64, 128),
+                                           "tools/toolstrigger");
+        s.id = doc_.nextId();
+        e.solids.push_back(std::move(s));
+    }
+
+    doc_.entities().push_back(std::move(e));
+    selectedEntity_ = static_cast<int>(doc_.entities().size()) - 1;
+    selection_.clear();
+    afterEdit(("Add " + cls).c_str());
+    status_ = "Placed " + cls;
+}
+
+void Editor::tieSelectionToEntity(const std::string& cls) {
+    // Move the selected world solids into a new brush entity.
+    std::vector<int> idx;
+    for (const auto& r : selection_)
+        if (r.entity < 0 && r.solid >= 0) idx.push_back(r.solid);
+    if (idx.empty()) return;
+    std::sort(idx.rbegin(), idx.rend());
+
+    map::MapEntity e;
+    e.id = doc_.nextId();
+    e.classname = cls;
+    e.kv.set("classname", cls);
+    if (const fgd::EntityClass* ec = fgd_.flattened(cls))
+        for (const auto& v : ec->vars)
+            if (!v.defaultValue.empty() && v.key != "origin")
+                e.kv.set(v.key, v.defaultValue);
+    for (int i : idx) {
+        e.solids.push_back(doc_.worldSolids()[i]);
+        doc_.worldSolids().erase(doc_.worldSolids().begin() + i);
+    }
+    std::reverse(e.solids.begin(), e.solids.end());
+    e.origin = e.solids.empty() ? glm::vec3(0) : e.solids.front().center();
+
+    doc_.entities().push_back(std::move(e));
+    selection_.clear();
+    selectedEntity_ = static_cast<int>(doc_.entities().size()) - 1;
+    afterEdit(("Tie to " + cls).c_str());
+    status_ = "Tied " + std::to_string(idx.size()) + " brush(es) to " + cls;
+}
+
+void Editor::untieSelectionToWorld() {
+    // Gather selected brushes by entity, move them to worldSolids, and drop
+    // any entity left empty. The entity's keyvalues/IO go with it if emptied.
+    std::map<int, std::vector<int>> byEnt;
+    for (const auto& r : selection_)
+        if (r.entity >= 0) byEnt[r.entity].push_back(r.solid);
+    if (byEnt.empty()) { status_ = "Select a brush that belongs to an entity."; return; }
+
+    std::vector<map::Solid> freed;
+    std::vector<int> emptied;
+    for (auto& [ei, brushes] : byEnt) {
+        if (ei < 0 || ei >= (int)doc_.entities().size()) continue;
+        auto& sols = doc_.entities()[ei].solids;
+        std::sort(brushes.rbegin(), brushes.rend());
+        brushes.erase(std::unique(brushes.begin(), brushes.end()), brushes.end());
+        for (int bi : brushes)
+            if (bi >= 0 && bi < (int)sols.size()) {
+                map::Solid s = sols[bi];
+                s.group = 0;
+                freed.push_back(std::move(s));
+                sols.erase(sols.begin() + bi);
+            }
+        if (sols.empty()) emptied.push_back(ei);
+    }
+    std::sort(emptied.rbegin(), emptied.rend());
+    for (int ei : emptied) doc_.entities().erase(doc_.entities().begin() + ei);
+
+    std::vector<map::SolidRef> sel;
+    for (auto& s : freed) {
+        s.id = doc_.nextId();
+        doc_.worldSolids().push_back(std::move(s));
+        sel.push_back({-1, (int)doc_.worldSolids().size() - 1});
+    }
+    selection_ = sel;
+    selectedEntity_ = -1;
+    afterEdit("Untie to world");
+    status_ = "Untied " + std::to_string(freed.size()) + " brush(es) to world";
+}
+
+void Editor::handleViewportInput(ViewPanel& p) {
+    if (!p.hovered) {
+        // Keep feeding a drag that started here — leaving the viewport used to
+        // freeze it mid-way and swallow the mouse release, so it stayed stuck.
+        // Each tool tracks its own owning view (dragView_ / blockView_ /
+        // clipView_ / subDragView_); only that view keeps driving the drag.
+        if (dragView_ == static_cast<int>(p.kind) &&
+            (resizeHandle_ >= 0 || moveDrag_ != 0 || movePending_)) {
+            handleSelectionResize(p);
+            handleSelectionMove(p);
+        }
+        if (blockDragging_ && blockView_ == p.kind) handleBlockTool(p);
+        if (clipDragging_ && clipView_ == p.kind) handleClipTool(p);
+        if (subDragging_ && subDragView_ == p.kind) handleSubObjectInput(p);
+        return;
+    }
+    ImGuiIO& io = ImGui::GetIO();
+    const float dt = std::clamp(io.DeltaTime, 0.0f, 0.1f);
+
+    // Curvy road: each click adds a spline point; Enter finishes, Esc cancels.
+    if (placing_ == "Curvy road") {
+        if (ImGui::IsMouseReleased(ImGuiMouseButton_Left) &&
+            !ImGui::IsMouseDragPastThreshold(ImGuiMouseButton_Left, 4.0f)) {
+            roadPts_.push_back(snapVec(viewPlanePoint(p, ImGui::GetMousePos())));
+            roadActive_ = true;
+            status_ = std::to_string(roadPts_.size()) +
+                      " road point(s) — click more, Enter to build, Esc to cancel";
+        }
+        if (ImGui::IsKeyPressed(ImGuiKey_Enter) ||
+            ImGui::IsKeyPressed(ImGuiKey_KeypadEnter))
+            finalizeRoad();
+        if (ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+            roadPts_.clear();
+            roadActive_ = false;
+            placing_.clear();
+            status_ = "Road cancelled.";
+        }
+        return;
+    }
+
+    // Kit placement: click drops the pending piece.
+    if (!placing_.empty() && ImGui::IsMouseReleased(ImGuiMouseButton_Left) &&
+        !ImGui::IsMouseDragPastThreshold(ImGuiMouseButton_Left, 4.0f)) {
+        const glm::vec3 at = dropWorldPoint(p, ImGui::GetMousePos());
+        if (placing_.rfind("@prefab:", 0) == 0)
+            placePrefab(placing_.substr(8), at);
+        else if (placing_[0] == '@')
+            placeFromPayload(placing_, at);
+        else
+            placePiece(placing_, at);
+        if (!io.KeyShift) placing_.clear();  // hold Shift to place several
+        return;
+    }
+
+    handleBlockTool(p);
+
+    // Vertex/Edge/Face editing owns the mouse when a single brush is selected.
+    const bool subActive = tool_ == Tool::Vertex && selection_.size() == 1;
+    if (subActive) handleSubObjectInput(p);
+    handleTextureTool(p);
+    handleClipTool(p);
+    handleSelectionResize(p);
+    handleSelectionMove(p);
+    updateHoverHighlight(p);
+
+    if (!io.KeyCtrl && !ImGui::IsMouseDown(ImGuiMouseButton_Right)) {
+        if (ImGui::IsKeyPressed(ImGuiKey_W)) gizmoMode_ = 0;
+        if (ImGui::IsKeyPressed(ImGuiKey_E)) gizmoMode_ = 1;
+        if (ImGui::IsKeyPressed(ImGuiKey_R)) gizmoMode_ = 2;
+    }
+
+    if (p.kind == ViewKind::Perspective) {
+        if (ImGui::IsMouseDragging(ImGuiMouseButton_Right, 0.0f)) {
+            p.camera.yawDeg -= io.MouseDelta.x * 0.15f;
+            p.camera.pitchDeg = std::clamp(p.camera.pitchDeg - io.MouseDelta.y * 0.15f,
+                                           -89.0f, 89.0f);
+        }
+        const bool rmb = ImGui::IsMouseDown(ImGuiMouseButton_Right);
+        if (rmb) {
+            float speed = flySpeed_ * dt * (io.KeyShift ? 3.0f : 1.0f);
+            glm::vec3 fwd = p.camera.forward();
+            glm::vec3 right = p.camera.right();
+            if (ImGui::IsKeyDown(ImGuiKey_W)) p.camera.pos += fwd * speed;
+            if (ImGui::IsKeyDown(ImGuiKey_S)) p.camera.pos -= fwd * speed;
+            if (ImGui::IsKeyDown(ImGuiKey_D)) p.camera.pos += right * speed;
+            if (ImGui::IsKeyDown(ImGuiKey_A)) p.camera.pos -= right * speed;
+            if (ImGui::IsKeyDown(ImGuiKey_E)) p.camera.pos.z += speed;
+            if (ImGui::IsKeyDown(ImGuiKey_Q)) p.camera.pos.z -= speed;
+        }
+        if (io.MouseWheel != 0.0f)
+            p.camera.pos += p.camera.forward() * (io.MouseWheel * 120.0f);
+    } else {
+        const bool pan = ImGui::IsMouseDragging(ImGuiMouseButton_Middle, 0.0f) ||
+                         (ImGui::IsMouseDragging(ImGuiMouseButton_Left, 0.0f) &&
+                          ImGui::IsKeyDown(ImGuiKey_Space));
+        if (pan)
+            p.camera.panOrtho({io.MouseDelta.x, io.MouseDelta.y}, 1.0f,
+                              {static_cast<int>(p.contentSize.x),
+                               static_cast<int>(p.contentSize.y)});
+        if (io.MouseWheel != 0.0f) {
+            const ImVec2 m = ImGui::GetMousePos();
+            p.camera.zoomOrtho(io.MouseWheel,
+                               {m.x - p.contentMin.x, m.y - p.contentMin.y}, 1.0f,
+                               {static_cast<int>(p.contentSize.x),
+                                static_cast<int>(p.contentSize.y)});
+        }
+    }
+
+    if (ImGui::IsKeyPressed(ImGuiKey_F) && hasMap()) frameAllViews();
+
+    // Left-click select (no drag) with the Select tool, or with the Vertex tool
+    // when the click missed every sub-object handle (so you can pick a brush to
+    // start editing / switch to another one).
+    const bool vtxPassthrough =
+        tool_ == Tool::Vertex && !subDragging_ && subHot_ < 0 &&
+        !(subActive && subSel_ >= 0);
+    if (hasDoc() && (tool_ == Tool::Select || vtxPassthrough) &&
+        resizeHandle_ < 0 && resizeHot_ < 0 && moveDrag_ == 0 &&
+        ImGui::IsMouseReleased(ImGuiMouseButton_Left) &&
+        !ImGui::IsMouseDragPastThreshold(ImGuiMouseButton_Left, 4.0f)) {
+        const ImVec2 m = ImGui::GetMousePos();
+        pickAt(p, {m.x - p.contentMin.x, m.y - p.contentMin.y}, io.KeyShift);
+        handlesDirty_ = true;
+    }
+    if (ImGui::IsKeyPressed(ImGuiKey_Escape) && !selection_.empty()) clearSelection();
+    if (ImGui::IsKeyPressed(ImGuiKey_Delete)) deleteSelection();
+    if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_D)) duplicateSelection();
+
+    // Arrow-key nudge along the view's axes, one grid step (Shift = 4).
+    if (!selection_.empty() && !io.KeyCtrl) {
+        const float step = float(gridSize_) * (io.KeyShift ? 4.0f : 1.0f);
+        glm::vec3 rt, up;
+        if (p.kind == ViewKind::Perspective) {
+            rt = glm::normalize(glm::vec3(p.camera.right().x, p.camera.right().y, 0));
+            up = glm::vec3(0, 0, 1);
+        } else {
+            rt = p.camera.orthoRightAxis();
+            up = p.camera.orthoUpAxis();
+        }
+        glm::vec3 d(0);
+        if (ImGui::IsKeyPressed(ImGuiKey_RightArrow)) d += rt * step;
+        if (ImGui::IsKeyPressed(ImGuiKey_LeftArrow)) d -= rt * step;
+        if (ImGui::IsKeyPressed(ImGuiKey_UpArrow)) d += up * step;
+        if (ImGui::IsKeyPressed(ImGuiKey_DownArrow)) d -= up * step;
+        if (ImGui::IsKeyPressed(ImGuiKey_PageUp)) d += glm::vec3(0, 0, step);
+        if (ImGui::IsKeyPressed(ImGuiKey_PageDown)) d -= glm::vec3(0, 0, step);
+        if (d != glm::vec3(0))
+            nudgeSelection(glm::round(d / step) * step);  // keep on grid
+    }
+}
+
+std::string Editor::describeEntity(const map::MapEntity& e) const {
+    std::string out = e.classname.empty() ? "entity" : e.classname;
+    const std::string tn = e.kv.get("targetname");
+    if (!tn.empty()) out += "  \"" + tn + "\"";
+    std::string mdl = e.kv.get("model");
+    if (mdl.empty())
+        if (const fgd::EntityClass* ec = fgd_.flattened(e.classname))
+            mdl = ec->studioModel;
+    if (!mdl.empty() && mdl.find(".mdl") != std::string::npos) {
+        const size_t sl = mdl.find_last_of('/');
+        std::string leaf = sl == std::string::npos ? mdl : mdl.substr(sl + 1);
+        if (leaf.size() > 4) leaf.resize(leaf.size() - 4);  // .mdl
+        out += "  —  " + leaf;
+    }
+    return out;
+}
+
+bool Editor::pickRawAt(const glm::vec3& ro, const glm::vec3& rd) {
+    // A raw .bsp (no decompile yet) has no editable document, so nothing above
+    // can be hit. The props and point entities are still on screen though, and
+    // clicking them ought to at least tell you what they are.
+    float bestT = 1e30f;
+    const bsp::PropInstance* hitProp = nullptr;
+    const bsp::PointEntity* hitEnt = nullptr;
+
+    for (const auto& pr : mesh_.props) {
+        glm::vec3 mn(-24.0f), mx(24.0f);
+        const model::StudioModel& sm = model::loadStudioModel(sourceFs_, pr.model);
+        if (sm.ok && sm.boundsMax != sm.boundsMin) {
+            mn = sm.boundsMin * pr.scale;
+            mx = sm.boundsMax * pr.scale;
+        }
+        float t;
+        if (map::rayAabb(ro, rd, pr.pos + mn, pr.pos + mx, t) && t < bestT) {
+            bestT = t;
+            hitProp = &pr;
+            hitEnt = nullptr;
+        }
+    }
+    for (const auto& pe : mesh_.pointEntities) {
+        float t;
+        if (map::rayAabb(ro, rd, pe.pos - glm::vec3(20.0f), pe.pos + glm::vec3(20.0f),
+                         t) &&
+            t < bestT) {
+            bestT = t;
+            hitEnt = &pe;
+            hitProp = nullptr;
+        }
+    }
+
+    if (hitProp) {
+        std::string leaf = hitProp->model;
+        const size_t sl = leaf.find_last_of('/');
+        if (sl != std::string::npos) leaf = leaf.substr(sl + 1);
+        if (leaf.size() > 4) leaf.resize(leaf.size() - 4);
+        status_ = "prop_static  —  " + leaf +
+                  "   (decompile the map to edit it)";
+        return true;
+    }
+    if (hitEnt) {
+        status_ = hitEnt->classname +
+                  (hitEnt->targetname.empty() ? std::string()
+                                              : "  \"" + hitEnt->targetname + "\"") +
+                  "   (decompile the map to edit it)";
+        return true;
+    }
+    return false;
+}
+
+void Editor::entityPickBounds(const map::MapEntity& e, glm::vec3& mn,
+                              glm::vec3& mx) {
+    mn = glm::vec3(-16.0f);
+    mx = glm::vec3(16.0f);
+
+    // Prefer the actual model: a prop's visible mesh is often hundreds of units
+    // across, so the old +-16 box round the origin meant clicking the crate you
+    // can see missed it entirely.
+    std::string mdl = e.kv.get("model");
+    const fgd::EntityClass* ec = fgd_.flattened(e.classname);
+    if (mdl.empty() && ec) mdl = ec->studioModel;
+    bool haveModel = false;
+    if (!mdl.empty() && mdl[0] != '*' && mdl.find(".mdl") != std::string::npos) {
+        const model::StudioModel& sm = model::loadStudioModel(sourceFs_, mdl);
+        if (sm.ok && sm.boundsMax != sm.boundsMin) {
+            mn = sm.boundsMin;
+            mx = sm.boundsMax;
+            haveModel = true;
+        }
+    }
+    if (!haveModel && ec && ec->hasSize) {
+        mn = ec->sizeMin;
+        mx = ec->sizeMax;
+    }
+
+    float sc = 1.0f;
+    if (const std::string ms = e.kv.get("modelscale"); !ms.empty())
+        sc = std::max(0.01f, static_cast<float>(std::atof(ms.c_str())));
+    mn *= sc;
+    mx *= sc;
+
+    // Rotate the local box by "P Y R" and re-bound it in world space (same
+    // yaw*pitch*roll order the prop baker uses), then offset to the origin.
+    float pit = 0.0f, yaw = 0.0f, rol = 0.0f;
+    if (const std::string ang = e.kv.get("angles"); !ang.empty())
+        std::sscanf(ang.c_str(), "%f %f %f", &pit, &yaw, &rol);
+    if (pit != 0.0f || yaw != 0.0f || rol != 0.0f) {
+        const glm::mat3 R =
+            glm::mat3(glm::rotate(glm::mat4(1.0f), glm::radians(yaw), glm::vec3(0, 0, 1))) *
+            glm::mat3(glm::rotate(glm::mat4(1.0f), glm::radians(pit), glm::vec3(0, 1, 0))) *
+            glm::mat3(glm::rotate(glm::mat4(1.0f), glm::radians(rol), glm::vec3(1, 0, 0)));
+        const glm::vec3 lo = mn, hi = mx;
+        glm::vec3 rmn(1e30f), rmx(-1e30f);
+        for (int c = 0; c < 8; ++c) {
+            const glm::vec3 corner(c & 1 ? hi.x : lo.x, c & 2 ? hi.y : lo.y,
+                                   c & 4 ? hi.z : lo.z);
+            const glm::vec3 w = R * corner;
+            rmn = glm::min(rmn, w);
+            rmx = glm::max(rmx, w);
+        }
+        mn = rmn;
+        mx = rmx;
+    }
+    mn += e.origin;
+    mx += e.origin;
+}
+
+void Editor::pickAt(ViewPanel& p, const glm::vec2& px, bool additive) {
+    glm::vec3 ro, rd;
+    p.camera.pixelRay(px, p.contentSize, ro, rd);
+
+    map::SolidRef best;
+    float bestT = 1e30f;
+    auto test = [&](const map::Solid& s, int ent, int idx) {
+        float t;
+        if (s.valid && !s.hidden && map::raySolid(ro, rd, s, t) && t < bestT) {
+            bestT = t;
+            best = {ent, idx};
+        }
+    };
+    const auto& ws = doc_.worldSolids();
+    for (int i = 0; i < static_cast<int>(ws.size()); ++i) test(ws[i], -1, i);
+    for (int e = 0; e < static_cast<int>(doc_.entities().size()); ++e) {
+        const auto& es = doc_.entities()[e].solids;
+        for (int i = 0; i < static_cast<int>(es.size()); ++i) test(es[i], e, i);
+    }
+
+    // Point entities: ray vs a helper box around the origin (FGD size or +-16).
+    int bestPointEnt = -1;
+    for (int e = 0; e < static_cast<int>(doc_.entities().size()); ++e) {
+        const auto& ent = doc_.entities()[e];
+        if (!ent.solids.empty() || ent.hidden) continue;
+        glm::vec3 mn, mx;
+        entityPickBounds(ent, mn, mx);
+        float t;
+        if (map::rayAabb(ro, rd, mn, mx, t) && t < bestT) {
+            bestT = t;
+            bestPointEnt = e;
+            best = {};
+        }
+    }
+    if (bestPointEnt >= 0) {
+        selectedEntity_ = bestPointEnt;
+        selection_.clear();
+        rebuildSelectionWire();
+        status_ = describeEntity(doc_.entities()[bestPointEnt]);
+        return;
+    }
+
+    if (!best.valid()) {
+        if (!hasDoc() && pickRawAt(ro, rd)) return;  // raw .bsp: identify only
+        if (!additive) clearSelection();
+        return;
+    }
+    // "Whole piece" mode: clicking any brush of a multi-brush piece
+    // (func_detail, a tied entity) grabs all of its brushes.
+    std::vector<map::SolidRef> hitSet{best};
+    if (selectWholePiece_ && best.entity >= 0) {
+        hitSet.clear();
+        const int n = (int)doc_.entities()[best.entity].solids.size();
+        for (int i = 0; i < n; ++i) hitSet.push_back({best.entity, i});
+    }
+    if (additive) {
+        // Toggle the hit set as a unit.
+        const bool present = std::find(selection_.begin(), selection_.end(),
+                                       best) != selection_.end();
+        for (const auto& r : hitSet) {
+            auto it = std::find(selection_.begin(), selection_.end(), r);
+            if (present && it != selection_.end()) selection_.erase(it);
+            else if (!present && it == selection_.end()) selection_.push_back(r);
+        }
+    } else {
+        selection_ = hitSet;
+    }
+    expandSelectionToGroups();
+    syncSelectedEntity();
+    rebuildSelectionWire();
+    status_ = std::to_string(selection_.size()) + " brush(es) selected";
+    if (selectedEntity_ >= 0 && selectedEntity_ < (int)doc_.entities().size())
+        status_ += "  —  " + describeEntity(doc_.entities()[selectedEntity_]);
+}
+
+void Editor::syncSelectedEntity() {
+    // If every selected solid belongs to the same real entity, treat that
+    // entity as selected so its properties show; otherwise clear.
+    int ent = -2;
+    for (const auto& r : selection_) {
+        if (ent == -2) ent = r.entity;
+        else if (ent != r.entity) ent = -3;
+    }
+    selectedEntity_ = (ent >= 0) ? ent : -1;
+}
+
+void Editor::rebuildSelectionWire() {
+    std::vector<glm::vec3> lines;
+    for (const auto& r : selection_)
+        if (const map::Solid* s = doc_.resolve(r)) {
+            auto w = map::solidWire(*s);
+            lines.insert(lines.end(), w.begin(), w.end());
+        }
+    renderer_.setSelectionWire(lines);
+}
+
+void Editor::clearSelection() {
+    selection_.clear();
+    selectedEntity_ = -1;
+    renderer_.setSelectionWire({});
+    handlesDirty_ = true;
+    subSel_ = -1;
+    subDragging_ = false;
+}
+
+void Editor::expandSelectionToGroups() {
+    std::vector<int> groups;
+    for (const auto& r : selection_)
+        if (const map::Solid* s = doc_.resolve(r); s && s->group > 0 && r.entity < 0)
+            if (std::find(groups.begin(), groups.end(), s->group) == groups.end())
+                groups.push_back(s->group);
+    if (groups.empty()) return;
+    const auto& ws = doc_.worldSolids();
+    for (int i = 0; i < (int)ws.size(); ++i) {
+        if (std::find(groups.begin(), groups.end(), ws[i].group) == groups.end())
+            continue;
+        map::SolidRef r{-1, i};
+        if (std::find(selection_.begin(), selection_.end(), r) == selection_.end())
+            selection_.push_back(r);
+    }
+}
+
+void Editor::groupSelection() {
+    int worldSel = 0;
+    for (const auto& r : selection_) if (r.entity < 0) ++worldSel;
+    if (worldSel < 2) { status_ = "Select 2+ world brushes to group."; return; }
+    int gid = 0;
+    for (const auto& s : doc_.worldSolids()) gid = std::max(gid, s.group);
+    ++gid;
+    for (const auto& r : selection_)
+        if (map::Solid* s = doc_.resolve(r); s && r.entity < 0) s->group = gid;
+    afterEdit("Group");
+    status_ = fmt("Grouped %d brushes", worldSel);
+}
+
+void Editor::ungroupSelection() {
+    int n = 0;
+    for (const auto& r : selection_)
+        if (map::Solid* s = doc_.resolve(r); s && s->group > 0) { s->group = 0; ++n; }
+    if (n) { afterEdit("Ungroup"); status_ = "Ungrouped"; }
+}
+
+glm::vec3 Editor::selectionCenter() const {
+    glm::vec3 sum(0);
+    int n = 0;
+    for (const auto& r : selection_)
+        if (const map::Solid* s = doc_.resolve(r)) {
+            sum += s->center();
+            ++n;
+        }
+    return n ? sum / float(n) : glm::vec3(0);
+}
+
+void Editor::afterEdit(const char* label) {
+    doc_.markDirty();
+    history_.record(doc_, label);
+    buildAndUpload(meshOpts_);
+    rebuildSelectionWire();
+    handlesDirty_ = true;
+}
+
+void Editor::nudgeSelection(const glm::vec3& d) {
+    if (selection_.empty() || d == glm::vec3(0)) return;
+    for (const auto& r : selection_)
+        if (map::Solid* s = doc_.resolve(r)) s->translate(d);
+    afterEdit("Move");
+    status_ = "Moved selection";
+}
+
+// --------------------------------------------------------------------------
+// Modal keyboard transform — G / R / S  then  X/Y/Z  then  a number
+// --------------------------------------------------------------------------
+void Editor::beginModalXform(int op) {
+    if (selection_.empty()) return;
+    ViewPanel* hv = nullptr;
+    for (auto& v : views_) if (v.hovered) hv = &v;
+    if (!hv) hv = &views_[0];
+    mx_ = {};
+    mx_.op = op;
+    mx_.view = hv->kind;
+    const ImVec2 m = ImGui::GetMousePos();
+    mx_.startMouse = {m.x - hv->contentMin.x, m.y - hv->contentMin.y};
+    // Pivot: selection centre, or the point under the cursor if Alt is held
+    // when the op starts (rotate/scale around an arbitrary point).
+    mx_.pivot = selectionCenter();
+    if (ImGui::GetIO().KeyAlt && op != 1) {
+        glm::vec3 ro, rd;
+        hv->camera.pixelRay({mx_.startMouse.x, mx_.startMouse.y}, hv->contentSize,
+                            ro, rd);
+        if (hv->kind == pb::ViewKind::Perspective) {
+            const float t = std::fabs(rd.z) > 1e-4f ? -ro.z / rd.z : 0.0f;
+            if (t > 0) mx_.pivot = glm::vec3((ro + rd * t).x, (ro + rd * t).y,
+                                             mx_.pivot.z);
+        } else {
+            mx_.pivot = viewPlanePoint(*hv, m);
+        }
+        mx_.pivot = snapVec(mx_.pivot);
+        status_ = "Pivot at cursor";
+    }
+    for (const auto& r : selection_)
+        if (const map::Solid* s = doc_.resolve(r)) {
+            mx_.snap.push_back(*s);
+            mx_.refs.push_back(r);
+        }
+    status_ = op == 1 ? "Move — X/Y/Z to lock, type an amount, Enter"
+            : op == 2 ? "Rotate — X/Y/Z axis, type degrees, Enter"
+                      : "Scale — X/Y/Z axis, type a factor, Enter";
+}
+
+void Editor::updateModalXform() {
+    if (mx_.op == 0) return;
+    ImGuiIO& io = ImGui::GetIO();
+    auto tap = [&](ImGuiKey k) { return ImGui::IsKeyPressed(k, false); };
+
+    // Cancel / commit.
+    const bool cancel = tap(ImGuiKey_Escape) ||
+                        ImGui::IsMouseClicked(ImGuiMouseButton_Right);
+    const bool commit = tap(ImGuiKey_Enter) || tap(ImGuiKey_KeypadEnter) ||
+                        ImGui::IsMouseClicked(ImGuiMouseButton_Left);
+
+    // Axis lock (press the held axis again → free).
+    auto axisKey = [&](ImGuiKey k, int a) { if (tap(k)) mx_.axis = mx_.axis == a ? 0 : a; };
+    axisKey(ImGuiKey_X, 1);
+    axisKey(ImGuiKey_Y, 2);
+    axisKey(ImGuiKey_Z, 3);
+
+    // Numeric buffer.
+    for (int d = 0; d <= 9; ++d)
+        if (tap((ImGuiKey)(ImGuiKey_0 + d)) || tap((ImGuiKey)(ImGuiKey_Keypad0 + d)))
+            mx_.num += char('0' + d);
+    if (tap(ImGuiKey_Period) || tap(ImGuiKey_KeypadDecimal)) mx_.num += '.';
+    if ((tap(ImGuiKey_Minus) || tap(ImGuiKey_KeypadSubtract))) {
+        if (!mx_.num.empty() && mx_.num[0] == '-') mx_.num.erase(0, 1);
+        else mx_.num.insert(mx_.num.begin(), '-');
+    }
+    if (tap(ImGuiKey_Backspace) && !mx_.num.empty()) mx_.num.pop_back();
+
+    const bool haveNum = !mx_.num.empty() && mx_.num != "-" && mx_.num != ".";
+    const float numv = haveNum ? std::strtof(mx_.num.c_str(), nullptr) : 0.0f;
+
+    // Where is the cursor, in the op's viewport?
+    ViewPanel* vp = nullptr;
+    for (auto& v : views_) if (v.kind == mx_.view) vp = &v;
+    if (!vp) { mx_.op = 0; return; }
+    const ImVec2 mAbs = ImGui::GetMousePos();
+    const glm::vec2 mNow(mAbs.x - vp->contentMin.x, mAbs.y - vp->contentMin.y);
+    const float aspect = vp->contentSize.x / std::max(1.0f, vp->contentSize.y);
+    const glm::mat4 vpMat = vp->camera.proj(aspect) * vp->camera.view();
+    auto toScreen = [&](const glm::vec3& w) {
+        glm::vec4 c = vpMat * glm::vec4(w, 1.0f);
+        if (c.w <= 1e-5f) return glm::vec2(mx_.startMouse);
+        return glm::vec2((c.x / c.w * 0.5f + 0.5f) * vp->contentSize.x,
+                         (1.0f - (c.y / c.w * 0.5f + 0.5f)) * vp->contentSize.y);
+    };
+
+    glm::mat4 xform(1.0f);
+    glm::vec3 axv(0);
+    if (mx_.axis) axv[mx_.axis - 1] = 1.0f;
+
+    if (mx_.op == 1) {  // ---- MOVE ----
+        glm::vec3 delta(0);
+        if (haveNum && mx_.axis) {
+            delta = axv * numv;
+        } else {
+            // Mouse: world point on the view plane (ortho) or ground/pivot
+            // plane (persp), minus the same at the start.
+            auto worldAt = [&](const glm::vec2& px) {
+                glm::vec3 ro, rd;
+                vp->camera.pixelRay({px.x, px.y}, vp->contentSize, ro, rd);
+                glm::vec3 n = vp->kind == ViewKind::Perspective
+                                  ? -vp->camera.forward()
+                                  : vp->camera.orthoForwardAxis();
+                const float dn = glm::dot(n, rd);
+                const float t = std::fabs(dn) > 1e-6f
+                                    ? (glm::dot(n, mx_.pivot) - glm::dot(n, ro)) / dn
+                                    : 0.0f;
+                return ro + rd * t;
+            };
+            delta = worldAt(mNow) - worldAt(mx_.startMouse);
+            if (mx_.axis) delta = axv * glm::dot(delta, axv);
+            if (snap_ && gridSize_ > 0)
+                delta = glm::round(delta / float(gridSize_)) * float(gridSize_);
+            if (!mx_.snap.empty()) {
+                glm::vec3 smn(1e30f), smx(-1e30f);
+                for (const auto& s : mx_.snap) {
+                    smn = glm::min(smn, s.boundsMin);
+                    smx = glm::max(smx, s.boundsMax);
+                }
+                geoSnapDelta(delta, smn, smx);
+            }
+        }
+        mx_.lastDelta = delta;
+        mx_.lastVal = mx_.axis ? delta[mx_.axis - 1] : glm::length(delta);
+        xform = glm::translate(glm::mat4(1.0f), delta);
+    } else if (mx_.op == 2) {  // ---- ROTATE ----
+        glm::vec3 rax = mx_.axis ? axv
+                       : (vp->kind == ViewKind::Perspective
+                              ? glm::normalize(vp->camera.forward())
+                              : vp->camera.orthoForwardAxis());
+        float deg;
+        if (haveNum) {
+            deg = numv;
+        } else {
+            const glm::vec2 ps = toScreen(mx_.pivot);
+            const float a0 = std::atan2(mx_.startMouse.y - ps.y, mx_.startMouse.x - ps.x);
+            const float a1 = std::atan2(mNow.y - ps.y, mNow.x - ps.x);
+            deg = glm::degrees(a1 - a0);
+            if (snap_) deg = std::round(deg / 5.0f) * 5.0f;
+        }
+        mx_.lastVal = deg;
+        xform = glm::translate(glm::mat4(1.0f), mx_.pivot);
+        xform = glm::rotate(xform, glm::radians(deg), rax);
+        xform = glm::translate(xform, -mx_.pivot);
+    } else {  // ---- SCALE ----
+        float f;
+        if (haveNum) {
+            f = numv;
+        } else {
+            const glm::vec2 ps = toScreen(mx_.pivot);
+            const float d0 = std::max(4.0f, glm::length(mx_.startMouse - ps));
+            const float d1 = glm::length(mNow - ps);
+            f = d1 / d0;
+            if (snap_) f = std::round(f * 20.0f) / 20.0f;
+        }
+        if (f < 0.01f) f = 0.01f;
+        mx_.lastVal = f;
+        glm::vec3 sc = mx_.axis ? glm::vec3(1) + axv * (f - 1.0f) : glm::vec3(f);
+        xform = glm::translate(glm::mat4(1.0f), mx_.pivot);
+        xform = glm::scale(xform, sc);
+        xform = glm::translate(xform, -mx_.pivot);
+    }
+
+    // Restore the snapshot, then apply — keeps the op non-cumulative.
+    for (size_t i = 0; i < mx_.refs.size(); ++i)
+        if (map::Solid* s = doc_.resolve(mx_.refs[i])) {
+            *s = mx_.snap[i];
+            s->transform(xform);
+        }
+    docMeshDirty_ = true;
+    rebuildSelectionWire();
+
+    if (cancel) {
+        for (size_t i = 0; i < mx_.refs.size(); ++i)
+            if (map::Solid* s = doc_.resolve(mx_.refs[i])) *s = mx_.snap[i];
+        buildAndUpload(meshOpts_);
+        rebuildSelectionWire();
+        status_ = "Cancelled";
+        mx_.op = 0;
+    } else if (commit) {
+        const char* lbl = mx_.op == 1 ? "Move" : mx_.op == 2 ? "Rotate" : "Scale";
+        afterEdit(lbl);
+        status_ = lbl;
+        mx_.op = 0;
+    }
+}
+
+void Editor::drawModalXformHud(ViewPanel& p, ImDrawList* dl) {
+    if (mx_.op == 0 || p.kind != mx_.view) return;
+    const char* opn = mx_.op == 1 ? "MOVE" : mx_.op == 2 ? "ROTATE" : "SCALE";
+    const char* axn = mx_.axis == 1 ? " X" : mx_.axis == 2 ? " Y"
+                    : mx_.axis == 3 ? " Z" : "";
+    char buf[96];
+    if (mx_.op == 1)
+        std::snprintf(buf, sizeof(buf), "%s%s  %s%.0f",
+                      opn, axn, mx_.num.empty() ? "" : "= ",
+                      mx_.num.empty() ? mx_.lastVal : std::strtof(mx_.num.c_str(), 0));
+    else
+        std::snprintf(buf, sizeof(buf), "%s%s  %s%.2f",
+                      opn, axn, mx_.num.empty() ? "" : "= ",
+                      mx_.num.empty() ? mx_.lastVal : std::strtof(mx_.num.c_str(), 0));
+    const ImVec2 at(p.contentMin.x + p.contentSize.x * 0.5f - pb::ui::dp(70.0f),
+                    p.contentMin.y + pb::ui::dp(30.0f));
+    dl->AddRectFilled(ImVec2(at.x - 8, at.y - 4),
+                      ImVec2(at.x + pb::ui::dp(190.0f), at.y + ImGui::GetTextLineHeight() + 4),
+                      IM_COL32(20, 22, 26, 235), 4.0f);
+    dl->AddRect(ImVec2(at.x - 8, at.y - 4),
+                ImVec2(at.x + pb::ui::dp(190.0f), at.y + ImGui::GetTextLineHeight() + 4),
+                IM_COL32(230, 150, 70, 235), 4.0f);
+    dl->AddText(at, IM_COL32(240, 240, 245, 255), buf);
+    dl->AddText(ImVec2(at.x, at.y + ImGui::GetTextLineHeight() + 8),
+                IM_COL32(150, 155, 165, 220),
+                "X/Y/Z lock · type amount · Enter · Esc");
+}
+
+void Editor::deleteSelection() {
+    // A selected point entity (e.g. a dropped prop) deletes on its own.
+    if (selection_.empty() && selectedEntity_ >= 0 &&
+        selectedEntity_ < static_cast<int>(doc_.entities().size())) {
+        doc_.entities().erase(doc_.entities().begin() + selectedEntity_);
+        clearSelection();
+        afterEdit("Delete entity");
+        status_ = "Deleted entity";
+        return;
+    }
+    if (selection_.empty()) return;
+
+    // World brushes, and per-entity the individual brush indices to remove.
+    std::vector<int> ws;
+    std::map<int, std::vector<int>> entBrush;
+    for (const auto& r : selection_) {
+        if (r.entity < 0) ws.push_back(r.solid);
+        else entBrush[r.entity].push_back(r.solid);
+    }
+    std::sort(ws.rbegin(), ws.rend());
+    ws.erase(std::unique(ws.begin(), ws.end()), ws.end());
+    for (int i : ws)
+        if (i >= 0 && i < static_cast<int>(doc_.worldSolids().size()))
+            doc_.worldSolids().erase(doc_.worldSolids().begin() + i);
+
+    // Remove those brushes from their entities; drop an entity left with none.
+    std::vector<int> emptied;
+    size_t nBrush = 0;
+    for (auto& [ei, brushes] : entBrush) {
+        if (ei < 0 || ei >= static_cast<int>(doc_.entities().size())) continue;
+        auto& sols = doc_.entities()[ei].solids;
+        std::sort(brushes.rbegin(), brushes.rend());
+        brushes.erase(std::unique(brushes.begin(), brushes.end()), brushes.end());
+        for (int bi : brushes)
+            if (bi >= 0 && bi < static_cast<int>(sols.size())) {
+                sols.erase(sols.begin() + bi);
+                ++nBrush;
+            }
+        if (sols.empty()) emptied.push_back(ei);
+    }
+    std::sort(emptied.rbegin(), emptied.rend());
+    for (int ei : emptied) doc_.entities().erase(doc_.entities().begin() + ei);
+
+    const size_t n = ws.size() + nBrush;
+    clearSelection();
+    afterEdit("Delete");
+    status_ = "Deleted " + std::to_string(n) + " brush(es)";
+}
+
+void Editor::copySelection() {
+    clipboard_.clear();
+    for (const auto& r : selection_)
+        if (const map::Solid* s = doc_.resolve(r)) clipboard_.push_back(*s);
+    if (clipboard_.empty() && selectedEntity_ >= 0 &&
+        selectedEntity_ < static_cast<int>(doc_.entities().size()))
+        clipboardEnt_ = doc_.entities()[selectedEntity_];
+    else
+        clipboardEnt_.classname.clear();
+    if (!clipboard_.empty() || !clipboardEnt_.classname.empty())
+        status_ = "Copied " +
+                  std::to_string(clipboard_.size() +
+                                 (clipboardEnt_.classname.empty() ? 0 : 1)) +
+                  " object(s)";
+}
+
+void Editor::pasteClipboard() {
+    if (clipboard_.empty() && clipboardEnt_.classname.empty()) return;
+    if (!doc_.active()) { doc_.newBlank("untitled"); history_.reset(doc_); }
+    const glm::vec3 off(float(gridSize_), float(gridSize_), 0.0f);
+    std::vector<map::SolidRef> sel;
+    for (map::Solid s : clipboard_) {
+        s.id = doc_.nextId();
+        s.translate(off);
+        doc_.worldSolids().push_back(std::move(s));
+        sel.push_back({-1, static_cast<int>(doc_.worldSolids().size()) - 1});
+    }
+    if (!clipboardEnt_.classname.empty()) {
+        map::MapEntity e = clipboardEnt_;
+        e.id = doc_.nextId();
+        e.origin += off;
+        e.kv.set("origin", std::to_string((int)e.origin.x) + " " +
+                               std::to_string((int)e.origin.y) + " " +
+                               std::to_string((int)e.origin.z));
+        for (auto& s : e.solids) { s.id = doc_.nextId(); s.translate(off); }
+        doc_.entities().push_back(std::move(e));
+        selectedEntity_ = static_cast<int>(doc_.entities().size()) - 1;
+    }
+    selection_ = sel;
+    afterEdit("Paste");
+    status_ = "Pasted";
+}
+
+void Editor::rotateSelection(int axis, float degrees) {
+    glm::vec3 c(0.0f);
+    int n = 0;
+    for (const auto& r : selection_)
+        if (const map::Solid* s = doc_.resolve(r)) { c += s->center(); ++n; }
+    if (n == 0 && selectedEntity_ >= 0 &&
+        selectedEntity_ < static_cast<int>(doc_.entities().size())) {
+        // Spin a point entity's yaw via its angles key.
+        auto& e = doc_.entities()[selectedEntity_];
+        float p = 0, y = 0, r = 0;
+        std::sscanf(e.kv.get("angles").c_str(), "%f %f %f", &p, &y, &r);
+        y = std::fmod(y + degrees, 360.0f);
+        e.kv.set("angles", std::to_string((int)p) + " " + std::to_string((int)y) +
+                               " " + std::to_string((int)r));
+        afterEdit("Rotate");
+        status_ = "Rotated entity";
+        return;
+    }
+    if (n == 0) return;
+    c /= float(n);
+    glm::vec3 ax(0.0f);
+    ax[std::clamp(axis, 0, 2)] = 1.0f;
+    glm::mat4 m(1.0f);
+    m = glm::translate(m, c);
+    m = glm::rotate(m, glm::radians(degrees), ax);
+    m = glm::translate(m, -c);
+    for (const auto& r : selection_)
+        if (map::Solid* s = doc_.resolve(r)) s->transform(m);
+    afterEdit("Rotate");
+    status_ = "Rotated selection";
+}
+
+void Editor::duplicateSelection() {
+    if (selection_.empty()) return;
+    std::vector<map::SolidRef> newSel;
+    for (const auto& r : selection_) {
+        const map::Solid* s = doc_.resolve(r);
+        if (!s) continue;
+        // Entity brushes duplicate into the world — a free copy you can then
+        // re-tie or edit on its own.
+        map::Solid copy = *s;
+        copy.id = doc_.nextId();
+        copy.group = 0;
+        copy.translate(glm::vec3(float(gridSize_), float(gridSize_), 0.0f));
+        doc_.worldSolids().push_back(std::move(copy));
+        newSel.push_back({-1, static_cast<int>(doc_.worldSolids().size()) - 1});
+    }
+    selection_ = newSel;
+    afterEdit("Duplicate");
+    status_ = "Duplicated " + std::to_string(newSel.size()) + " brush(es)";
+}
+
+const std::vector<std::string>& Editor::kitPieceNames() {
+    // The canonical list every AI plan is validated against, and the same names
+    // placePiece() answers to. Kept here so there is one source of truth.
+    static const std::vector<std::string> kNames = {
+        "Floor", "Wall", "Ceiling", "Pillar", "Room", "Ramp", "Route", "Hill",
+        "Stairs", "Cylinder", "Dome", "Arch", "Wedge", "Doorway", "Window",
+        "Platform", "Cover", "Crate stack", "Fence", "Spiral stairs",
+        "Skybox seal", "Clip wall", "Water", "Trigger box", "Ladder",
+        "Working door", "Spawn door", "Button", "Lever", "Elevator",
+        "Moving platform", "Fan / rotating", "Teleport pair", "Breakable crate",
+        "KOTH point", "CTF setup", "Capture point", "Round timer", "Arena logic",
+        "Death pit", "No-build zone", "One spawn point", "RED spawn", "BLU spawn",
+        "Payload track", "Resupply", "Health / ammo", "Point light", "Spot light",
+        "Sun / sky", "Pillar (round)", "Mountain"};
+    return kNames;
+}
+
+void Editor::startGreybox() {
+    if (aiBusy_.load()) return;
+    if (!aiConfig().configured()) {
+        aiJobError_ = "No model configured — set one in Options > AI.";
+        status_ = "AI: " + aiJobError_;
+        return;
+    }
+    if (aiBrief_[0] == 0) {
+        status_ = "AI: describe the layout you want first.";
+        return;
+    }
+    if (!doc_.active()) {
+        doc_.newBlank("untitled");
+        history_.reset(doc_);
+        showWelcome_ = false;
+    }
+
+    if (aiThread_.joinable()) aiThread_.join();
+    aiJobError_.clear();
+    aiKind_ = AiKind::Greybox;
+    aiBusy_ = true;
+    aiJobDone_ = false;
+
+    const ai::Config cfg = aiConfig();
+    const std::string brief = aiBrief_;
+    const int grid = gridSize_;
+    aiThread_ = std::thread([this, cfg, brief, grid] {
+        std::string err;
+        const ai::Plan p =
+            ai::requestGreybox(cfg, brief, kitPieceNames(), grid, &err);
+        {
+            std::lock_guard<std::mutex> lk(aiMutex_);
+            aiPlan_ = p;
+            aiJobError_ = err;
+        }
+        aiJobDone_ = true;
+        aiBusy_ = false;
+    });
+    status_ = "Asking the model to lay out \"" + brief + "\"…";
+}
+
+void Editor::applyPlan(const ai::Plan& p) {
+    if (p.items.empty()) {
+        status_ = "AI returned no usable pieces.";
+        return;
+    }
+    // Remember the option sliders the pieces borrow, so a generated plan can
+    // set them per piece without permanently changing the user's settings.
+    const float roomHalf = roomHalf_, cylR = cylRadius_, cylH = cylHeight_;
+    const float hillR = hillRadius_, hillH = hillHeight_, archR = archRadius_;
+    const int stairSteps = stairSteps_;
+    const float stairW = stairWidth_;
+
+    clearSelection();
+    for (const auto& it : p.items) {
+        if (it.size > 0.0f) {
+            roomHalf_ = std::clamp(it.size * 0.5f, 96.0f, 1024.0f);
+            cylRadius_ = std::clamp(it.size * 0.5f, 16.0f, 1024.0f);
+            hillRadius_ = std::clamp(it.size, 64.0f, 4096.0f);
+            archRadius_ = std::clamp(it.size * 0.5f, 32.0f, 2048.0f);
+            stairWidth_ = std::clamp(it.size, 32.0f, 512.0f);
+        }
+        if (it.height > 0.0f) {
+            cylHeight_ = std::clamp(it.height, 16.0f, 1024.0f);
+            hillHeight_ = std::clamp(it.height, 32.0f, 4096.0f);
+        }
+        if (it.steps > 0) stairSteps_ = std::clamp(it.steps, 2, 40);
+        placePiece(it.piece, it.pos, /*commit=*/false);
+    }
+
+    roomHalf_ = roomHalf;  cylRadius_ = cylR;  cylHeight_ = cylH;
+    hillRadius_ = hillR;   hillHeight_ = hillH; archRadius_ = archR;
+    stairSteps_ = stairSteps; stairWidth_ = stairW;
+
+    clearSelection();
+    afterEdit("AI greybox");     // the whole plan is one undo step
+    frameAllViews();
+    aiLastPlan_ = p;
+    std::string msg = "AI placed " + std::to_string(p.items.size()) + " piece(s)";
+    if (!p.rejected.empty())
+        msg += ", skipped " + std::to_string(p.rejected.size()) + " it invented";
+    if (!p.note.empty()) msg += "  — " + p.note;
+    status_ = msg;
+}
+
+void Editor::startMaterialSuggest() {
+    if (aiBusy_.load() || !hasDoc()) return;
+    if (!aiConfig().configured()) {
+        aiJobError_ = "No model configured — set one in Options > AI.";
+        return;
+    }
+    if (aiPrompt_[0] == 0) {
+        aiJobError_ = "Describe the look you want first.";
+        return;
+    }
+    if (!materialListBuilt_) {
+        for (std::string m : sourceFs_.listFiles("materials/", ".vmt")) {
+            if (m.rfind("materials/", 0) == 0) m = m.substr(10);
+            if (m.size() > 4 && m.substr(m.size() - 4) == ".vmt") m.resize(m.size() - 4);
+            materialList_.push_back(std::move(m));
+        }
+        materialListBuilt_ = true;
+    }
+
+    if (aiThread_.joinable()) aiThread_.join();
+    aiJobError_.clear();
+    aiKind_ = AiKind::MaterialSet;
+    aiBusy_ = true;
+    aiJobDone_ = false;
+
+    const ai::Config cfg = aiConfig();
+    const std::string mood = aiPrompt_;
+    const std::vector<std::string> pool = ai::buildPool(materialList_, mood);
+    const std::vector<std::string> skies = skyNames();
+    aiThread_ = std::thread([this, cfg, mood, pool, skies] {
+        std::string err;
+        const ai::MaterialPick p =
+            ai::suggestMaterials(cfg, mood, pool, skies, &err);
+        {
+            std::lock_guard<std::mutex> lk(aiMutex_);
+            aiPick_ = p;
+            aiJobError_ = err;
+        }
+        aiJobDone_ = true;
+        aiBusy_ = false;
+    });
+    status_ = "Asking the model for a \"" + mood + "\" material set…";
+}
+
+void Editor::pollAi() {
+    if (!aiJobDone_.load()) return;
+    aiJobDone_ = false;
+    if (aiThread_.joinable()) aiThread_.join();
+
+    ai::MaterialPick pick;
+    ai::Plan plan;
+    std::string err;
+    const AiKind kind = aiKind_;
+    {
+        std::lock_guard<std::mutex> lk(aiMutex_);
+        pick = aiPick_;
+        plan = aiPlan_;
+        err = aiJobError_;
+    }
+    if (!err.empty()) {
+        status_ = "AI: " + err;
+        return;
+    }
+    if (kind == AiKind::Greybox) applyPlan(plan);
+    else applyMaterialPick(pick);
+}
+
+const std::vector<std::string>& Editor::skyNames() {
+    // A skybox is six materials named <name>{up,dn,lf,rt,ft,bk}; the "up" face
+    // is enough to enumerate what the game ships.
+    if (!skyNamesBuilt_) {
+        for (std::string m : sourceFs_.listFiles("materials/skybox/", ".vmt")) {
+            const size_t sl = m.find_last_of('/');
+            std::string n = sl == std::string::npos ? m : m.substr(sl + 1);
+            if (n.size() > 4 && n.compare(n.size() - 4, 4, ".vmt") == 0)
+                n.resize(n.size() - 4);
+            if (n.size() > 2 && n.compare(n.size() - 2, 2, "up") == 0) {
+                n.resize(n.size() - 2);
+                if (!n.empty()) skyNames_.push_back(n);
+            }
+        }
+        std::sort(skyNames_.begin(), skyNames_.end());
+        skyNames_.erase(std::unique(skyNames_.begin(), skyNames_.end()),
+                        skyNames_.end());
+        skyNamesBuilt_ = true;
+        PB_INFO("skyboxes: %zu", skyNames_.size());
+    }
+    return skyNames_;
+}
+
+int Editor::applyArtPass(const ai::MaterialPick& p) {
+    int changed = 0;
+    char buf[96];
+
+    if (!p.skyname.empty()) {
+        doc_.worldExtra().set("skyname", p.skyname);
+        ++changed;
+    }
+
+    if (p.hasFog()) {
+        map::MapEntity* fog = nullptr;
+        for (auto& e : doc_.entities())
+            if (e.classname == "env_fog_controller") { fog = &e; break; }
+        if (!fog) {
+            map::MapEntity e;
+            e.id = doc_.nextId();
+            e.classname = "env_fog_controller";
+            e.origin = glm::vec3(0, 0, 64);
+            e.kv.set("classname", e.classname);
+            e.kv.set("origin", "0 0 64");
+            doc_.entities().push_back(std::move(e));
+            fog = &doc_.entities().back();
+        }
+        std::snprintf(buf, sizeof(buf), "%d %d %d", p.fogR, p.fogG, p.fogB);
+        fog->kv.set("fogcolor", buf);
+        fog->kv.set("fogcolor2", buf);
+        fog->kv.set("fogenable", "1");
+        fog->kv.set("fogstart", std::to_string(static_cast<int>(p.fogStart)));
+        fog->kv.set("fogend", std::to_string(static_cast<int>(p.fogEnd)));
+        ++changed;
+    }
+
+    if (p.hasSun()) {
+        map::MapEntity* sun = nullptr;
+        for (auto& e : doc_.entities())
+            if (e.classname == "light_environment") { sun = &e; break; }
+        if (!sun) {
+            map::MapEntity e;
+            e.id = doc_.nextId();
+            e.classname = "light_environment";
+            e.origin = glm::vec3(0, 0, 512);
+            e.kv.set("classname", e.classname);
+            e.kv.set("origin", "0 0 512");
+            doc_.entities().push_back(std::move(e));
+            sun = &doc_.entities().back();
+        }
+        if (p.sunPitch < 1e8f) {
+            const float yaw = p.sunYaw < 1e8f ? p.sunYaw : 0.0f;
+            // light_environment carries the sun angle in both "angles" (pitch
+            // yaw roll) and its own "pitch" key; vrad reads the latter.
+            std::snprintf(buf, sizeof(buf), "%d %d 0",
+                          static_cast<int>(-p.sunPitch), static_cast<int>(yaw));
+            sun->kv.set("angles", buf);
+            sun->kv.set("pitch", std::to_string(static_cast<int>(p.sunPitch)));
+        }
+        if (p.sunR >= 0) {
+            std::snprintf(buf, sizeof(buf), "%d %d %d 300", p.sunR, p.sunG, p.sunB);
+            sun->kv.set("_light", buf);
+            // A dim, slightly cooler ambient reads better than a flat one.
+            std::snprintf(buf, sizeof(buf), "%d %d %d 60", p.sunR * 2 / 3,
+                          p.sunG * 3 / 4, std::min(255, p.sunB));
+            sun->kv.set("_ambient", buf);
+        }
+        ++changed;
+    }
+    return changed;
+}
+
+void Editor::applyMaterialPick(const ai::MaterialPick& p) {
+    if (!p.any()) {
+        status_ = "AI returned no usable materials.";
+        return;
+    }
+    const int art = applyArtPass(p);  // sky / fog / sun apply map-wide
+
+    // Nothing selected? Just arm the wall material for new brushwork.
+    if (selection_.empty()) {
+        if (!p.wall.empty()) {
+            blockMaterial_ = p.wall;
+            std::snprintf(texMaterial_, sizeof(texMaterial_), "%s", p.wall.c_str());
+        }
+        if (art) afterEdit("AI art pass");
+        status_ = (art ? "AI set the look (" + std::to_string(art) +
+                             " map setting(s))  "
+                       : std::string("AI set: ") +
+                             (p.wall.empty() ? p.floor : p.wall)) +
+                  (p.note.empty() ? "" : "  — " + p.note);
+        return;
+    }
+
+    // Assign by which way each face points, so a room gets a floor, a ceiling
+    // and walls rather than one texture smeared over everything.
+    int painted = 0;
+    for (const auto& r : selection_) {
+        map::Solid* s = doc_.resolve(r);
+        if (!s) continue;
+        for (auto& f : s->faces) {
+            if (f.material.rfind("tools/", 0) == 0) continue;  // keep tool faces
+            const float nz = f.planeN.z;
+            const std::string* pickName = nullptr;
+            if (nz > 0.7f) pickName = &p.floor;
+            else if (nz < -0.7f) pickName = &p.ceiling;
+            else pickName = &p.wall;
+            if (!pickName || pickName->empty()) pickName = &p.wall;
+            if (pickName->empty()) continue;
+            f.material = *pickName;
+            ++painted;
+        }
+    }
+    if (!painted) {
+        status_ = "Nothing to paint (only tool faces selected).";
+        return;
+    }
+    afterEdit("AI art pass");
+    aiLastPick_ = p;
+    status_ = "AI painted " + std::to_string(painted) + " face(s)" +
+              (art ? ", set " + std::to_string(art) + " map setting(s)"
+                   : std::string()) +
+              (p.note.empty() ? "" : "  — " + p.note);
+}
+
+ai::Config Editor::aiConfig() const {
+    ai::Config c;
+    c.style = static_cast<ai::Style>(prefs_.aiStyle == 1 ? 1 : 0);
+    c.baseUrl = prefs_.aiBaseUrl;
+    c.model = prefs_.aiModel;
+    c.apiKey = prefs_.aiKey;
+    return c;
+}
+
+void Editor::drawSettingsWindow() {
+    if (!showSettings_) return;
+    using namespace pb::ui;
+    ImGui::SetNextWindowSize(ImVec2(dp(460), dp(560)), ImGuiCond_FirstUseEver);
+    if (!ImGui::Begin(ICON_FA_GEAR "  Options", &showSettings_,
+                      ImGuiWindowFlags_NoDocking)) {
+        ImGui::End();
+        return;
+    }
+    bool dirty = false;
+    auto save = [&] { if (dirty) prefs_.save(); };
+
+    if (ImGui::CollapsingHeader("Interface", ImGuiTreeNodeFlags_DefaultOpen)) {
+        const float steps[] = {0.8f, 0.9f, 1.0f, 1.1f, 1.25f, 1.5f, 1.75f, 2.0f};
+        ImGui::TextUnformatted("Scale");
+        for (float s : steps) {
+            char b[16];
+            std::snprintf(b, sizeof(b), "%d%%", (int)(s * 100 + 0.5f));
+            ImGui::SameLine();
+            if (ImGui::RadioButton(b, std::fabs(s - uiScale_) < 0.01f))
+                requestUiScale(s);
+        }
+        if (ImGui::Checkbox("Show the welcome screen on startup", &prefs_.showWelcome))
+            dirty = true;
+    }
+
+    if (ImGui::CollapsingHeader("Editing", ImGuiTreeNodeFlags_DefaultOpen)) {
+        ImGui::SetNextItemWidth(dp(160));
+        if (ImGui::SliderInt("Grid size", &prefs_.gridSize, 1, 512)) {
+            gridSize_ = prefs_.gridSize;
+            dirty = true;
+        }
+        if (ImGui::Checkbox("Snap to grid", &prefs_.snap)) {
+            snap_ = prefs_.snap;
+            dirty = true;
+        }
+        ImGui::SetNextItemWidth(dp(160));
+        if (ImGui::SliderFloat("Fly speed", &prefs_.flySpeed, 100.0f, 4000.0f, "%.0f")) {
+            flySpeed_ = prefs_.flySpeed;
+            dirty = true;
+        }
+        if (ImGui::Checkbox("Autosave", &prefs_.autosave)) {
+            autosaveOn_ = prefs_.autosave;
+            dirty = true;
+        }
+        if (prefs_.autosave) {
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(dp(90));
+            if (ImGui::SliderFloat("every (min)", &prefs_.autosaveMins, 1.0f, 30.0f,
+                                   "%.0f")) {
+                autosaveMins_ = prefs_.autosaveMins;
+                dirty = true;
+            }
+        }
+    }
+
+    if (ImGui::CollapsingHeader("Viewport", ImGuiTreeNodeFlags_DefaultOpen)) {
+        const char* shades[] = {"Textured + lightmap", "Lightmap grid", "Flat",
+                                "Textured (fullbright)"};
+        ImGui::SetNextItemWidth(dp(220));
+        if (ImGui::Combo("3D shading", &prefs_.shadeMode, shades, 4)) {
+            settings_.shadeMode = (ShadeMode)prefs_.shadeMode;
+            dirty = true;
+        }
+        auto vb = [&](const char* label, bool* pv, bool* live) {
+            if (ImGui::Checkbox(label, pv)) { *live = *pv; dirty = true; }
+        };
+        vb("Grid", &prefs_.showGrid, &settings_.showGrid);
+        ImGui::SameLine();
+        vb("Props", &prefs_.showProps, &settings_.showProps);
+        ImGui::SameLine();
+        vb("Point entities in 3D", &prefs_.showPointEntities,
+           &settings_.showPointEntities);
+        vb("Wire overlay (3D)", &prefs_.wireOverlay, &settings_.wireOverlay);
+        ImGui::SetNextItemWidth(dp(160));
+        if (ImGui::SliderFloat("Exposure", &prefs_.exposure, 0.2f, 3.0f, "%.2f")) {
+            settings_.exposure = prefs_.exposure;
+            dirty = true;
+        }
+        ImGui::SetNextItemWidth(dp(160));
+        if (ImGui::SliderFloat("Lightmap gain", &prefs_.lightmapGain, 0.3f, 4.0f,
+                               "%.2f")) {
+            meshOpts_.lightmapGain = prefs_.lightmapGain;
+            if (hasMap()) buildAndUpload(meshOpts_);
+            dirty = true;
+        }
+        ImGui::Separator();
+        ImGui::TextUnformatted("Move / rotate / scale gizmo");
+        ImGui::SetNextItemWidth(dp(160));
+        if (ImGui::SliderFloat("Handle size", &prefs_.gizmoSize, 0.08f, 0.40f,
+                               "%.2f")) {
+            gizmoSize_ = prefs_.gizmoSize;
+            dirty = true;
+        }
+        const char* gstyles[] = {"Normal", "Bold", "Fine"};
+        ImGui::SetNextItemWidth(dp(160));
+        if (ImGui::Combo("Handle style", &prefs_.gizmoStyle, gstyles, 3)) {
+            gizmoStyle_ = prefs_.gizmoStyle;
+            dirty = true;
+        }
+    }
+
+    if (ImGui::CollapsingHeader("Performance", ImGuiTreeNodeFlags_DefaultOpen)) {
+        const char* modes[] = {"Auto", "Quality", "Fast"};
+        ImGui::SetNextItemWidth(dp(200));
+        if (ImGui::Combo("Editing speed", &prefs_.perfMode, modes, 3)) {
+            perfMode_ = prefs_.perfMode;
+            dirty = true;
+        }
+        ImGui::PushStyleColor(ImGuiCol_Text, col::faint);
+        ImGui::TextWrapped(
+            prefs_.perfMode == 2
+                ? "Fast: on every map, skip the model re-bake and the live mesh "
+                  "preview while dragging. Snaps back on release."
+            : prefs_.perfMode == 1
+                ? "Quality: always rebuild everything on every edit. Fine on small "
+                  "maps, slow on decompiled ones."
+                : "Auto: full quality on small maps, switches to Fast behaviour on "
+                  "big / decompiled maps so adding a piece stays responsive.");
+        if (hasDoc())
+            ImGui::Text("This map: %zu brushes, %zu entities, %zu props%s",
+                        doc_.worldSolids().size(), doc_.entities().size(),
+                        mesh_.props.size(),
+                        fastEdit() ? "  —  throttling on" : "");
+        ImGui::PopStyleColor();
+
+        ImGui::Dummy(ImVec2(0, 4));
+        ImGui::TextUnformatted("Graphics");
+        ImGui::PushStyleColor(ImGuiCol_Text, col::faint);
+        ImGui::TextWrapped("Renderer: %s", pb::ui::g_gpuRenderer.empty()
+                                               ? "?"
+                                               : pb::ui::g_gpuRenderer.c_str());
+        if (!pb::ui::g_gpuVersion.empty())
+            ImGui::TextWrapped("Driver: %s", pb::ui::g_gpuVersion.c_str());
+        ImGui::TextWrapped(
+            "Pootis Builder asks laptops to use the discrete GPU. If this still "
+            "shows an integrated chip (Intel UHD / AMD Radeon Graphics), force "
+            "\"High performance\" for PootisBuilder.exe in Windows Graphics "
+            "settings, or in the NVIDIA / AMD control panel.");
+        ImGui::PopStyleColor();
+    }
+
+    if (ImGui::CollapsingHeader("AI")) {
+        ImGui::PushStyleColor(ImGuiCol_Text, col::faint);
+        ImGui::TextWrapped(
+            "Point this at a model and the AI helpers switch on. A local server "
+            "(Ollama, LM Studio, llama.cpp) needs no key and never leaves your "
+            "machine. Leave it blank and nothing here is used.");
+        ImGui::PopStyleColor();
+        ImGui::Dummy(ImVec2(0, 4));
+
+        // Provider preset picker.
+        const auto& ps = ai::presets();
+        std::string cur = "Custom (OpenAI-compatible)";
+        for (const auto& pr : ps)
+            if (prefs_.aiBaseUrl == pr.baseUrl && !prefs_.aiBaseUrl.empty())
+                cur = pr.name;
+        ImGui::SetNextItemWidth(-1);
+        if (ImGui::BeginCombo("##aiprovider", cur.c_str())) {
+            for (const auto& pr : ps)
+                if (ImGui::Selectable(pr.name, cur == pr.name)) {
+                    prefs_.aiBaseUrl = pr.baseUrl;
+                    prefs_.aiStyle = static_cast<int>(pr.style);
+                    aiModels_.clear();
+                    dirty = true;
+                }
+            ImGui::EndCombo();
+        }
+
+        ImGui::PushStyleColor(ImGuiCol_Text, col::faint);
+        ImGui::TextUnformatted("Base URL");
+        ImGui::PopStyleColor();
+        char url[512];
+        std::snprintf(url, sizeof(url), "%s", prefs_.aiBaseUrl.c_str());
+        ImGui::SetNextItemWidth(-1);
+        if (ImGui::InputText("##aiurl", url, sizeof(url))) {
+            prefs_.aiBaseUrl = url;
+            dirty = true;
+        }
+
+        ImGui::PushStyleColor(ImGuiCol_Text, col::faint);
+        ImGui::TextUnformatted("Model");
+        ImGui::PopStyleColor();
+        char mdl[256];
+        std::snprintf(mdl, sizeof(mdl), "%s", prefs_.aiModel.c_str());
+        ImGui::SetNextItemWidth(-150);
+        if (ImGui::InputText("##aimodel", mdl, sizeof(mdl))) {
+            prefs_.aiModel = mdl;
+            dirty = true;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("List models", ImVec2(-1, 0))) {
+            std::string err;
+            aiModels_ = ai::listModels(aiConfig(), &err);
+            aiStatus_ = aiModels_.empty()
+                            ? ("Could not list models: " + err)
+                            : (std::to_string(aiModels_.size()) + " model(s) found");
+        }
+        if (!aiModels_.empty()) {
+            ImGui::SetNextItemWidth(-1);
+            if (ImGui::BeginCombo("##aimodels", "pick a listed model…")) {
+                for (const auto& m : aiModels_)
+                    if (ImGui::Selectable(m.c_str(), m == prefs_.aiModel)) {
+                        prefs_.aiModel = m;
+                        dirty = true;
+                    }
+                ImGui::EndCombo();
+            }
+        }
+
+        const bool anthropic = prefs_.aiStyle == 1;
+        const bool localish = prefs_.aiBaseUrl.find("127.0.0.1") != std::string::npos ||
+                              prefs_.aiBaseUrl.find("localhost") != std::string::npos;
+        if (!localish) {
+            ImGui::PushStyleColor(ImGuiCol_Text, col::faint);
+            ImGui::TextUnformatted(anthropic ? "API key (x-api-key)"
+                                             : "API key (Bearer)");
+            ImGui::PopStyleColor();
+            char key[256];
+            std::snprintf(key, sizeof(key), "%s", prefs_.aiKey.c_str());
+            ImGui::SetNextItemWidth(-1);
+            if (ImGui::InputText("##aikey", key, sizeof(key),
+                                 ImGuiInputTextFlags_Password)) {
+                prefs_.aiKey = key;
+                dirty = true;
+            }
+            ImGui::PushStyleColor(ImGuiCol_Text, col::warn);
+            ImGui::TextWrapped(ICON_FA_TRIANGLE_EXCLAMATION
+                               "  Stored as plain text in pootis.ini. A local "
+                               "model avoids needing a key at all.");
+            ImGui::PopStyleColor();
+        }
+
+        ImGui::Dummy(ImVec2(0, 4));
+        if (ImGui::Button("Find local servers")) {
+            const auto found = ai::detectLocal();
+            if (found.empty()) {
+                aiStatus_ = "No local model server answered on the usual ports.";
+            } else {
+                prefs_.aiBaseUrl = found.front().baseUrl;
+                prefs_.aiStyle = 0;
+                aiModels_ = found.front().models;
+                if (prefs_.aiModel.empty() && !aiModels_.empty())
+                    prefs_.aiModel = aiModels_.front();
+                aiStatus_ = "Found " + found.front().name + " with " +
+                            std::to_string(aiModels_.size()) + " model(s)";
+                dirty = true;
+            }
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Test")) {
+            const ai::Result r =
+                ai::chat(aiConfig(), "You are a terse assistant.",
+                         "Reply with the single word: ready", false);
+            aiStatus_ = r.ok ? ("Model replied: " + r.text) : ("Failed: " + r.error);
+        }
+        if (!aiStatus_.empty()) {
+            ImGui::PushStyleColor(ImGuiCol_Text, col::dim);
+            ImGui::TextWrapped("%s", aiStatus_.c_str());
+            ImGui::PopStyleColor();
+        }
+    }
+
+    if (ImGui::CollapsingHeader("Advanced")) {
+        if (ImGui::Checkbox("Auto-decompile a .bsp to editable brushes on open",
+                            &prefs_.autoDecompile)) {
+            suppressAutoDecompile_ = !prefs_.autoDecompile;
+            dirty = true;
+        }
+        if (ImGui::Checkbox("Render prop_static / entity models", &prefs_.bakeProps)) {
+            meshOpts_.bakeProps = prefs_.bakeProps;
+            if (hasMap()) buildAndUpload(meshOpts_);
+            dirty = true;
+        }
+        ImGui::PushStyleColor(ImGuiCol_Text, col::faint);
+        ImGui::TextWrapped("Team Fortress 2 folder (leave blank to auto-detect)");
+        ImGui::PopStyleColor();
+        char tf[512];
+        std::snprintf(tf, sizeof(tf), "%s", prefs_.tf2Dir.c_str());
+        ImGui::SetNextItemWidth(-90);
+        if (ImGui::InputText("##tf2dir", tf, sizeof(tf))) {
+            prefs_.tf2Dir = tf;
+            dirty = true;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Browse…##tf2")) {
+            const std::string p = openFileDialog("Pick hl2.exe / tf_win64.exe in "
+                                                 "the TF2 folder",
+                                                 "All\0*.*\0\0", nullptr);
+            if (!p.empty()) {
+                prefs_.tf2Dir = fs::path(p).parent_path().string();
+                dirty = true;
+            }
+        }
+        ImGui::Dummy(ImVec2(0, 6));
+        if (ImGui::Button("Reset window layout")) layoutDirty_ = true;
+        ImGui::SameLine();
+        if (ImGui::Button("Show shortcut list (F1)")) showKeys_ = true;
+    }
+
+    save();
+    ImGui::End();
+}
+
+void Editor::drawKeysOverlay() {
+    if (!showKeys_) return;
+    using namespace pb::ui;
+    ImGui::SetNextWindowSize(ImVec2(dp(420), 0), ImGuiCond_Appearing);
+    if (ImGui::Begin(ICON_FA_KEYBOARD "  Keyboard shortcuts", &showKeys_,
+                     ImGuiWindowFlags_NoDocking)) {
+        struct KB { const char* k; const char* d; };
+        static const KB rows[] = {
+            {"Ctrl+Z / Ctrl+Y", "Undo / redo"},
+            {"Ctrl+S / Ctrl+Shift+S", "Save / Save As"},
+            {"Ctrl+O", "Open a map"},
+            {"Ctrl+C / V / X", "Copy / paste / cut selection"},
+            {"Ctrl+D", "Duplicate selection"},
+            {"Ctrl+A", "Select all brushes"},
+            {"Delete / Backspace", "Delete selection"},
+            {"[ / ]", "Rotate selection about Z  (Shift = other way)"},
+            {"G / R / S", "Move / rotate / scale — then X/Y/Z to lock an axis, "
+                          "type an amount, Enter (Esc cancels).  Hold Alt = pivot "
+                          "on the cursor"},
+            {"drag the object", "Move it — 3D drags on the ground, Shift = up/down"},
+            {"drag a corner box", "Resize that side / corner"},
+            {"W / E", "Move / rotate gizmo mode  (Pro)"},
+            {"F", "Frame the map / selection"},
+            {"Esc", "Cancel placement / clear selection"},
+            {"Ctrl+K", "Command palette"},
+            {"Ctrl+B", "Build & play"},
+            {"F1", "This list"},
+        };
+        if (ImGui::BeginTable("kb", 2, ImGuiTableFlags_SizingStretchProp)) {
+            for (const auto& r : rows) {
+                ImGui::TableNextRow();
+                ImGui::TableNextColumn();
+                ImGui::PushStyleColor(ImGuiCol_Text, col::acc);
+                ImGui::TextUnformatted(r.k);
+                ImGui::PopStyleColor();
+                ImGui::TableNextColumn();
+                ImGui::TextUnformatted(r.d);
+            }
+            ImGui::EndTable();
+        }
+    }
+    ImGui::End();
+}
+
+void Editor::undo() {
+    if (history_.undo(doc_)) {
+        clearSelection();
+        buildAndUpload(meshOpts_);
+        status_ = "Undo";
+    }
+}
+
+void Editor::redo() {
+    if (history_.redo(doc_)) {
+        clearSelection();
+        buildAndUpload(meshOpts_);
+        status_ = "Redo";
+    }
+}
+
+void Editor::debugModalXform() {
+    bsp_ = BspFile();
+    doc_.newBlank("mxtest");
+    history_.reset(doc_);
+    clearSelection();
+    placePiece("Wall", glm::vec3(0, 0, 0));           // 1 world solid, selected
+    if (selection_.empty()) { PB_ERROR("mx-test: nothing placed"); return; }
+    int pass = 0, fail = 0;
+    auto ck = [&](const char* w, bool ok) {
+        if (ok) ++pass; else { ++fail; PB_ERROR("mx-test FAIL: %s", w); }
+    };
+    auto solid = [&]() -> map::Solid* { return doc_.resolve(selection_[0]); };
+
+    // MOVE +128 on X via the numeric path (no mouse).
+    const glm::vec3 c0 = solid()->center();
+    beginModalXform(1);
+    mx_.axis = 1; mx_.num = "128";
+    // emulate the per-frame apply + commit
+    {
+        glm::mat4 x = glm::translate(glm::mat4(1.0f), glm::vec3(128, 0, 0));
+        for (size_t i = 0; i < mx_.refs.size(); ++i)
+            if (map::Solid* s = doc_.resolve(mx_.refs[i])) { *s = mx_.snap[i]; s->transform(x); }
+        afterEdit("Move"); mx_.op = 0;
+    }
+    ck("move +128 X", std::fabs((solid()->center() - c0).x - 128.0f) < 0.5f &&
+                      std::fabs((solid()->center() - c0).y) < 0.5f);
+
+    // SCALE x2 on Z.
+    const glm::vec3 sz0 = solid()->boundsMax - solid()->boundsMin;
+    beginModalXform(3);
+    mx_.axis = 3; mx_.num = "2";
+    {
+        glm::vec3 piv = mx_.pivot;
+        glm::mat4 x = glm::translate(glm::mat4(1.0f), piv);
+        x = glm::scale(x, glm::vec3(1, 1, 2));
+        x = glm::translate(x, -piv);
+        for (size_t i = 0; i < mx_.refs.size(); ++i)
+            if (map::Solid* s = doc_.resolve(mx_.refs[i])) { *s = mx_.snap[i]; s->transform(x); }
+        afterEdit("Scale"); mx_.op = 0;
+    }
+    const glm::vec3 sz1 = solid()->boundsMax - solid()->boundsMin;
+    ck("scale z x2", std::fabs(sz1.z - sz0.z * 2.0f) < 1.0f &&
+                     std::fabs(sz1.x - sz0.x) < 1.0f);
+
+    // ROTATE 90 about Z — width/depth swap.
+    beginModalXform(2);
+    mx_.axis = 3; mx_.num = "90";
+    {
+        glm::vec3 piv = mx_.pivot;
+        glm::mat4 x = glm::translate(glm::mat4(1.0f), piv);
+        x = glm::rotate(x, glm::radians(90.0f), glm::vec3(0, 0, 1));
+        x = glm::translate(x, -piv);
+        for (size_t i = 0; i < mx_.refs.size(); ++i)
+            if (map::Solid* s = doc_.resolve(mx_.refs[i])) { *s = mx_.snap[i]; s->transform(x); }
+        afterEdit("Rotate"); mx_.op = 0;
+    }
+    const glm::vec3 sz2 = solid()->boundsMax - solid()->boundsMin;
+    ck("rotate 90 z swaps w/d", std::fabs(sz2.x - sz1.y) < 1.0f &&
+                                std::fabs(sz2.y - sz1.x) < 1.0f);
+
+    // CANCEL restores.
+    const glm::vec3 c1 = solid()->center();
+    beginModalXform(1);
+    glm::mat4 x = glm::translate(glm::mat4(1.0f), glm::vec3(500, 0, 0));
+    for (size_t i = 0; i < mx_.refs.size(); ++i)
+        if (map::Solid* s = doc_.resolve(mx_.refs[i])) { *s = mx_.snap[i]; s->transform(x); }
+    for (size_t i = 0; i < mx_.refs.size(); ++i)
+        if (map::Solid* s = doc_.resolve(mx_.refs[i])) *s = mx_.snap[i];  // cancel
+    mx_.op = 0;
+    ck("cancel restores", glm::length(solid()->center() - c1) < 0.5f);
+
+    PB_INFO("mx-test: %d passed, %d failed", pass, fail);
+}
+
+void Editor::debugPhase1Test() {
+    if (!doc_.active()) { PB_ERROR("phase1-test: no editable doc"); return; }
+    // Find a brush entity with >= 2 solids (a func_detail).
+    int ei = -1;
+    for (int i = 0; i < (int)doc_.entities().size(); ++i)
+        if (doc_.entities()[i].solids.size() >= 2) { ei = i; break; }
+    if (ei < 0) { PB_ERROR("phase1-test: no multi-brush entity found"); return; }
+    const std::string cls = doc_.entities()[ei].classname;
+    int pass = 0, fail = 0;
+    auto ck = [&](const char* w, bool ok) {
+        if (ok) ++pass; else { ++fail; PB_ERROR("phase1-test FAIL: %s", w); }
+    };
+
+    // 1. select one brush of it, nudge it.
+    selection_ = {{ei, 0}};
+    const glm::vec3 c0 = doc_.entities()[ei].solids[0].center();
+    nudgeSelection(glm::vec3(64, 0, 0));
+    ck("nudge moved an entity brush",
+       ei < (int)doc_.entities().size() && !doc_.entities()[ei].solids.empty() &&
+           glm::length(doc_.entities()[ei].solids[0].center() - c0) > 1.0f);
+
+    // 2. duplicate it -> a new world solid.
+    const size_t w0 = doc_.worldSolids().size();
+    selection_ = {{ei, 0}};
+    duplicateSelection();
+    ck("duplicate made a world brush", doc_.worldSolids().size() == w0 + 1);
+
+    // 3. delete that dup.
+    deleteSelection();
+    ck("delete removed the dup", doc_.worldSolids().size() == w0);
+
+    // 4. untie one entity brush -> world.
+    const size_t before = doc_.entities()[ei].solids.size();
+    const size_t w1 = doc_.worldSolids().size();
+    selection_ = {{ei, 0}};
+    untieSelectionToWorld();
+    const bool entShrank = ei >= (int)doc_.entities().size() ||
+                           doc_.entities()[ei].solids.size() == before - 1;
+    ck("untie moved a brush to world",
+       entShrank && doc_.worldSolids().size() == w1 + 1);
+
+    PB_INFO("phase1-test (%s): %d passed, %d failed", cls.c_str(), pass, fail);
+}
+
+void Editor::debugDispTest() {
+    bsp_ = BspFile();
+    doc_.newBlank("disptest");
+    history_.reset(doc_);
+    clearSelection();
+    placePiece("Floor", glm::vec3(0, 0, 0));
+    int pass = 0, fail = 0;
+    auto ck = [&](const char* w, bool ok) {
+        if (ok) ++pass; else { ++fail; PB_ERROR("disp-test FAIL: %s", w); }
+    };
+    map::Solid* fs = selection_.empty() ? nullptr : doc_.resolve(selection_[0]);
+    if (!fs) { PB_ERROR("disp-test: no Floor placed"); return; }
+
+    // Pick the top face (normal ~ +Z, 4 verts).
+    int top = -1;
+    for (int i = 0; i < (int)fs->faces.size(); ++i)
+        if (fs->faces[i].verts.size() == 4 && fs->faces[i].planeN.z > 0.9f) top = i;
+    ck("found a quad top face", top >= 0);
+    if (top < 0) { PB_INFO("disp-test: 1 passed, 1 failed"); return; }
+
+    map::faceMakeDisplacement(fs->faces[top], 3);
+    ck("make -> hasDisp + power 3",
+       fs->faces[top].hasDisp && fs->faces[top].dispInfo.getInt("power") == 3);
+
+    glm::vec3 c(0.0f);
+    for (const auto& v : fs->faces[top].verts) c += v;
+    c *= 0.25f;
+    const bool sculpted =
+        map::faceSculptDisplacement(fs->faces[top], c, 512.0f, 100.0f);
+    ck("sculpt reported a change", sculpted);
+    {
+        const map::KvNode* d = fs->faces[top].dispInfo.child("distances");
+        bool anyNonZero = false;
+        if (d)
+            for (const auto& p : d->pairs)
+                if (p.second.find_first_not_of(" -0.eE") != std::string::npos)
+                    anyNonZero = true;
+        ck("a distance row is now non-zero", anyNonZero);
+    }
+
+    // Round-trip through VMF.
+    const std::string tmp =
+        (std::filesystem::temp_directory_path() / "pb_disp_rt.vmf").string();
+    std::string err;
+    ck("save vmf", doc_.saveVmf(tmp, &err));
+    map::MapDocument rt;
+    ck("reload vmf", rt.loadVmf(tmp, &err));
+    bool rtDisp = false;
+    for (const auto& s : rt.worldSolids())
+        for (const auto& f : s.faces)
+            if (f.hasDisp && f.dispInfo.getInt("power") == 3) rtDisp = true;
+    ck("dispinfo survived the round-trip", rtDisp);
+
+    PB_INFO("disp-test: %d passed, %d failed", pass, fail);
+}
+
+void Editor::debugUndoTest() {
+    bsp_ = BspFile();
+    doc_.newBlank("undotest");
+    history_.reset(doc_);
+    clearSelection();
+    auto count = [&] {
+        return std::make_pair(doc_.worldSolids().size(), doc_.entities().size());
+    };
+    const auto c0 = count();
+    placePiece("Room", glm::vec3(0, 0, 0));
+    const auto c1 = count();
+    placePiece("RED spawn", glm::vec3(512, 0, 0));
+    const auto c2 = count();
+    rotateSelection(2, 90.0f);
+    deleteSelection();
+    const auto c3 = count();
+
+    int pass = 0, fail = 0;
+    auto check = [&](const char* what, bool ok) {
+        if (ok) ++pass; else { ++fail; PB_ERROR("undo-test FAIL: %s", what); }
+    };
+    undo();                                   // undo delete
+    check("undo delete restores entities", count().second == c2.second);
+    undo(); undo();                           // undo rotate + spawn
+    check("undo back to post-Room", count() == c1);
+    undo();                                   // undo Room
+    check("undo back to empty", count() == c0);
+    redo();
+    check("redo re-adds Room", count() == c1);
+    redo(); redo(); redo();
+    check("redo replays to final", count() == c3);
+    PB_INFO("undo-test: %d passed, %d failed", pass, fail);
+}
+
+void Editor::debugBuildSampleMap() {
+    bsp_ = BspFile();
+    doc_.newBlank("sample");
+    history_.reset(doc_);
+    clearSelection();
+    placePiece("Room", glm::vec3(0, 0, 0));
+    placePiece("RED spawn", glm::vec3(768, 0, 0));
+    placePiece("BLU spawn", glm::vec3(-768, 0, 0));
+    placePiece("Floor", glm::vec3(0, 512, 0));
+    placePiece("Ramp", glm::vec3(0, 320, 0));
+    placePiece("Pillar", glm::vec3(200, 200, 0));
+    placePiece("Capture point", glm::vec3(0, 0, 0));
+    placePiece("Health / ammo", glm::vec3(0, 400, 0));
+    placePiece("Sun / sky", glm::vec3(0, 0, 0));
+    placing_.clear();
+    showWelcome_ = false;
+    frameAllViews();
+    PB_INFO("sample map: %zu world solids, %zu entities",
+            doc_.worldSolids().size(), doc_.entities().size());
+}
+
+bool Editor::saveVmf(const std::string& path) {
+    std::string err;
+    const bool ok = doc_.saveVmf(path, &err);
+    status_ = ok ? ("Saved " + path) : ("Save failed: " + err);
+    return ok;
+}
+
+void Editor::loadFgd() {
+    // Prefer the game's own tf.fgd (it @includes base.fgd + halflife2.fgd);
+    // fall back to a copy bundled under assets/.
+    std::string fromGame;
+    if (const compile::GamePaths gp = compile::GamePaths::detect(); !gp.gameDir.empty())
+        fromGame = fs::path(gp.gameDir).parent_path().string() + "/bin/tf.fgd";
+    const std::string guesses[] = {
+        fromGame,
+        "C:/Program Files (x86)/Steam/steamapps/common/Team Fortress 2/bin/tf.fgd",
+        executableDir() + "/assets/fgd/tf.fgd",
+        executableDir() + "/../assets/fgd/tf.fgd",
+    };
+    for (const auto& g : guesses) {
+        if (!g.empty() && fileExists(g) && fgd_.load(g)) return;
+    }
+    PB_WARN("fgd: no tf.fgd found — entity catalogue will be limited");
+}
+
+void Editor::debugDumpFgd(const std::string& cls) {
+    PB_INFO("fgd: %zu classes, %zu point, %zu solid", fgd_.size(),
+            fgd_.pointClasses().size(), fgd_.solidClasses().size());
+    const std::string name = cls.empty() ? "info_player_teamspawn" : cls;
+    const fgd::EntityClass* ec = fgd_.flattened(name);
+    if (!ec) { PB_WARN("fgd: no class '%s'", name.c_str()); return; }
+    PB_INFO("== %s : \"%s\"  (%zu keys, %zu inputs, %zu outputs)", ec->name.c_str(),
+            ec->description.c_str(), ec->vars.size(), ec->inputs.size(),
+            ec->outputs.size());
+    for (const auto& v : ec->vars)
+        PB_INFO("   %-22s %-10s \"%s\" = \"%s\"  (%zu choices/%zu flags)",
+                v.key.c_str(), fgd::varTypeName(v.type), v.displayName.c_str(),
+                v.defaultValue.c_str(), v.choices.size(), v.flags.size());
+}
+
+void Editor::debugShowWorkshop() {
+    showWorkshop_ = true;
+    showWelcome_ = false;
+    if (wsItem_.title.empty()) wsItem_.title = doc_.name();
+    wsItem_.description = "A Team Fortress 2 map built with Pootis Builder.";
+}
+
+void Editor::debugStartCompile(bool fast) {
+    showCompile_ = true;
+    compileProfile_ = fast ? 0 : 1;
+    compileLaunch_ = false;  // never launch TF2 from a headless test
+    if (!hasDoc()) return;
+    if (doc_.path().empty())
+        saveVmf(executableDir() + "/_compiletest.vmf");
+    startCompile();
+}
+
+void Editor::debugCompileOut(const std::string& name, const std::string& dir) {
+    std::snprintf(compileMapName_, sizeof(compileMapName_), "%s", name.c_str());
+    std::snprintf(compileOutDir_, sizeof(compileOutDir_), "%s", dir.c_str());
+}
+
+// ---------------------------------------------------------------------------
+// Milestone E — save, compile, play
+// ---------------------------------------------------------------------------
+bool Editor::saveMap(bool forceDialog) {
+    if (!hasDoc()) {
+        status_ = "Nothing to save yet.";
+        return false;
+    }
+    std::string out = doc_.path();
+    if (out.empty() || forceDialog) {
+        const std::string suggested = doc_.name().empty() ? "untitled" : doc_.name();
+        out = saveFileDialog("Save map as", "Hammer VMF\0*.vmf\0All files\0*.*\0",
+                             suggested.c_str(), "vmf",
+                             out.empty() ? nullptr : out.c_str());
+        if (out.empty()) return false;  // cancelled
+    }
+    writeBackup(out);  // roll <out>.bak1..3 before overwriting
+    std::string err;
+    if (doc_.saveVmf(out, &err)) {
+        status_ = "Saved  " + out;
+        return true;
+    }
+    status_ = "Save failed: " + err;
+    return false;
+}
+
+map::MapDocument Editor::buildCompileDoc() {
+    map::MapDocument out = doc_;
+
+    // Visgroup-hidden objects are left out of the compile.
+    {
+        auto& ws = out.worldSolids();
+        ws.erase(std::remove_if(ws.begin(), ws.end(),
+                                [](const map::Solid& s) { return s.hidden; }),
+                 ws.end());
+        auto& es = out.entities();
+        es.erase(std::remove_if(es.begin(), es.end(),
+                                [](const map::MapEntity& e) { return e.hidden; }),
+                 es.end());
+    }
+
+    if (!cordonOn_) return out;
+    const glm::vec3 mn = glm::min(cordonMin_, cordonMax_);
+    const glm::vec3 mx = glm::max(cordonMin_, cordonMax_);
+    auto hits = [&](const glm::vec3& bmn, const glm::vec3& bmx) {
+        return bmn.x <= mx.x && bmx.x >= mn.x && bmn.y <= mx.y && bmx.y >= mn.y &&
+               bmn.z <= mx.z && bmx.z >= mn.z;
+    };
+
+    auto& ws = out.worldSolids();
+    ws.erase(std::remove_if(ws.begin(), ws.end(),
+                            [&](const map::Solid& s) {
+                                return !hits(s.boundsMin, s.boundsMax);
+                            }),
+             ws.end());
+
+    auto& es = out.entities();
+    es.erase(std::remove_if(es.begin(), es.end(),
+                            [&](const map::MapEntity& e) {
+                                if (e.solids.empty()) {
+                                    return !(e.origin.x >= mn.x && e.origin.x <= mx.x &&
+                                             e.origin.y >= mn.y && e.origin.y <= mx.y &&
+                                             e.origin.z >= mn.z && e.origin.z <= mx.z);
+                                }
+                                for (const auto& s : e.solids)
+                                    if (hits(s.boundsMin, s.boundsMax)) return false;
+                                return true;
+                            }),
+             es.end());
+
+    // Seal the region with a nodraw box shell so vbsp doesn't leak.
+    const float t = 32.0f;
+    map::Solid shellSrc = map::Solid::makeBox(mn - glm::vec3(t), mx + glm::vec3(t),
+                                              "tools/toolsnodraw");
+    for (auto& w : map::hollow(shellSrc, t)) {
+        w.id = out.nextId();
+        ws.push_back(std::move(w));
+    }
+    PB_INFO("cordon: %zu solids, %zu entities kept + 6 seal brushes",
+            ws.size() - 6, es.size());
+    return out;
+}
+
+void Editor::startCompile() {
+    if (compiler_.running() || !hasDoc()) return;
+    // A compile needs a real .vmf on disk. Save first (prompt if unsaved).
+    if (doc_.path().empty()) {
+        if (!saveMap(false)) {
+            status_ = "Save the map before building.";
+            return;
+        }
+    } else {
+        doc_.saveVmf(doc_.path());
+    }
+
+    // With the cordon on or anything visgroup-hidden, compile a filtered copy.
+    bool anyHidden = false;
+    for (const auto& s : doc_.worldSolids()) anyHidden |= s.hidden;
+    for (const auto& e : doc_.entities()) anyHidden |= e.hidden;
+
+    std::string compilePath = doc_.path();
+    if (cordonOn_ || anyHidden) {
+        map::MapDocument cd = buildCompileDoc();
+        compilePath = (fs::path(doc_.path()).parent_path() /
+                       (doc_.name() + ".cordon.vmf")).string();
+        std::string err;
+        if (!cd.saveVmf(compilePath, &err, /*updateState=*/false)) {
+            status_ = "Filtered export failed: " + err;
+            return;
+        }
+        status_ = cordonOn_ ? "Cordon active — compiling a boxed region."
+                            : "Compiling with hidden objects left out.";
+    }
+
+    if (!gamePaths_.valid()) gamePaths_ = compile::GamePaths::detect();
+
+    compile::CompileOptions opts;
+    opts.profile = compileProfile_ == 0 ? compile::Profile::Fast
+                                        : compile::Profile::Final;
+    opts.runVvis = compileVvis_;
+    opts.runVrad = compileVrad_;
+    opts.launchGame = compileLaunch_;
+    opts.modelQc = pendingModelQc_;
+    if (compilePack_) opts.packFiles = packFiles_;
+    opts.mapName = compileMapName_;
+    opts.extraOutDir = compileOutDir_;
+    compileLogSeen_ = 0;
+    compiler_.start(compilePath, opts, gamePaths_);
+    status_ = "Compiling " + doc_.name() + " …";
+}
+
+void Editor::drawCompileWindow() {
+    if (!showCompile_) return;
+    using namespace pb::ui;
+
+    ImGui::SetNextWindowSize(ImVec2(720 * uiScale_, 520 * uiScale_),
+                             ImGuiCond_FirstUseEver);
+    if (!ImGui::Begin(ICON_FA_PLAY "  Build & playtest", &showCompile_)) {
+        ImGui::End();
+        return;
+    }
+
+    const bool running = compiler_.running();
+
+    ImGui::BeginDisabled(running);
+
+    sectionLabel("MAP NAME & OUTPUT");
+    if (compileMapName_[0] == 0 && hasDoc())
+        std::snprintf(compileMapName_, sizeof(compileMapName_), "%s",
+                      doc_.name().c_str());
+    ImGui::SetNextItemWidth(-1);
+    ImGui::InputTextWithHint("##mapname", "map file name (letters, digits, _)",
+                             compileMapName_, sizeof(compileMapName_));
+    ImGui::PushStyleColor(ImGuiCol_Text, col::faint);
+    ImGui::TextUnformatted("Always installed to the TF2 maps folder so you can "
+                           "play it right away.");
+    ImGui::PopStyleColor();
+    ImGui::SetNextItemWidth(-90);
+    ImGui::InputTextWithHint("##outdir", "also copy the .bsp to this folder…",
+                             compileOutDir_, sizeof(compileOutDir_));
+    ImGui::SameLine();
+    if (ImGui::Button("Browse…##outdir")) {
+        const std::string d = openFileDialog(
+            "Pick any file in the target folder", "All files\0*.*\0\0", nullptr);
+        if (!d.empty())
+            std::snprintf(compileOutDir_, sizeof(compileOutDir_), "%s",
+                          fs::path(d).parent_path().string().c_str());
+    }
+    ImGui::Dummy(ImVec2(0, 6));
+
+    sectionLabel("PROFILE");
+    ImGui::RadioButton("Fast  (quick, for iterating)", &compileProfile_, 0);
+    ImGui::SameLine(0, 16);
+    ImGui::RadioButton("Final  (full lighting)", &compileProfile_, 1);
+    ImGui::Checkbox("Visibility (vvis)", &compileVvis_);
+    ImGui::SameLine(0, 16);
+    ImGui::Checkbox("Lighting (vrad)", &compileVrad_);
+    ImGui::SameLine(0, 16);
+    ImGui::Checkbox("Launch TF2 when done", &compileLaunch_);
+
+    if (cordonOn_) {
+        ImGui::PushStyleColor(ImGuiCol_Text, col::warn);
+        ImGui::TextUnformatted(ICON_FA_VECTOR_SQUARE
+                               "  Cordon is ON — only the boxed region compiles.");
+        ImGui::PopStyleColor();
+    }
+
+    ImGui::Checkbox("Pack custom content into the .bsp (bspzip)", &compilePack_);
+    if (compilePack_) {
+        ImGui::Indent();
+        if (ImGui::Button(ICON_FA_MAGNIFYING_GLASS "  Scan map for custom content") &&
+            hasDoc()) {
+            const auto refs = publish::scanCustomAssets(doc_, sourceFs_);
+            packMissing_.clear();
+            int added = 0;
+            for (const auto& r : refs) {
+                if (r.missing) { packMissing_.push_back(r.bspPath); continue; }
+                const std::string e = r.bspPath + "|" + r.sourcePath;
+                if (std::find(packFiles_.begin(), packFiles_.end(), e) ==
+                    packFiles_.end()) {
+                    packFiles_.push_back(e);
+                    ++added;
+                }
+            }
+            status_ = "Pack scan: +" + std::to_string(added) + " file(s), " +
+                      std::to_string(packMissing_.size()) + " missing";
+        }
+        for (const auto& m : packMissing_) {
+            ImGui::PushStyleColor(ImGuiCol_Text, col::warn);
+            ImGui::BulletText(ICON_FA_TRIANGLE_EXCLAMATION " missing: %s", m.c_str());
+            ImGui::PopStyleColor();
+        }
+        ImGui::SetNextItemWidth(-90);
+        ImGui::InputTextWithHint("##packadd", "absolute path to a material/model/sound",
+                                 packAddPath_, sizeof(packAddPath_));
+        ImGui::SameLine();
+        if (ImGui::Button("Add##pack") && packAddPath_[0]) {
+            std::string abs = packAddPath_;
+            std::string internal = abs;
+            for (const char* root : {"/materials/", "/models/", "/sound/"}) {
+                const size_t k = internal.find(root);
+                if (k != std::string::npos) { internal = internal.substr(k + 1); break; }
+            }
+            std::replace(internal.begin(), internal.end(), '\\', '/');
+            packFiles_.push_back(internal + "|" + abs);
+            packAddPath_[0] = 0;
+        }
+        int rm = -1;
+        for (int i = 0; i < (int)packFiles_.size(); ++i) {
+            ImGui::PushID(i);
+            ImGui::BulletText("%s", packFiles_[i].substr(0, packFiles_[i].find('|')).c_str());
+            ImGui::SameLine();
+            if (ImGui::SmallButton("x")) rm = i;
+            ImGui::PopID();
+        }
+        if (rm >= 0) packFiles_.erase(packFiles_.begin() + rm);
+        ImGui::Unindent();
+    }
+    ImGui::EndDisabled();
+
+    if (!gamePaths_.valid()) gamePaths_ = compile::GamePaths::detect();
+    if (!gamePaths_.valid()) {
+        ImGui::PushStyleColor(ImGuiCol_Text, col::warn);
+        ImGui::TextWrapped(ICON_FA_TRIANGLE_EXCLAMATION
+                           "  TF2 compile tools not found. Set the TF2_DIR "
+                           "environment variable to your Team Fortress 2 folder.");
+        ImGui::PopStyleColor();
+    } else {
+        ImGui::PushStyleColor(ImGuiCol_Text, col::faint);
+        ImGui::TextWrapped("%s", gamePaths_.gameDir.c_str());
+        ImGui::PopStyleColor();
+    }
+
+    ImGui::Dummy(ImVec2(0, 4));
+    if (running) {
+        char label[96];
+        std::snprintf(label, sizeof(label), ICON_FA_STOP "  Stop  (%s, %.0fs)",
+                      compiler_.stage().c_str(), compiler_.elapsedSeconds());
+        if (ImGui::Button(label, ImVec2(-1, 34 * uiScale_))) compiler_.cancel();
+    } else {
+        const bool can = hasDoc() && gamePaths_.valid();
+        ImGui::BeginDisabled(!can);
+        if (ImGui::Button(ICON_FA_PLAY "  Build now", ImVec2(-1, 34 * uiScale_)))
+            startCompile();
+        ImGui::EndDisabled();
+    }
+
+    if (!running && compiler_.finished()) {
+        ImGui::PushStyleColor(ImGuiCol_Text,
+                              compiler_.succeeded() ? col::good : col::warn);
+        ImGui::TextUnformatted(compiler_.succeeded()
+                                   ? (compiler_.launched()
+                                          ? ICON_FA_CHECK "  Built and launched."
+                                          : ICON_FA_CHECK "  Build finished.")
+                                   : ICON_FA_XMARK "  Build failed — see the log.");
+        ImGui::PopStyleColor();
+    }
+
+    ImGui::Dummy(ImVec2(0, 4));
+    sectionLabel("LOG");
+    ImGui::SameLine();
+    ImGui::Checkbox("follow", &compileAutoScroll_);
+    if (fontMono) ImGui::PushFont(fontMono);
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, col::bg0);
+    if (ImGui::BeginChild("##compilelog", ImVec2(0, 0), ImGuiChildFlags_Borders)) {
+        const std::vector<std::string> lines = compiler_.log();
+        ImGuiListClipper clip;
+        clip.Begin(static_cast<int>(lines.size()));
+        while (clip.Step())
+            for (int i = clip.DisplayStart; i < clip.DisplayEnd; ++i)
+                ImGui::TextUnformatted(lines[i].c_str());
+        if (compileAutoScroll_ && lines.size() != compileLogSeen_) {
+            ImGui::SetScrollHereY(1.0f);
+            compileLogSeen_ = lines.size();
+        }
+    }
+    ImGui::EndChild();
+    ImGui::PopStyleColor();
+    if (fontMono) ImGui::PopFont();
+
+    ImGui::End();
+}
+
+void Editor::debugPlaceEntity(const std::string& cls) {
+    if (!doc_.active()) { doc_.newBlank("enttest"); history_.reset(doc_); }
+    placeFgdEntity(cls, glm::vec3(0, 0, 0));
+    showWelcome_ = false;
+    PB_INFO("placed %s -> entity %d, %zu keys", cls.c_str(), selectedEntity_,
+            selectedEntity_ >= 0 ? doc_.entities()[selectedEntity_].kv.pairs.size() : 0);
+}
+
+void Editor::debugSelectEntity(int i) {
+    if (i >= 0 && i < static_cast<int>(doc_.entities().size())) {
+        selectedEntity_ = i;
+        selection_.clear();
+        mode_ = Mode::Full;
+        layoutDirty_ = true;
+        status_ = "Selected entity " + std::to_string(i) + " (" +
+                  doc_.entities()[i].classname + ")";
+    }
+}
+
+void Editor::debugDumpProps() {
+    std::vector<std::string> seen;
+    for (size_t i = 0; i < mesh_.props.size(); ++i) {
+        const auto& p = mesh_.props[i];
+        if (p.model.empty()) continue;
+        PB_INFO("prop[%zu] '%s'  pos=(%.0f %.0f %.0f) ang=(%.0f %.0f %.0f) scale=%.2f",
+                i, p.model.c_str(), p.pos.x, p.pos.y, p.pos.z, p.anglesPYR.x,
+                p.anglesPYR.y, p.anglesPYR.z, p.scale);
+        if (std::find(seen.begin(), seen.end(), p.model) != seen.end()) continue;
+        seen.push_back(p.model);
+        const model::StudioModel& sm = model::loadStudioModel(sourceFs_, p.model);
+        const glm::vec3 ext = sm.boundsMax - sm.boundsMin;
+        const float span = std::max({ext.x, ext.y, ext.z});
+        if (!sm.ok || span > 500.0f || sm.meshes.size() > 6)
+            model::debugDumpModel(sourceFs_, p.model);
+    }
+    PB_INFO("debugDumpProps: %zu instances, %zu unique models", mesh_.props.size(),
+            seen.size());
+}
+
+void Editor::debugSelectWorldSolid(int i) {
+    if (i >= 0 && i < static_cast<int>(doc_.worldSolids().size())) {
+        selection_ = {{-1, i}};
+        rebuildSelectionWire();
+        const map::Solid* s = doc_.resolve(selection_[0]);
+        if (s)
+            for (auto& v : views_) {
+                if (v.kind == ViewKind::Perspective) {
+                    v.camera.pos = s->center() - v.camera.forward() * 320.0f;
+                } else {
+                    v.camera.orthoCenter = s->center();
+                }
+            }
+    }
+}
+
+void Editor::debugShapeOp(int op) {
+    // Build a fresh 2-brush scene so the result is easy to read.
+    bsp_ = BspFile();
+    doc_.newBlank("shapeop");
+    history_.reset(doc_);
+    clearSelection();
+    doc_.worldSolids().push_back(
+        map::Solid::makeBox({-256, -256, 0}, {256, 256, 256},
+                            "dev/dev_measuregeneric01b"));
+    doc_.worldSolids().back().id = doc_.nextId();
+    if (op == 1) {  // carve needs a second (cutter) brush overlapping the first
+        doc_.worldSolids().push_back(
+            map::Solid::makeBox({-64, -64, 64}, {64, 64, 400},
+                                "dev/dev_measurewall01a"));
+        doc_.worldSolids().back().id = doc_.nextId();
+    }
+    mode_ = Mode::Full;
+    showWelcome_ = false;
+    buildAndUpload(meshOpts_);
+
+    if (op == 0) {
+        for (auto& w : map::hollow(doc_.worldSolids()[0], 24.0f)) {
+            w.id = doc_.nextId();
+            doc_.worldSolids().push_back(std::move(w));
+        }
+        doc_.worldSolids().erase(doc_.worldSolids().begin());
+    } else if (op == 1) {
+        map::Solid cutter = doc_.worldSolids()[1];
+        std::vector<map::Solid> rebuilt;
+        auto pieces = map::carve(doc_.worldSolids()[0], cutter);
+        for (auto& pc : pieces) {
+            pc.id = doc_.nextId();
+            rebuilt.push_back(std::move(pc));
+        }
+        doc_.worldSolids() = std::move(rebuilt);
+    } else {
+        doc_.worldSolids()[0].clip(glm::normalize(glm::vec3(1, 1, 0)), 0.0f,
+                                   "dev/dev_measurewall01a");
+    }
+    int valid = 0;
+    for (const auto& s : doc_.worldSolids()) valid += s.valid ? 1 : 0;
+    afterEdit("shape op demo");
+    frameAllViews();
+    PB_INFO("shape-op %d: %zu solids, %d valid", op, doc_.worldSolids().size(), valid);
+}
+
+void Editor::debugTextureDemo(int solidIdx) {
+    debugSelectWorldSolid(solidIdx);
+    mode_ = Mode::Full;
+    tool_ = Tool::Texture;
+    layoutDirty_ = true;
+    texFaces_.clear();
+    const map::Solid* s = doc_.resolve(selection_[0]);
+    if (!s) return;
+    for (int fi = 0; fi < (int)s->faces.size() && fi < 3; ++fi)
+        texFaces_.push_back({{-1, solidIdx}, fi});
+    if (!s->faces.empty())
+        std::snprintf(texMaterial_, sizeof(texMaterial_), "%s",
+                      s->faces[0].material.c_str());
+    selection_.clear();  // texture tool works on faces, not the whole brush
+    PB_INFO("texture demo: solid %d, %zu faces picked", solidIdx, texFaces_.size());
+}
+
+void Editor::debugSubObjectDemo(int solidIdx, int mode) {
+    debugSelectWorldSolid(solidIdx);
+    tool_ = Tool::Vertex;
+    mode_ = Mode::Full;
+    layoutDirty_ = true;
+    subMode_ = static_cast<SubMode>(std::clamp(mode, 0, 2));
+    handlesDirty_ = true;
+    rebuildHandles();
+    map::Solid* s = doc_.resolve(selection_[0]);
+    if (!s || handles_.verts.empty()) return;
+    // Deform: lift handle 0 (and its sub-object group) by +96 on Z.
+    subSel_ = 0;
+    std::vector<int> vidx;
+    if (subMode_ == SubMode::Vertex) vidx = {0};
+    else if (subMode_ == SubMode::Edge)
+        vidx = {handles_.edges[0].a, handles_.edges[0].b};
+    else vidx = handles_.faces[0].verts;
+    map::moveVertexHandles(*s, handles_, vidx, glm::vec3(0, 0, 96));
+    afterEdit("Edit vertex (demo)");
+    rebuildHandles();
+    subSel_ = 0;
+    PB_INFO("sub-object demo: solid %d, mode %d, %zu verts / %zu edges / %zu faces",
+            solidIdx, mode, handles_.verts.size(), handles_.edges.size(),
+            handles_.faces.size());
+}
+
+// ---------------------------------------------------------------------------
+// Simple mode: Build Kit + Selection
+// ---------------------------------------------------------------------------
+namespace {
+
+struct KitPiece {
+    const char* icon;
+    const char* name;
+    const char* hint;
+};
+
+void kitCards(const KitPiece* pieces, int count, std::string* placing,
+              std::string* status, std::string* dragOut = nullptr) {
+    using pb::ui::dp;
+    using namespace pb::ui;
+    const float gap = dp(8.0f);
+    const float avail = ImGui::GetContentRegionAvail().x;
+    // 2 columns when there's room for a readable card, else 1.
+    const int ncol = (avail - gap) * 0.5f >= dp(120.0f) ? 2 : 1;
+    const float cellW = ncol == 2 ? (avail - gap) * 0.5f : avail;
+    // Tall enough for the icon+name row plus two wrapped hint lines at any scale.
+    const float cellH = ImGui::GetTextLineHeight() * 3.4f + dp(16.0f);
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    for (int i = 0; i < count; ++i) {
+        if (ncol == 2 && (i % 2)) ImGui::SameLine(0, gap);
+        ImGui::PushID(i);
+        const bool on = *placing == pieces[i].name;
+
+        // One real widget = the whole card. A Selectable (not a child window)
+        // so drag detection and click both work reliably.
+        const ImVec2 p0 = ImGui::GetCursorScreenPos();
+        ImGui::Selectable("##card", on, ImGuiSelectableFlags_None,
+                          ImVec2(cellW, cellH));
+        const bool hovered = ImGui::IsItemHovered();
+
+        // Click (no drag) arms click-to-place; a drag past threshold starts a
+        // manual drag that frame() drops onto a viewport.
+        if (ImGui::IsItemActivated())
+            *status = std::string("Placing ") + pieces[i].name +
+                      " — click a viewport, or drag me there.";
+        if (ImGui::IsItemDeactivated() &&
+            !ImGui::IsMouseDragPastThreshold(ImGuiMouseButton_Left, 6.0f))
+            *placing = pieces[i].name;  // treated as a click
+        if (dragOut && ImGui::IsItemActive() &&
+            ImGui::IsMouseDragPastThreshold(ImGuiMouseButton_Left, 6.0f)) {
+            *dragOut = std::string("@kit:") + pieces[i].name;
+            ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+            ImGui::SetTooltip("%s  %s   — drop on a viewport", pieces[i].icon,
+                              pieces[i].name);
+        }
+        if (hovered && !ImGui::IsMouseDown(ImGuiMouseButton_Left))
+            ImGui::SetTooltip("%s\n%s", pieces[i].name, pieces[i].hint);
+
+        // Paint the card over the selectable's rect.
+        const ImU32 bg = on ? u32(col::bg3) : (hovered ? u32(col::bg3) : u32(col::bg2));
+        dl->AddRectFilled(p0, ImVec2(p0.x + cellW, p0.y + cellH), bg, 4.0f);
+        dl->AddRect(p0, ImVec2(p0.x + cellW, p0.y + cellH),
+                    on ? u32(col::acc) : u32(col::bd), 4.0f, 0, on ? 2.0f : 1.0f);
+        const float pad = dp(9.0f);
+        dl->AddText(ImVec2(p0.x + pad, p0.y + pad), u32(col::acc), pieces[i].icon);
+        dl->AddText(fontUiMed ? fontUiMed : nullptr, 0.0f,
+                    ImVec2(p0.x + pad + dp(22.0f), p0.y + pad - dp(1.0f)),
+                    u32(col::tx), pieces[i].name);
+        dl->AddText(nullptr, 0.0f,
+                    ImVec2(p0.x + pad, p0.y + pad + ImGui::GetTextLineHeight() + dp(4.0f)),
+                    u32(col::faint), pieces[i].hint, nullptr, cellW - pad * 2.0f);
+        ImGui::PopID();
+    }
+}
+
+}  // namespace
+
+void Editor::debugImportObj(const std::string& path) {
+    if (!doc_.active()) { doc_.newBlank("objtest"); history_.reset(doc_); }
+    modelImportPath_ = path;
+    // "path" may carry a ":prop" suffix to exercise the prop-staging path.
+    if (path.size() > 5 && path.substr(path.size() - 5) == ":prop") {
+        modelImportPath_ = path.substr(0, path.size() - 5);
+        modelPlaceOpts_.mode = import::ModelPlacement::Prop;
+    } else {
+        modelPlaceOpts_.mode = import::ModelPlacement::DetailBrush;
+    }
+    reloadModelPreview();
+    doModelImport();
+    showWelcome_ = false;
+    frameAllViews();
+}
+
+void Editor::openModelImport() {
+    const std::string picked = openFileDialog(
+        "Import a 3D model",
+        "Wavefront OBJ (*.obj)\0*.obj\0All files\0*.*\0\0", nullptr);
+    if (picked.empty()) return;
+    modelImportPath_ = picked;
+    modelImportErr_.clear();
+    if (!selection_.empty())
+        modelPlaceOpts_.origin = snapVec(selectionCenter());
+    reloadModelPreview();
+    showModelImport_ = true;
+}
+
+void Editor::reloadModelPreview() {
+    if (modelImportPath_.empty()) return;
+    modelImportErr_.clear();
+    if (!import::loadObj(modelImportPath_, modelLoadOpts_, modelPreview_,
+                         &modelImportErr_))
+        modelPreview_ = import::ObjMesh{};
+}
+
+void Editor::doModelImport() {
+    if (modelPreview_.empty()) {
+        status_ = modelImportErr_.empty() ? "Load a model first." : modelImportErr_;
+        return;
+    }
+    if (!doc_.active()) doc_.newBlank("untitled");
+    std::string err;
+
+    if (modelPlaceOpts_.mode == import::ModelPlacement::DetailBrush) {
+        map::MapEntity ent;
+        if (!import::meshToDetailEntity(modelPreview_, modelPlaceOpts_, doc_, ent,
+                                        &err)) {
+            modelImportErr_ = err;
+            status_ = "Import failed: " + err;
+            return;
+        }
+        doc_.entities().push_back(std::move(ent));
+        const int ei = static_cast<int>(doc_.entities().size()) - 1;
+        selection_.clear();
+        for (size_t s = 0; s < doc_.entities()[ei].solids.size(); ++s)
+            selection_.push_back({ei, static_cast<int>(s)});
+        afterEdit("Import model (detail)");
+        status_ = "Imported " + modelPreview_.name + " as " +
+                  std::to_string(doc_.entities()[ei].solids.size()) +
+                  " detail brushes";
+    } else {
+        std::string stageDir = "PootisBuilder/models";
+        if (const char* la = std::getenv("LOCALAPPDATA"))
+            stageDir = std::string(la) + "/PootisBuilder/models/" +
+                       (doc_.name().empty() ? "untitled" : doc_.name());
+        std::string modelPath, qcPath;
+        if (!import::meshToPropStage(modelPreview_, modelPlaceOpts_, stageDir,
+                                     modelPath, qcPath, &err)) {
+            modelImportErr_ = err;
+            status_ = "Import failed: " + err;
+            return;
+        }
+        map::MapEntity e;
+        e.id = doc_.nextId();
+        e.classname = "prop_static";
+        e.origin = modelPlaceOpts_.origin;
+        e.kv.set("classname", "prop_static");
+        e.kv.set("origin", std::to_string((int)e.origin.x) + " " +
+                               std::to_string((int)e.origin.y) + " " +
+                               std::to_string((int)e.origin.z));
+        e.kv.set("model", modelPath);
+        e.kv.set("solidity", "2");
+        doc_.entities().push_back(std::move(e));
+        if (std::find(pendingModelQc_.begin(), pendingModelQc_.end(), qcPath) ==
+            pendingModelQc_.end())
+            pendingModelQc_.push_back(qcPath);
+        afterEdit("Import model (prop)");
+        status_ = "Staged prop " + modelPath + " — it bakes on the next Build.";
+    }
+    showModelImport_ = false;
+}
+
+void Editor::drawModelImportDialog() {
+    if (!showModelImport_) return;
+    using namespace pb::ui;
+
+    ImGui::SetNextWindowSize(ImVec2(460 * uiScale_, 0), ImGuiCond_Always);
+    if (!ImGui::Begin(ICON_FA_CUBE "  Import 3D model", &showModelImport_,
+                      ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoDocking)) {
+        ImGui::End();
+        return;
+    }
+
+    // File row
+    char buf[512];
+    std::snprintf(buf, sizeof(buf), "%s", modelImportPath_.c_str());
+    ImGui::SetNextItemWidth(-90 * uiScale_);
+    ImGui::InputText("##mpath", buf, sizeof(buf), ImGuiInputTextFlags_ReadOnly);
+    ImGui::SameLine();
+    if (ImGui::Button("Browse…", ImVec2(-1, 0))) {
+        const std::string p = openFileDialog(
+            "Import a 3D model", "Wavefront OBJ (*.obj)\0*.obj\0All files\0*.*\0\0",
+            nullptr);
+        if (!p.empty()) { modelImportPath_ = p; reloadModelPreview(); }
+    }
+
+    if (!modelImportErr_.empty()) {
+        ImGui::PushStyleColor(ImGuiCol_Text, col::warn);
+        ImGui::TextWrapped(ICON_FA_TRIANGLE_EXCLAMATION "  %s", modelImportErr_.c_str());
+        ImGui::PopStyleColor();
+    }
+    if (!modelPreview_.empty()) {
+        const glm::vec3 s = modelPreview_.size();
+        ImGui::PushStyleColor(ImGuiCol_Text, col::faint);
+        ImGui::Text("%zu triangles   ·   %.0f × %.0f × %.0f units",
+                    modelPreview_.tris.size(), s.x, s.y, s.z);
+        ImGui::PopStyleColor();
+    }
+
+    ImGui::Dummy(ImVec2(0, 4));
+    sectionLabel("ORIENTATION & SCALE");
+    bool reload = false;
+    reload |= ImGui::DragFloat("Scale", &modelLoadOpts_.scale, 0.01f, 0.001f,
+                               10000.0f, "%.3f×", ImGuiSliderFlags_Logarithmic);
+    reload |= ImGui::Checkbox("Model is Y-up (convert to Source Z-up)",
+                              &modelLoadOpts_.yUpToZUp);
+    reload |= ImGui::Checkbox("Flip face winding", &modelLoadOpts_.flipWinding);
+    reload |= ImGui::Checkbox("Recompute normals from faces",
+                              &modelLoadOpts_.recomputeNormals);
+    if (reload) reloadModelPreview();
+
+    ImGui::Dummy(ImVec2(0, 4));
+    sectionLabel("PLACE AS");
+    const int mode = static_cast<int>(modelPlaceOpts_.mode);
+    const char* const modes[] = {"Detail brushwork", "Prop model"};
+    const int mr = segmented("mimode", modes, 2, mode, 26 * uiScale_);
+    if (mr >= 0) modelPlaceOpts_.mode = static_cast<import::ModelPlacement>(mr);
+
+    if (modelPlaceOpts_.mode == import::ModelPlacement::DetailBrush) {
+        ImGui::PushStyleColor(ImGuiCol_Text, col::faint);
+        ImGui::TextWrapped(
+            "One convex brush per triangle, grouped as func_detail and written "
+            "straight into the .vmf. Best for low-poly / blocky meshes.");
+        ImGui::PopStyleColor();
+        char m[256];
+        std::snprintf(m, sizeof(m), "%s", modelPlaceOpts_.material.c_str());
+        ImGui::SetNextItemWidth(-1);
+        if (ImGui::InputText("Material", m, sizeof(m))) modelPlaceOpts_.material = m;
+        ImGui::DragFloat("Shell depth", &modelPlaceOpts_.shellThickness, 0.25f, 0.5f,
+                         64.0f, "%.1f u");
+        ImGui::DragInt("Max triangles", &modelPlaceOpts_.maxTris, 32, 64, 32768);
+        if ((int)modelPreview_.tris.size() > modelPlaceOpts_.maxTris) {
+            ImGui::PushStyleColor(ImGuiCol_Text, col::warn);
+            ImGui::TextWrapped(ICON_FA_TRIANGLE_EXCLAMATION
+                               "  Over the limit — simplify the mesh or raise it.");
+            ImGui::PopStyleColor();
+        }
+    } else {
+        ImGui::PushStyleColor(ImGuiCol_Text, col::faint);
+        ImGui::TextWrapped(
+            "Staged as an SMD + QC and baked to models/%s/<name>.mdl by "
+            "studiomdl on the next Build. Placed as prop_static.",
+            modelPlaceOpts_.propDir.c_str());
+        ImGui::PopStyleColor();
+    }
+
+    ImGui::Dummy(ImVec2(0, 4));
+    ImGui::DragFloat3("Origin", &modelPlaceOpts_.origin.x, 1.0f, 0, 0, "%.0f");
+
+    ImGui::Dummy(ImVec2(0, 8));
+    ImGui::BeginDisabled(modelPreview_.empty());
+    if (ImGui::Button(ICON_FA_CHECK "  Import", ImVec2(140 * uiScale_, 0)))
+        doModelImport();
+    ImGui::EndDisabled();
+    ImGui::SameLine();
+    if (ImGui::Button("Cancel", ImVec2(100 * uiScale_, 0))) showModelImport_ = false;
+
+    ImGui::End();
+}
+
+void Editor::captureWorkshopPreview() {
+    std::vector<uint8_t> rgba;
+    if (!renderToImage(ViewKind::Perspective, 1200, 900, rgba)) {
+        wsErr_ = "could not capture the 3D view";
+        return;
+    }
+    std::string dir = executableDir();
+    if (const char* la = std::getenv("LOCALAPPDATA"))
+        dir = std::string(la) + "/PootisBuilder/workshop";
+    std::error_code ec;
+    fs::create_directories(dir, ec);
+    const std::string path =
+        dir + "/" + (doc_.name().empty() ? "map" : doc_.name()) + "_preview.jpg";
+    if (!stbi_write_jpg(path.c_str(), 1200, 900, 4, rgba.data(), 90)) {
+        wsErr_ = "could not write " + path;
+        return;
+    }
+    wsItem_.previewImage = path;
+    wsErr_.clear();
+    status_ = "Captured Workshop preview";
+}
+
+void Editor::drawWorkshopWindow() {
+    if (!showWorkshop_) return;
+    using namespace pb::ui;
+
+    ImGui::SetNextWindowSize(ImVec2(560 * uiScale_, 640 * uiScale_),
+                             ImGuiCond_FirstUseEver);
+    if (!ImGui::Begin(ICON_FA_CLOUD_ARROW_UP "  Publish to Steam Workshop",
+                      &showWorkshop_, ImGuiWindowFlags_NoDocking)) {
+        ImGui::End();
+        return;
+    }
+
+    ImGui::PushStyleColor(ImGuiCol_Text, col::faint);
+    ImGui::TextWrapped(
+        "Prepares your compiled map as a Steam Workshop submission for Team "
+        "Fortress 2. Nothing is uploaded until you press the upload button and "
+        "confirm.");
+    ImGui::PopStyleColor();
+    ImGui::Dummy(ImVec2(0, 6));
+
+    // ---- content (.bsp) ------------------------------------------------
+    if (gamePaths_.gameDir.empty()) gamePaths_ = compile::GamePaths::detect();
+    const std::string mapName = doc_.name().empty() ? "untitled" : doc_.name();
+    std::string bsp = wsItem_.bspPath;
+    if (bsp.empty() && !gamePaths_.gameDir.empty())
+        bsp = gamePaths_.gameDir + "/maps/" + mapName + ".bsp";
+    const bool haveBsp = !bsp.empty() && fileExists(bsp);
+    wsItem_.bspPath = bsp;
+
+    sectionLabel("MAP CONTENT");
+    if (haveBsp) {
+        ImGui::PushStyleColor(ImGuiCol_Text, col::good);
+        ImGui::TextUnformatted(ICON_FA_CHECK);
+        ImGui::PopStyleColor();
+        ImGui::SameLine(0, 8);
+        ImGui::TextWrapped("%s", bsp.c_str());
+    } else {
+        ImGui::PushStyleColor(ImGuiCol_Text, col::warn);
+        ImGui::TextWrapped(ICON_FA_TRIANGLE_EXCLAMATION
+                           "  No compiled .bsp yet — run Build & play (final "
+                           "profile) first, then come back here.");
+        ImGui::PopStyleColor();
+    }
+
+    ImGui::Dummy(ImVec2(0, 6));
+    sectionLabel("PREVIEW IMAGE");
+    if (!wsItem_.previewImage.empty() && fileExists(wsItem_.previewImage)) {
+        ImGui::TextWrapped("%s", wsItem_.previewImage.c_str());
+    } else {
+        ImGui::PushStyleColor(ImGuiCol_Text, col::faint);
+        ImGui::TextUnformatted("none set");
+        ImGui::PopStyleColor();
+    }
+    if (ImGui::Button(ICON_FA_CAMERA "  Capture from 3D view")) captureWorkshopPreview();
+    ImGui::SameLine();
+    if (ImGui::Button("Browse…##wsprev")) {
+        const std::string p = openFileDialog(
+            "Preview image", "Images\0*.jpg;*.jpeg;*.png\0All files\0*.*\0\0", nullptr);
+        if (!p.empty()) wsItem_.previewImage = p;
+    }
+
+    ImGui::Dummy(ImVec2(0, 6));
+    sectionLabel("DETAILS");
+    char title[128];
+    std::snprintf(title, sizeof(title), "%s", wsItem_.title.c_str());
+    ImGui::SetNextItemWidth(-1);
+    if (ImGui::InputTextWithHint("##wstitle", "Title", title, sizeof(title)))
+        wsItem_.title = title;
+
+    static char descBuf[4096];
+    std::snprintf(descBuf, sizeof(descBuf), "%s", wsItem_.description.c_str());
+    ImGui::SetNextItemWidth(-1);
+    if (ImGui::InputTextMultiline("##wsdesc", descBuf, sizeof(descBuf),
+                                  ImVec2(-1, 90 * uiScale_)))
+        wsItem_.description = descBuf;
+    ImGui::PushStyleColor(ImGuiCol_Text, col::faint);
+    ImGui::TextUnformatted("Description");
+    ImGui::PopStyleColor();
+
+    char note[256];
+    std::snprintf(note, sizeof(note), "%s", wsItem_.changeNote.c_str());
+    ImGui::SetNextItemWidth(-1);
+    if (ImGui::InputTextWithHint("##wsnote", "Change note", note, sizeof(note)))
+        wsItem_.changeNote = note;
+
+    // ---- visibility --------------------------------------------------
+    const char* vis[] = {"Public", "Friends only", "Unlisted", "Private (hidden)"};
+    int v = static_cast<int>(wsItem_.visibility);
+    ImGui::SetNextItemWidth(220 * uiScale_);
+    if (ImGui::Combo("Visibility", &v, vis, IM_ARRAYSIZE(vis)))
+        wsItem_.visibility = static_cast<publish::Visibility>(v);
+
+    // ---- tags ------------------------------------------------------
+    sectionLabel("TAGS");
+    auto tagChk = [&](const char* t) {
+        bool on = std::find(wsItem_.tags.begin(), wsItem_.tags.end(), t) !=
+                  wsItem_.tags.end();
+        if (ImGui::Checkbox(t, &on)) {
+            auto it = std::find(wsItem_.tags.begin(), wsItem_.tags.end(), t);
+            if (on && it == wsItem_.tags.end()) wsItem_.tags.push_back(t);
+            if (!on && it != wsItem_.tags.end()) wsItem_.tags.erase(it);
+        }
+    };
+    tagChk("Map");
+    ImGui::SameLine(); tagChk("Capture the Flag");
+    ImGui::SameLine(); tagChk("Control Point");
+    tagChk("Payload");
+    ImGui::SameLine(); tagChk("King of the Hill");
+    ImGui::SameLine(); tagChk("Attack / Defense");
+
+    // ---- existing item id ----------------------------------------
+    sectionLabel("UPDATE AN EXISTING ITEM  (optional)");
+    ImGui::SetNextItemWidth(240 * uiScale_);
+    ImGui::InputTextWithHint("##wsid", "publishedfileid (leave blank = new)",
+                             wsIdBuf_, sizeof(wsIdBuf_));
+    wsItem_.publishedFileId = std::strtoull(wsIdBuf_, nullptr, 10);
+
+    ImGui::Dummy(ImVec2(0, 10));
+    ImGui::Separator();
+    ImGui::Dummy(ImVec2(0, 4));
+
+    // ---- stage + upload ----------------------------------------
+    ImGui::BeginDisabled(!haveBsp || wsItem_.title.empty());
+    if (ImGui::Button(ICON_FA_BOX_ARCHIVE "  Prepare submission",
+                      ImVec2(200 * uiScale_, 0))) {
+        std::string dir = executableDir();
+        if (const char* la = std::getenv("LOCALAPPDATA"))
+            dir = std::string(la) + "/PootisBuilder/workshop/" + mapName;
+        wsErr_.clear();
+        wsStagedOk_ = publish::stageItem(wsItem_, dir, wsStaged_, &wsErr_);
+        status_ = wsStagedOk_ ? "Workshop item staged" : ("Staging failed: " + wsErr_);
+    }
+    ImGui::EndDisabled();
+
+    if (!wsErr_.empty()) {
+        ImGui::PushStyleColor(ImGuiCol_Text, col::warn);
+        ImGui::TextWrapped(ICON_FA_TRIANGLE_EXCLAMATION "  %s", wsErr_.c_str());
+        ImGui::PopStyleColor();
+    }
+
+    if (wsStagedOk_) {
+        ImGui::Dummy(ImVec2(0, 4));
+        ImGui::PushStyleColor(ImGuiCol_Text, col::good);
+        ImGui::TextWrapped(ICON_FA_CHECK "  Staged at %s", wsStaged_.itemDir.c_str());
+        ImGui::PopStyleColor();
+
+        const std::string steamcmd = publish::findSteamcmd();
+        ImGui::Dummy(ImVec2(0, 4));
+        sectionLabel("OPTION A — steamcmd  (recommended)");
+        ImGui::PushStyleColor(ImGuiCol_Text, col::faint);
+        ImGui::TextWrapped(
+            steamcmd.empty()
+                ? "steamcmd not found. Install it, then run this from a terminal:"
+                : "Run this from a terminal (it will prompt for your Steam login):");
+        ImGui::PopStyleColor();
+        static char userBuf[64];
+        std::snprintf(userBuf, sizeof(userBuf), "%s", wsUserBuf_);
+        ImGui::SetNextItemWidth(200 * uiScale_);
+        if (ImGui::InputTextWithHint("Steam login", "account name", userBuf,
+                                     sizeof(userBuf)))
+            std::snprintf(wsUserBuf_, sizeof(wsUserBuf_), "%s", userBuf);
+        const std::string cmd =
+            publish::steamcmdCommand(steamcmd, wsStaged_.vdfPath, wsUserBuf_);
+        char cmdShow[1024];
+        std::snprintf(cmdShow, sizeof(cmdShow), "%s", cmd.c_str());
+        ImGui::SetNextItemWidth(-1);
+        ImGui::InputText("##wscmd", cmdShow, sizeof(cmdShow),
+                         ImGuiInputTextFlags_ReadOnly);
+        if (ImGui::Button(ICON_FA_COPY "  Copy command"))
+            ImGui::SetClipboardText(cmd.c_str());
+        ImGui::SameLine();
+        if (ImGui::Button(ICON_FA_FOLDER_OPEN "  Open item folder")) {
+            const std::string q = "\"" + wsStaged_.itemDir + "\"";
+            std::system(("explorer " + q).c_str());
+        }
+
+        ImGui::Dummy(ImVec2(0, 6));
+        sectionLabel("OPTION B — in-editor upload");
+        if (publish::haveInProcessUpload()) {
+            if (ImGui::Button(ICON_FA_CLOUD_ARROW_UP "  Upload now"))
+                ImGui::OpenPopup("confirmUpload");
+        } else {
+            ImGui::BeginDisabled(true);
+            ImGui::Button(ICON_FA_CLOUD_ARROW_UP "  Upload now");
+            ImGui::EndDisabled();
+            ImGui::PushStyleColor(ImGuiCol_Text, col::faint);
+            ImGui::TextWrapped(
+                "Needs the Steamworks SDK: drop steam_api64.dll + the SDK next to "
+                "the exe and rebuild with PB_HAVE_STEAMWORKS. Until then use "
+                "steamcmd above.");
+            ImGui::PopStyleColor();
+        }
+        if (ImGui::BeginPopupModal("confirmUpload", nullptr,
+                                   ImGuiWindowFlags_AlwaysAutoResize)) {
+            ImGui::Text("Upload \"%s\" to the PUBLIC Steam Workshop?",
+                        wsItem_.title.c_str());
+            ImGui::TextDisabled("Visibility: %s",
+                                publish::visibilityName(wsItem_.visibility));
+            ImGui::Dummy(ImVec2(0, 6));
+            if (ImGui::Button("Upload", ImVec2(120, 0))) {
+                float pr = 0;
+                std::string st;
+                wsErr_.clear();
+                publish::uploadInProcess(wsItem_, wsStaged_, &pr, &st, &wsErr_);
+                if (!wsErr_.empty()) status_ = wsErr_;
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Cancel", ImVec2(120, 0))) ImGui::CloseCurrentPopup();
+            ImGui::EndPopup();
+        }
+
+        ImGui::Dummy(ImVec2(0, 4));
+        if (ImGui::Button(ICON_FA_UP_RIGHT_FROM_SQUARE "  Open TF2 Workshop page"))
+            std::system("start https://steamcommunity.com/app/440/workshop/");
+    }
+
+    ImGui::End();
+}
+
+void Editor::drawBuildKit() {
+    ImGui::Begin("Build Kit");
+
+    if (pb::ui::fontUiMed) ImGui::PushFont(pb::ui::fontUiMed);
+    ImGui::TextUnformatted(hasMap() ? bsp_.name().c_str() : "New map");
+    if (pb::ui::fontUiMed) ImGui::PopFont();
+    ImGui::PushStyleColor(ImGuiCol_Text, pb::ui::col::faint);
+    ImGui::TextWrapped("Pick a piece, then click in a viewport. Everything snaps to the grid.");
+    ImGui::PopStyleColor();
+    ImGui::Dummy(ImVec2(0, 4));
+
+    // A debug/one-shot hook: kitTab_ = N selects the Nth tab next frame.
+    auto tabSel = [&](int n) {
+        return kitTab_ == n ? ImGuiTabItemFlags_SetSelected : 0;
+    };
+    if (ImGui::BeginTabBar("kit", ImGuiTabBarFlags_FittingPolicyScroll |
+                                      ImGuiTabBarFlags_TabListPopupButton)) {
+        if (ImGui::BeginTabItem(ICON_FA_CUBE " Build", nullptr, tabSel(1))) {
+            if (aiConfig().configured()) {
+                ImGui::Dummy(ImVec2(0, 4));
+                pb::ui::sectionLabel("DESCRIBE A LAYOUT");
+                ImGui::SetNextItemWidth(-1);
+                const bool go = ImGui::InputTextWithHint(
+                    "##aibrief",
+                    "a two-storey RED spawn with a balcony over a courtyard…",
+                    aiBrief_, sizeof(aiBrief_),
+                    ImGuiInputTextFlags_EnterReturnsTrue);
+                ImGui::BeginDisabled(aiBusy_.load());
+                if (ImGui::Button(aiBusy_.load()
+                                      ? ICON_FA_HOURGLASS_HALF "  Laying it out…"
+                                      : ICON_FA_WAND_MAGIC_SPARKLES "  Build it",
+                                  ImVec2(-1, 0)) ||
+                    go)
+                    startGreybox();
+                ImGui::EndDisabled();
+                ImGui::PushStyleColor(ImGuiCol_Text, pb::ui::col::faint);
+                ImGui::TextWrapped(
+                    "Real kit pieces on the grid — edit or undo the lot in one "
+                    "step. Anything the model invents is thrown away.");
+                ImGui::PopStyleColor();
+                if (!aiLastPlan_.rejected.empty()) {
+                    ImGui::PushStyleColor(ImGuiCol_Text, pb::ui::col::warn);
+                    ImGui::TextWrapped(ICON_FA_TRIANGLE_EXCLAMATION "  skipped: %s",
+                                       aiLastPlan_.rejected.front().c_str());
+                    ImGui::PopStyleColor();
+                }
+                ImGui::Separator();
+            }
+            static const KitPiece shapes[] = {
+                {ICON_FA_BORDER_ALL, "Floor", "Walkable ground area"},
+                {ICON_FA_SQUARE, "Wall", "Solid cover"},
+                {ICON_FA_WINDOW_MINIMIZE, "Ceiling", "A roof slab"},
+                {ICON_FA_TABLE_CELLS_LARGE, "Room", "4 walls + floor + ceiling"},
+                {ICON_FA_DIAGRAM_PROJECT, "Ramp", "Change height smoothly"},
+                {ICON_FA_CARET_UP, "Wedge", "Triangular ramp block"},
+                {ICON_FA_STAIRS, "Stairs", "A staircase (adjustable)"},
+                {ICON_FA_BEZIER_CURVE, "Arch", "Curved wall / archway"},
+                {ICON_FA_GRIP, "Pillar", "Square vertical cover"},
+                {ICON_FA_CIRCLE, "Cylinder", "Round pillar / column"},
+                {ICON_FA_IGLOO, "Dome", "Rounded dome roof"},
+                {ICON_FA_DOOR_OPEN, "Doorway", "Wall with a door-hole"},
+                {ICON_FA_WINDOW_MAXIMIZE, "Window", "Wall with a window opening"},
+                {ICON_FA_TABLE, "Platform", "Raised floor on legs"},
+                {ICON_FA_MINUS, "Cover", "Waist-high cover"},
+                {ICON_FA_BOXES_STACKED, "Crate stack", "A few crates as cover"},
+                {ICON_FA_TABLE_LIST, "Fence", "Railing / low fence"},
+                {ICON_FA_STAIRS, "Spiral stairs", "Stairs winding round a post"},
+                {ICON_FA_MOUND, "Hill", "Faceted mountain / mound"},
+                {ICON_FA_ROAD, "Curvy road", "Click points, get a road ribbon"},
+            };
+            ImGui::Dummy(ImVec2(0, 4));
+            kitCards(shapes, IM_ARRAYSIZE(shapes), &placing_, &status_, &dragPlace_);
+            ImGui::EndTabItem();
+        }
+        if (ImGui::BeginTabItem(ICON_FA_FLAG " Play", nullptr, tabSel(2))) {
+            static const KitPiece play[] = {
+                {ICON_FA_ARROW_POINTER, "RED spawn", "Team RED respawn room"},
+                {ICON_FA_ARROW_POINTER, "BLU spawn", "Team BLU respawn room"},
+                {ICON_FA_LOCATION_DOT, "One spawn point", "A single respawn spot"},
+                {ICON_FA_CIRCLE_DOT, "Capture point", "Stand-on control point"},
+                {ICON_FA_MOUNTAIN, "KOTH point", "King-of-the-hill point + timer"},
+                {ICON_FA_TRAIN, "Payload track", "Working cart + path + point"},
+                {ICON_FA_FLAG, "CTF setup", "Both flags + capture zones"},
+                {ICON_FA_CLOCK, "Round timer", "Countdown for the round"},
+                {ICON_FA_TROPHY, "Arena logic", "Arena rules + a mid point"},
+                {ICON_FA_BOX_OPEN, "Resupply", "Regenerate locker"},
+                {ICON_FA_KIT_MEDICAL, "Health / ammo", "A medkit + ammo pack"},
+            };
+            ImGui::Dummy(ImVec2(0, 4));
+            kitCards(play, IM_ARRAYSIZE(play), &placing_, &status_, &dragPlace_);
+            ImGui::EndTabItem();
+        }
+        if (ImGui::BeginTabItem(ICON_FA_GEARS " Moving", nullptr, tabSel(3))) {
+            static const KitPiece dyn[] = {
+                {ICON_FA_DOOR_OPEN, "Working door", "Opens when touched"},
+                {ICON_FA_DOOR_CLOSED, "Spawn door", "Team-only one-way spawn wall"},
+                {ICON_FA_HAND_POINTER, "Button", "Press to trigger things"},
+                {ICON_FA_TOGGLE_ON, "Lever", "A switch that toggles + stays"},
+                {ICON_FA_ELEVATOR, "Elevator", "Platform + call button"},
+                {ICON_FA_ARROWS_LEFT_RIGHT, "Moving platform", "Slides on a button"},
+                {ICON_FA_FAN, "Fan / rotating", "A spinning brush"},
+                {ICON_FA_RIGHT_LEFT, "Teleport pair", "Trigger + destination"},
+                {ICON_FA_BOX, "Breakable crate", "Breaks when shot"},
+            };
+            ImGui::Dummy(ImVec2(0, 4));
+            kitCards(dyn, IM_ARRAYSIZE(dyn), &placing_, &status_, &dragPlace_);
+            ImGui::EndTabItem();
+        }
+        if (ImGui::BeginTabItem(ICON_FA_VECTOR_SQUARE " Zones", nullptr, tabSel(4))) {
+            static const KitPiece zones[] = {
+                {ICON_FA_BOMB, "Trigger box", "Fires outputs on touch"},
+                {ICON_FA_BAN, "Clip wall", "Invisible wall (players only)"},
+                {ICON_FA_SKULL, "Death pit", "Instant-kill pit"},
+                {ICON_FA_HELMET_SAFETY, "No-build zone", "Blocks Engineer buildings"},
+                {ICON_FA_WATER, "Water", "A body of water"},
+                {ICON_FA_STAIRS, "Ladder", "Climbable ladder volume"},
+                {ICON_FA_CLOUD, "Skybox seal", "Wraps the whole map in sky (re-fits on re-run)"},
+            };
+            ImGui::Dummy(ImVec2(0, 4));
+            kitCards(zones, IM_ARRAYSIZE(zones), &placing_, &status_, &dragPlace_);
+            ImGui::EndTabItem();
+        }
+        if (ImGui::BeginTabItem(ICON_FA_BOLT " Things", nullptr, tabSel(5))) {
+            ImGui::Dummy(ImVec2(0, 4));
+            drawSimpleEntities();
+            ImGui::EndTabItem();
+        }
+        if (ImGui::BeginTabItem(ICON_FA_IMAGE " Props", nullptr, tabSel(6))) {
+            ImGui::Dummy(ImVec2(0, 4));
+            drawModelGrid();
+            ImGui::EndTabItem();
+        }
+        if (ImGui::BeginTabItem(ICON_FA_PALETTE " Textures", nullptr, tabSel(8))) {
+            ImGui::PushStyleColor(ImGuiCol_Text, pb::ui::col::faint);
+            ImGui::TextWrapped(selection_.empty()
+                                   ? "Pick a brush first, then click a texture to "
+                                     "paint it. With nothing selected this just sets "
+                                     "the texture for new brushwork."
+                                   : "Click a texture to paint the selected "
+                                     "brush(es). Use the Surface tool for one face "
+                                     "at a time.");
+            ImGui::PopStyleColor();
+
+            // AI: describe a look, get a coherent set applied by face direction.
+            if (aiConfig().configured()) {
+                ImGui::Dummy(ImVec2(0, 4));
+                pb::ui::sectionLabel("DESCRIBE A LOOK");
+                ImGui::SetNextItemWidth(-1);
+                const bool go = ImGui::InputTextWithHint(
+                    "##aiprompt", "rusty industrial warehouse, snowy alpine base…",
+                    aiPrompt_, sizeof(aiPrompt_),
+                    ImGuiInputTextFlags_EnterReturnsTrue);
+                ImGui::BeginDisabled(aiBusy_.load());
+                if (ImGui::Button(aiBusy_.load()
+                                      ? ICON_FA_HOURGLASS_HALF "  Thinking…"
+                                      : ICON_FA_WAND_MAGIC_SPARKLES "  Suggest a set",
+                                  ImVec2(-1, 0)) ||
+                    go)
+                    startMaterialSuggest();
+                ImGui::EndDisabled();
+                ImGui::PushStyleColor(ImGuiCol_Text, pb::ui::col::faint);
+                ImGui::TextWrapped(
+                    selection_.empty()
+                        ? "With nothing selected this just arms the wall material."
+                        : "Floors, walls and ceilings are told apart by which way "
+                          "each face points.");
+                ImGui::PopStyleColor();
+                if (aiLastPick_.any()) {
+                    struct Slot { const char* label; const std::string* m; };
+                    const Slot slots[] = {{"floor", &aiLastPick_.floor},
+                                          {"wall", &aiLastPick_.wall},
+                                          {"ceiling", &aiLastPick_.ceiling},
+                                          {"trim", &aiLastPick_.trim},
+                                          {"accent", &aiLastPick_.accent}};
+                    for (const auto& sl : slots) {
+                        if (sl.m->empty()) continue;
+                        ImGui::PushID(sl.label);
+                        if (ImGui::SmallButton(ICON_FA_CHECK))
+                            applyBrowserMaterial(*sl.m);
+                        ImGui::SameLine();
+                        ImGui::TextDisabled("%-7s %s", sl.label, sl.m->c_str());
+                        ImGui::PopID();
+                    }
+                }
+                ImGui::Separator();
+            }
+
+            ImGui::Dummy(ImVec2(0, 4));
+            drawMaterialGrid();
+            ImGui::EndTabItem();
+        }
+        if (ImGui::BeginTabItem(ICON_FA_LIGHTBULB " Light", nullptr, tabSel(7))) {
+            static const KitPiece lights[] = {
+                {ICON_FA_LIGHTBULB, "Point light", "Local glow"},
+                {ICON_FA_LIGHTBULB, "Spot light", "Directional cone"},
+                {ICON_FA_LIGHTBULB, "Sun / sky", "light_environment"},
+            };
+            ImGui::Dummy(ImVec2(0, 4));
+            kitCards(lights, IM_ARRAYSIZE(lights), &placing_, &status_, &dragPlace_);
+            ImGui::EndTabItem();
+        }
+        ImGui::EndTabBar();
+    }
+    kitTab_ = 0;  // consume the one-shot tab selection
+
+    ImGui::Dummy(ImVec2(0, 8));
+    ImGui::Separator();
+    pb::ui::sectionLabel("MAP CHECKLIST");
+
+    const bool useDoc = hasDoc();
+    auto countClass = [&](const char* cls) {
+        int n = 0;
+        if (useDoc) {
+            for (const auto& e : doc_.entities())
+                if (e.classname == cls) ++n;
+        } else {
+            for (const auto& e : bsp_.entities()) {
+                auto it = e.find("classname");
+                if (it != e.end() && it->second == cls) ++n;
+            }
+        }
+        return n;
+    };
+    auto anyClassPrefix = [&](const char* pfx) {
+        const size_t n = std::strlen(pfx);
+        if (useDoc) {
+            for (const auto& e : doc_.entities())
+                if (e.classname.compare(0, n, pfx) == 0) return true;
+        } else {
+            for (const auto& e : bsp_.entities()) {
+                auto it = e.find("classname");
+                if (it != e.end() && it->second.compare(0, n, pfx) == 0) return true;
+            }
+        }
+        return false;
+    };
+    std::string skyname;
+    if (useDoc) {
+        skyname = doc_.worldExtra().get("skyname");
+    } else if (const auto* ws = bsp_.worldspawn()) {
+        auto it = ws->find("skyname");
+        if (it != ws->end()) skyname = it->second;
+    }
+    // A skyname is set on every new doc; what actually matters is whether the
+    // map is *sealed* — i.e. has tools/toolsskybox brushwork around it.
+    bool hasSkyBrush = false;
+    if (useDoc) {
+        for (const auto& s : doc_.worldSolids()) {
+            for (const auto& f : s.faces)
+                if (f.material == "tools/toolsskybox") { hasSkyBrush = true; break; }
+            if (hasSkyBrush) break;
+        }
+    } else {
+        hasSkyBrush = !skyname.empty();  // BSP view: assume compiled maps sealed
+    }
+
+    struct Row {
+        bool ok;
+        const char* label;
+        const char* fixKit;   // kit piece to place if the user clicks "+ Add"
+        const char* fixHint;
+    };
+    const Row rows[] = {
+        {countClass("info_player_teamspawn") >= 2 || countClass("info_player_start") >= 1,
+         "Spawn points placed", "RED spawn", "adds a RED spawn room"},
+        {hasSkyBrush, "Map sealed with sky", "Skybox seal",
+         "wraps the whole map in sky brushes"},
+        {countClass("team_control_point") > 0 || countClass("trigger_capture_area") > 0 ||
+             countClass("func_capturezone") > 0,
+         "An objective (capture / flag)", "Capture point", "adds a control point"},
+        {anyClassPrefix("item_health") || anyClassPrefix("item_ammo") ||
+             countClass("func_regenerate") > 0,
+         "Health and ammo on the routes", "Health / ammo", "adds a medkit + ammo"},
+        {countClass("light") > 0 || countClass("light_environment") > 0 ||
+             countClass("light_spot") > 0,
+         "Lights in the level", "Sun / sky", "adds a sun (light_environment)"},
+    };
+    int done = 0;
+    for (const Row& r : rows)
+        if (r.ok) ++done;
+    ImGui::Dummy(ImVec2(0, 2));
+    char frac[24];
+    std::snprintf(frac, sizeof(frac), "%d / %d", done, (int)IM_ARRAYSIZE(rows));
+    ImGui::PushStyleColor(ImGuiCol_PlotHistogram, pb::ui::col::acc);
+    ImGui::ProgressBar((float)done / IM_ARRAYSIZE(rows), ImVec2(-1, 6), "");
+    ImGui::PopStyleColor();
+    ImGui::SameLine();
+    ImGui::TextDisabled("%s", frac);
+    ImGui::Dummy(ImVec2(0, 4));
+    int ri = 0;
+    for (const Row& r : rows) {
+        ImGui::PushID(ri++);
+        ImGui::PushStyleColor(ImGuiCol_Text, r.ok ? pb::ui::col::good : pb::ui::col::faint);
+        ImGui::TextUnformatted(r.ok ? ICON_FA_CHECK : ICON_FA_SQUARE);
+        ImGui::PopStyleColor();
+        ImGui::SameLine(0, 9);
+        ImGui::PushStyleColor(ImGuiCol_Text,
+                              r.ok ? pb::ui::col::tx : pb::ui::col::dim);
+        ImGui::TextUnformatted(r.label);
+        ImGui::PopStyleColor();
+        if (!r.ok && hasDoc()) {
+            ImGui::SameLine();
+            ImGui::SetCursorPosX(ImGui::GetContentRegionMax().x - pb::ui::dp(52.0f));
+            if (ImGui::SmallButton("+ Add")) {
+                glm::vec3 mn, mx;
+                doc_.bounds(mn, mx);
+                glm::vec3 c = mx.x > mn.x ? 0.5f * (mn + mx) : glm::vec3(0);
+                c.z = mx.x > mn.x ? mn.z : 0.0f;
+                if (std::string(r.fixKit) == "RED spawn") {
+                    placePiece("RED spawn", c + glm::vec3(-512, 0, 0));
+                    placePiece("BLU spawn", c + glm::vec3(512, 0, 0));
+                } else {
+                    placePiece(r.fixKit, c);
+                }
+            }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", r.fixHint);
+        }
+        ImGui::PopID();
+    }
+
+    // One-click: wrap the whole map in sky so it compiles without a leak.
+    if (hasDoc()) {
+        ImGui::Dummy(ImVec2(0, 6));
+        const bool sealed = hasSkyBrush;
+        if (sealed) ImGui::BeginDisabled();
+        if (ImGui::Button(sealed ? ICON_FA_CLOUD "  Map is sky-sealed"
+                                 : ICON_FA_CLOUD "  Seal map with sky",
+                          ImVec2(-1, 0)))
+            placePiece("Skybox seal", glm::vec3(0));
+        if (sealed) ImGui::EndDisabled();
+        if (!sealed && ImGui::IsItemHovered())
+            ImGui::SetTooltip("Adds a sky box around everything. Re-run any time "
+                              "to re-fit it as the map grows.");
+    }
+
+    ImGui::End();
+}
+
+void Editor::drawBrushInspector() {
+    if (selection_.empty()) {
+        ImGui::PushStyleColor(ImGuiCol_Text, pb::ui::col::faint);
+        ImGui::TextWrapped(hasDoc()
+                               ? "Click a brush to select it. Drag it, drag a corner "
+                                 "to resize, or press G / R / S then type an exact "
+                                 "amount."
+                               : "Decompiling… the editable brushes appear here.");
+        ImGui::PopStyleColor();
+        return;
+    }
+
+    // Combined bounds of the selection.
+    glm::vec3 mn(1e30f), mx(-1e30f);
+    int worldCount = 0;
+    for (const auto& r : selection_)
+        if (const map::Solid* s = doc_.resolve(r)) {
+            mn = glm::min(mn, s->boundsMin);
+            mx = glm::max(mx, s->boundsMax);
+            if (r.entity < 0) ++worldCount;
+        }
+    glm::vec3 ctr = 0.5f * (mn + mx);
+    glm::vec3 size = mx - mn;
+
+    if (pb::ui::fontUiMed) ImGui::PushFont(pb::ui::fontUiMed);
+    ImGui::Text("%zu brush%s selected", selection_.size(),
+                selection_.size() == 1 ? "" : "es");
+    if (pb::ui::fontUiMed) ImGui::PopFont();
+
+    // "part of <entity>" identity + one-click untie, so entity brushwork is
+    // first-class instead of a dead end.
+    {
+        int entOf = -2;
+        for (const auto& r : selection_) {
+            if (entOf == -2) entOf = r.entity;
+            else if (entOf != r.entity) entOf = -3;
+        }
+        if (entOf >= 0 && entOf < (int)doc_.entities().size()) {
+            const auto& e = doc_.entities()[entOf];
+            ImGui::PushStyleColor(ImGuiCol_Text, pb::ui::col::faint);
+            ImGui::Text(ICON_FA_LINK "  part of  %s", e.classname.c_str());
+            ImGui::PopStyleColor();
+            if (ImGui::SmallButton("Select all of it")) {
+                selection_.clear();
+                for (int i = 0; i < (int)e.solids.size(); ++i)
+                    selection_.push_back({entOf, i});
+                rebuildSelectionWire();
+            }
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Untie to world")) untieSelectionToWorld();
+        } else if (entOf == -3) {
+            ImGui::PushStyleColor(ImGuiCol_Text, pb::ui::col::faint);
+            ImGui::TextWrapped("Mixed selection — world brushes and pieces of "
+                               "different entities.");
+            ImGui::PopStyleColor();
+            if (ImGui::SmallButton("Untie entity brushes to world"))
+                untieSelectionToWorld();
+        } else if (entOf == -1) {
+            // All world brushes — offer to tie them into a brush entity.
+            if (ImGui::SmallButton(ICON_FA_LINK "  Make it a…"))
+                ImGui::OpenPopup("##tieto");
+            if (ImGui::BeginPopup("##tieto")) {
+                struct T { const char* cls; const char* label; };
+                static const T ts[] = {
+                    {"func_detail", "Detail  (func_detail — no vis cost)"},
+                    {"func_brush", "Toggleable brush  (func_brush)"},
+                    {"func_door", "Sliding door  (func_door)"},
+                    {"func_rotating", "Spinning brush  (func_rotating)"},
+                    {"func_breakable", "Breakable  (func_breakable)"},
+                    {"func_illusionary", "Walk-through  (func_illusionary)"},
+                    {"trigger_multiple", "Trigger  (trigger_multiple)"},
+                    {"trigger_hurt", "Hurt zone  (trigger_hurt)"},
+                    {"func_nobuild", "No-build zone  (func_nobuild)"},
+                    {"func_respawnroom", "Respawn room  (func_respawnroom)"},
+                };
+                for (const auto& t : ts)
+                    if (ImGui::Selectable(t.label)) tieSelectionToEntity(t.cls);
+                ImGui::EndPopup();
+            }
+        }
+    }
+
+    pb::ui::sectionLabel("POSITION  (centre)");
+    glm::vec3 newCtr = ctr;
+    ImGui::SetNextItemWidth(-1);
+    bool posEdited = ImGui::DragFloat3("##pos", &newCtr.x, 1.0f, 0, 0, "%.0f");
+    bool posCommit = ImGui::IsItemDeactivatedAfterEdit();
+
+    pb::ui::sectionLabel("SIZE  (w  d  h)");
+    glm::vec3 newSize = size;
+    ImGui::SetNextItemWidth(-1);
+    bool sizeEdited =
+        ImGui::DragFloat3("##size", &newSize.x, 1.0f, 1.0f, 1e6f, "%.0f");
+    bool sizeCommit = ImGui::IsItemDeactivatedAfterEdit();
+
+    if (posEdited && newCtr != ctr) {
+        const glm::vec3 d = newCtr - ctr;
+        for (const auto& r : selection_)
+            if (map::Solid* s = doc_.resolve(r)) s->translate(d);
+        docMeshDirty_ = true;
+    }
+    if (sizeEdited && selection_.size() == 1 && newSize != size) {
+        newSize = glm::max(newSize, glm::vec3(1.0f));
+        if (map::Solid* s = doc_.resolve(selection_[0])) {
+            const glm::vec3 c = s->center();
+            s->resizeTo(c - newSize * 0.5f, c + newSize * 0.5f);
+            docMeshDirty_ = true;
+        }
+    }
+    if (posCommit || sizeCommit) afterEdit("Edit brush");
+
+    ImGui::Dummy(ImVec2(0, 6));
+    pb::ui::sectionLabel("MATERIAL");
+    if (const map::Solid* s = doc_.resolve(selection_[0])) {
+        const std::string m = s->faces.empty() ? "" : s->faces.front().material;
+        const auto& info = materials_.get(m);
+        ImGui::Image(static_cast<ImTextureID>(static_cast<intptr_t>(info.texture)),
+                     ImVec2(48, 48));
+        ImGui::SameLine();
+        ImGui::TextWrapped("%s", m.c_str());
+    }
+
+    ImGui::Dummy(ImVec2(0, 8));
+    pb::ui::sectionLabel("ROTATE");
+    const float rbw = (ImGui::GetContentRegionAvail().x - 12) / 3.0f;
+    if (ImGui::Button(ICON_FA_ROTATE_LEFT " Z", ImVec2(rbw, 0)))
+        rotateSelection(2, -90.0f);
+    ImGui::SameLine(0, 6);
+    if (ImGui::Button(ICON_FA_ROTATE_RIGHT " Z", ImVec2(rbw, 0)))
+        rotateSelection(2, 90.0f);
+    ImGui::SameLine(0, 6);
+    if (ImGui::Button("Tip 90", ImVec2(rbw, 0)))
+        rotateSelection(0, 90.0f);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Tip the object onto its side (rotate 90 about X).\n"
+                          "Keyboard:  [ and ]  rotate about Z in 15 steps.");
+
+    if (ImGui::Button(ICON_FA_BORDER_ALL "  Snap to grid", ImVec2(-1, 0))) {
+        int moved = 0;
+        for (const auto& r : selection_)
+            if (map::Solid* s = doc_.resolve(r)) {
+                const glm::vec3 c = s->center();
+                const glm::vec3 g = snapVec(c);
+                if (glm::length(g - c) > 0.01f) { s->translate(g - c); ++moved; }
+            }
+        if (moved) { afterEdit("Snap to grid"); status_ = "Snapped to grid"; }
+    }
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Nudge each brush so its centre lands on the grid.");
+
+    ImGui::Dummy(ImVec2(0, 8));
+    if (ImGui::Button(ICON_FA_CLONE "  Duplicate", ImVec2(-1, 0)))
+        duplicateSelection();
+    if (ImGui::Button(ICON_FA_TRASH "  Delete", ImVec2(-1, 0))) deleteSelection();
+
+    {
+        bool anyGrouped = false;
+        for (const auto& r : selection_)
+            if (const map::Solid* s = doc_.resolve(r); s && s->group > 0)
+                anyGrouped = true;
+        if (ImGui::Button(ICON_FA_OBJECT_GROUP "  Group", ImVec2(-1, 0)))
+            groupSelection();
+        if (anyGrouped &&
+            ImGui::Button(ICON_FA_OBJECT_UNGROUP "  Ungroup", ImVec2(-1, 0)))
+            ungroupSelection();
+    }
+
+    // --- Hollow / Carve ------------------------------------------------------
+    ImGui::Dummy(ImVec2(0, 6));
+    pb::ui::sectionLabel("SHAPE OPS");
+    static float hollowWall = 16.0f;
+    ImGui::SetNextItemWidth(90);
+    ImGui::DragFloat("wall", &hollowWall, 1.0f, 1.0f, 256.0f, "%.0f");
+    ImGui::SameLine();
+    if (ImGui::Button("Hollow", ImVec2(-1, 0)) && worldCount > 0) {
+        std::vector<map::Solid> add;
+        for (const auto& r : selection_) {
+            if (r.entity >= 0) continue;
+            const map::Solid* s = doc_.resolve(r);
+            if (!s) continue;
+            for (auto& w : map::hollow(*s, hollowWall)) {
+                w.id = doc_.nextId();
+                add.push_back(std::move(w));
+            }
+        }
+        if (!add.empty()) {
+            // remove the originals (world solids only), then add the shells
+            std::vector<int> del;
+            for (const auto& r : selection_)
+                if (r.entity < 0) del.push_back(r.solid);
+            std::sort(del.rbegin(), del.rend());
+            for (int idx : del)
+                if (idx < (int)doc_.worldSolids().size())
+                    doc_.worldSolids().erase(doc_.worldSolids().begin() + idx);
+            for (auto& w : add) doc_.worldSolids().push_back(std::move(w));
+            clearSelection();
+            afterEdit("Hollow");
+            status_ = "Hollowed";
+        }
+    }
+    if (selection_.size() == 1 && selection_[0].entity < 0) {
+        if (ImGui::Button(ICON_FA_SCISSORS "  Carve (subtract from others)",
+                          ImVec2(-1, 0))) {
+            const int cutIdx = selection_[0].solid;
+            map::Solid cutter = doc_.worldSolids()[cutIdx];
+            std::vector<map::Solid> rebuilt;
+            for (int i = 0; i < (int)doc_.worldSolids().size(); ++i) {
+                if (i == cutIdx) continue;
+                auto pieces = map::carve(doc_.worldSolids()[i], cutter);
+                for (auto& pc : pieces) {
+                    if (!pc.valid) continue;
+                    pc.id = doc_.nextId();
+                    rebuilt.push_back(std::move(pc));
+                }
+            }
+            doc_.worldSolids() = std::move(rebuilt);
+            clearSelection();
+            afterEdit("Carve");
+            status_ = "Carved";
+        }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Subtracts this brush from every other world brush "
+                              "it overlaps (the carve brush itself is removed).");
+    }
+
+    if (worldCount != static_cast<int>(selection_.size()) && worldCount > 0) {
+        ImGui::PushStyleColor(ImGuiCol_Text, pb::ui::col::faint);
+        ImGui::TextWrapped("Carve / hollow act on the world brushes only. "
+                           "Untie the rest first to include them.");
+        ImGui::PopStyleColor();
+    }
+}
+
+void Editor::drawSimpleEntities() {
+    using namespace pb::ui;
+    // group: a section header printed before the first item that carries it.
+    struct SE { const char* group; const char* icon; const char* name;
+                const char* spec; const char* hint; };
+    // spec: "kit:<Name>" -> placePiece, otherwise a raw entity classname.
+    static const SE items[] = {
+        {"PLAYERS & GOALS", ICON_FA_PERSON_RIFLE, "RED spawn room", "kit:RED spawn",
+         "Where RED players start (room + spawns)"},
+        {nullptr, ICON_FA_PERSON_RIFLE, "BLU spawn room", "kit:BLU spawn",
+         "Where BLU players start (room + spawns)"},
+        {nullptr, ICON_FA_LOCATION_DOT, "One spawn point", "info_player_teamspawn",
+         "A single respawn spot"},
+        {nullptr, ICON_FA_DOOR_CLOSED, "Spawn door", "kit:Spawn door",
+         "Team-only one-way wall across a spawn exit"},
+        {nullptr, ICON_FA_BOX_OPEN, "Resupply cabinet", "kit:Resupply",
+         "Refills health and ammo"},
+        {nullptr, ICON_FA_CIRCLE_DOT, "Capture point", "kit:Capture point",
+         "Stand on it to capture"},
+        {nullptr, ICON_FA_TRAIN, "Payload path", "kit:Payload track",
+         "Cart + track + control point"},
+        {nullptr, ICON_FA_FLAG, "CTF setup", "kit:CTF setup",
+         "Both flags + capture zones"},
+        {nullptr, ICON_FA_MOUND, "KOTH point", "kit:KOTH point",
+         "King-of-the-hill point + timer"},
+        {nullptr, ICON_FA_TROPHY, "Arena logic", "kit:Arena logic",
+         "Arena rules + a mid point"},
+        {nullptr, ICON_FA_CLOCK, "Round timer", "kit:Round timer",
+         "Countdown for the round"},
+        {nullptr, ICON_FA_HELMET_SAFETY, "No-build zone", "kit:No-build zone",
+         "Blocks Engineer buildings"},
+        {nullptr, ICON_FA_BRIEFCASE, "Intel briefcase", "item_teamflag",
+         "The flag for CTF"},
+
+        {"PICKUPS", ICON_FA_KIT_MEDICAL, "Small health", "item_healthkit_small",
+         "+ a bit of health"},
+        {nullptr, ICON_FA_KIT_MEDICAL, "Medium health", "item_healthkit_medium",
+         "+ half health"},
+        {nullptr, ICON_FA_KIT_MEDICAL, "Full health", "item_healthkit_full",
+         "Full heal"},
+        {nullptr, ICON_FA_BOX, "Small ammo", "item_ammopack_small", ""},
+        {nullptr, ICON_FA_BOX, "Medium ammo", "item_ammopack_medium", ""},
+        {nullptr, ICON_FA_BOX, "Full ammo", "item_ammopack_full", ""},
+
+        {"DOORS & MOVERS", ICON_FA_DOOR_OPEN, "Working door", "kit:Working door",
+         "Opens when a player is near"},
+        {nullptr, ICON_FA_ELEVATOR, "Elevator", "kit:Elevator",
+         "Platform + call button"},
+        {nullptr, ICON_FA_ARROWS_LEFT_RIGHT, "Moving platform", "kit:Moving platform",
+         "Slides between two points on a button"},
+        {nullptr, ICON_FA_HAND_POINTER, "Button", "kit:Button",
+         "Press to trigger something"},
+        {nullptr, ICON_FA_TOGGLE_ON, "Lever", "kit:Lever",
+         "A switch that toggles and stays"},
+        {nullptr, ICON_FA_FAN, "Fan / rotating", "kit:Fan / rotating",
+         "A spinning brush"},
+        {nullptr, ICON_FA_RIGHT_LEFT, "Teleporter pair", "kit:Teleport pair",
+         "Trigger + a destination"},
+        {nullptr, ICON_FA_BOX, "Breakable crate", "kit:Breakable crate",
+         "Breaks when shot"},
+
+        {"VOLUMES & TRIGGERS", ICON_FA_HEART_CRACK, "Hurt zone", "trigger_hurt",
+         "Damages players inside"},
+        {nullptr, ICON_FA_WIND, "Push / jump pad", "trigger_push",
+         "Shoves players in a direction"},
+        {nullptr, ICON_FA_SKULL, "Death pit", "kit:Death pit",
+         "Instant-kill pit with a rim"},
+        {nullptr, ICON_FA_WATER, "Water", "kit:Water", "A body of water"},
+        {nullptr, ICON_FA_BAN, "Clip wall", "kit:Clip wall",
+         "Invisible wall (blocks players)"},
+        {nullptr, ICON_FA_STAIRS, "Ladder", "kit:Ladder", "A climbable volume"},
+        {nullptr, ICON_FA_BOMB, "Trigger box", "kit:Trigger box",
+         "Fires outputs when touched"},
+
+        {"ATMOSPHERE", ICON_FA_CLOUD, "Map fog", "env_fog_controller",
+         "Map-wide fog colour + distance"},
+        {nullptr, ICON_FA_MOUNTAIN_SUN, "3D sky camera", "sky_camera",
+         "Where the 3D skybox is viewed from"},
+        {nullptr, ICON_FA_CIRCLE_HALF_STROKE, "Reflection probe", "env_cubemap",
+         "Cubemap — shiny surfaces sample this"},
+        {nullptr, ICON_FA_HEADPHONES, "Soundscape", "env_soundscape",
+         "Ambient environmental audio in a radius"},
+        {nullptr, ICON_FA_VOLUME_HIGH, "Ambient sound", "ambient_generic",
+         "A looping sound at a spot"},
+        {nullptr, ICON_FA_SNOWFLAKE, "Rain / snow", "func_precipitation",
+         "Weather inside a brush volume"},
+        {nullptr, ICON_FA_FIRE, "Particle effect", "info_particle_system",
+         "Smoke / fire / sparks"},
+        {nullptr, ICON_FA_SUN, "Light glow", "env_lightglow",
+         "A halo sprite on a light source"},
+        {nullptr, ICON_FA_VIDEO, "Spectator camera", "info_observer_point",
+         "A camera angle for spectators"},
+    };
+
+    ImGui::PushStyleColor(ImGuiCol_Text, col::faint);
+    ImGui::TextWrapped("Click one, then click in a viewport (or drag it in).");
+    ImGui::PopStyleColor();
+    ImGui::Dummy(ImVec2(0, 4));
+
+    const float cell = dp(46.0f);
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    for (const auto& it : items) {
+        if (it.group) {
+            ImGui::Dummy(ImVec2(0, dp(6.0f)));
+            pb::ui::sectionLabel(it.group);
+            ImGui::Dummy(ImVec2(0, dp(2.0f)));
+        }
+        const bool isKit = std::strncmp(it.spec, "kit:", 4) == 0;
+        const std::string cls = isKit ? "" : it.spec;
+        const std::string payload = isKit ? std::string("@kit:") + (it.spec + 4)
+                                          : std::string("@ent:") + cls;
+        const bool on = placing_ == payload;
+
+        GLuint tex = 0;
+        const fgd::EntityClass* ec = cls.empty() ? nullptr : fgd_.flattened(cls);
+        if (ec && !ec->studioModel.empty()) {
+            const std::string& mp = ec->studioModel;
+            tex = modelThumbs_.get(mp, model::loadStudioModel(sourceFs_, mp),
+                                   materials_);
+        }
+
+        ImGui::PushID(it.name);
+        // One full-width hit target for the whole row (icon + label).
+        const ImVec2 p0 = ImGui::GetCursorScreenPos();
+        const float rowW = ImGui::GetContentRegionAvail().x;
+        ImGui::Selectable("##row", on, 0, ImVec2(rowW, cell));
+        const bool rowHov = ImGui::IsItemHovered();
+        if (ImGui::IsItemDeactivated() &&
+            !ImGui::IsMouseDragPastThreshold(ImGuiMouseButton_Left, 6.0f)) {
+            placing_ = payload;
+            status_ = std::string("Placing ") + it.name +
+                      " — click a viewport, or drag it in.";
+        }
+        // Manual drag: frame() drops dragPlace_ onto whatever viewport the
+        // mouse is released over (ImGui's own drag-drop is unreliable here).
+        if (ImGui::IsItemActive() &&
+            ImGui::IsMouseDragPastThreshold(ImGuiMouseButton_Left, 6.0f)) {
+            dragPlace_ = payload;
+            ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+            ImGui::SetTooltip("%s   — drop on a viewport", it.name);
+        }
+        if (rowHov && !ImGui::IsMouseDown(ImGuiMouseButton_Left) && cls.size())
+            ImGui::SetTooltip("%s  (%s)", it.name, cls.c_str());
+
+        // Draw the icon + text over the selectable's rect.
+        const float pad = dp(4.0f);
+        const ImVec2 icTL(p0.x + pad, p0.y + pad);
+        const float ic = cell - pad * 2.0f;
+        if (tex) {
+            dl->AddImage(static_cast<ImTextureID>((intptr_t)tex), icTL,
+                         ImVec2(icTL.x + ic, icTL.y + ic));
+        } else {
+            glm::vec3 rgb = ec && ec->hasColor ? ec->color : glm::vec3(0.55f);
+            dl->AddRectFilled(icTL, ImVec2(icTL.x + ic, icTL.y + ic),
+                              IM_COL32((int)(rgb.r * 255), (int)(rgb.g * 255),
+                                       (int)(rgb.b * 255), 45),
+                              3.0f);
+            const char* glyph = it.icon ? it.icon
+                                        : (isKit ? ICON_FA_CUBES : ICON_FA_BOLT);
+            const ImVec2 gsz = ImGui::CalcTextSize(glyph);
+            dl->AddText(ImVec2(icTL.x + (ic - gsz.x) * 0.5f,
+                               icTL.y + (ic - gsz.y) * 0.5f),
+                        IM_COL32((int)(rgb.r * 255), (int)(rgb.g * 255),
+                                 (int)(rgb.b * 255), 255),
+                        glyph);
+        }
+        const float tx = p0.x + cell + dp(4.0f);
+        dl->AddText(fontUiMed ? fontUiMed : nullptr, 0.0f, ImVec2(tx, p0.y + pad),
+                    u32(col::tx), it.name);
+        if (it.hint[0])
+            dl->AddText(ImVec2(tx, p0.y + pad + ImGui::GetTextLineHeight() + 1),
+                        u32(col::faint), it.hint);
+        if (on)
+            dl->AddRect(p0, ImVec2(p0.x + rowW, p0.y + cell), u32(col::acc), 3.0f, 0,
+                        2.0f);
+        ImGui::PopID();
+    }
+}
+
+void Editor::drawSelectionPanel() {
+    ImGui::Begin("Selection");
+    // Guaranteed scroll region — the entity-properties view can be much taller
+    // than the panel and the plain window wasn't always giving a scrollbar.
+    ImGui::BeginChild("##selbody", ImVec2(0, 0), ImGuiChildFlags_None,
+                      ImGuiWindowFlags_AlwaysVerticalScrollbar);
+    if (!placing_.empty()) {
+        const char* pn = placing_.rfind("@ent:", 0) == 0 ? placing_.c_str() + 5
+                                                         : placing_.c_str();
+        if (pb::ui::fontUiMed) ImGui::PushFont(pb::ui::fontUiMed);
+        ImGui::Text(ICON_FA_ARROW_POINTER "  Placing %s", pn);
+        if (pb::ui::fontUiMed) ImGui::PopFont();
+        ImGui::PushStyleColor(ImGuiCol_Text, pb::ui::col::dim);
+        ImGui::TextWrapped("Click in a viewport to drop it.");
+        ImGui::PopStyleColor();
+        if (placing_ == "Hill" || placing_ == "Mountain") {
+            ImGui::Dummy(ImVec2(0, 6));
+            pb::ui::sectionLabel("HILL");
+            ImGui::SetNextItemWidth(-1);
+            ImGui::SliderFloat("radius", &hillRadius_, 64.0f, 4096.0f, "%.0f");
+            ImGui::SetNextItemWidth(-1);
+            ImGui::SliderFloat("height", &hillHeight_, 32.0f, 4096.0f, "%.0f");
+            ImGui::SetNextItemWidth(-1);
+            ImGui::SliderFloat("roughness", &hillRough_, 0.0f, 1.0f, "%.2f");
+            ImGui::SetNextItemWidth(-1);
+            ImGui::SliderInt("layers", &hillLayers_, 3, 16);
+        }
+        auto w1 = [] { ImGui::SetNextItemWidth(-1); };
+        if (placing_ == "Stairs" || placing_ == "Spiral stairs") {
+            ImGui::Dummy(ImVec2(0, 6));
+            pb::ui::sectionLabel(placing_ == "Spiral stairs" ? "SPIRAL STAIRS"
+                                                             : "STAIRS");
+            w1(); ImGui::SliderInt("steps", &stairSteps_, 2, 40);
+            w1(); ImGui::SliderFloat("step rise", &stairRise_, 4.0f, 32.0f, "%.0f");
+            if (placing_ == "Stairs") {
+                w1(); ImGui::SliderFloat("step depth", &stairRun_, 8.0f, 64.0f, "%.0f");
+            }
+            w1(); ImGui::SliderFloat(placing_ == "Spiral stairs" ? "diameter" : "width",
+                                     &stairWidth_, 32.0f, 512.0f, "%.0f");
+        }
+        if (placing_ == "Room") {
+            ImGui::Dummy(ImVec2(0, 6));
+            pb::ui::sectionLabel("ROOM");
+            w1(); ImGui::SliderFloat("half-size", &roomHalf_, 96.0f, 1024.0f, "%.0f");
+        }
+        if (placing_ == "Cylinder" || placing_ == "Dome") {
+            ImGui::Dummy(ImVec2(0, 6));
+            pb::ui::sectionLabel(placing_ == "Dome" ? "DOME" : "CYLINDER");
+            w1(); ImGui::SliderInt("sides", &cylSides_, 3, 32);
+            w1(); ImGui::SliderFloat("radius", &cylRadius_, 16.0f, 1024.0f, "%.0f");
+            w1(); ImGui::SliderFloat("height", &cylHeight_, 16.0f, 1024.0f, "%.0f");
+        }
+        if (placing_ == "Arch" || placing_ == "Curved wall") {
+            ImGui::Dummy(ImVec2(0, 6));
+            pb::ui::sectionLabel("ARCH");
+            w1(); ImGui::SliderInt("segments", &archSegs_, 2, 32);
+            w1(); ImGui::SliderFloat("radius", &archRadius_, 32.0f, 2048.0f, "%.0f");
+            w1(); ImGui::SliderFloat("arc °", &archSpan_, 20.0f, 360.0f, "%.0f");
+            w1(); ImGui::SliderFloat("thickness", &archThick_, 8.0f, 256.0f, "%.0f");
+            w1(); ImGui::SliderFloat("height", &archHeight_, 16.0f, 512.0f, "%.0f");
+        }
+        if (placing_ == "Elevator" || placing_ == "Moving platform") {
+            ImGui::Dummy(ImVec2(0, 6));
+            pb::ui::sectionLabel(placing_ == "Moving platform" ? "MOVING PLATFORM"
+                                                              : "ELEVATOR");
+            w1(); ImGui::SliderFloat(placing_ == "Moving platform" ? "travel"
+                                                                  : "travel up",
+                                     &elevTravel_, 64.0f, 2048.0f, "%.0f");
+        }
+        if (placing_ == "Curvy road") {
+            ImGui::Dummy(ImVec2(0, 6));
+            pb::ui::sectionLabel("ROAD");
+            ImGui::SetNextItemWidth(-1);
+            ImGui::SliderFloat("width", &roadWidth_, 32.0f, 1024.0f, "%.0f");
+            ImGui::SetNextItemWidth(-1);
+            ImGui::SliderFloat("thickness", &roadThick_, 4.0f, 128.0f, "%.0f");
+            ImGui::PushStyleColor(ImGuiCol_Text, pb::ui::col::dim);
+            ImGui::TextWrapped("Click points in a 2D view. Enter builds the "
+                               "curve, Esc cancels.");
+            ImGui::PopStyleColor();
+            if (roadPts_.size() >= 2 && ImGui::Button("Build road now", ImVec2(-1, 0)))
+                finalizeRoad();
+        }
+        ImGui::Dummy(ImVec2(0, 6));
+        if (ImGui::Button("Cancel", ImVec2(-1, 0))) placing_.clear();
+    } else if (tool_ == Tool::Texture && hasDoc()) {
+        drawFaceEditPanel();  // same surface panel Pro shows for this tool
+    } else if (selectedEntity_ >= 0 &&
+               selectedEntity_ < static_cast<int>(doc_.entities().size())) {
+        drawEntityProperties();
+    } else if (hasDoc()) {
+        drawBrushInspector();
+    } else if (hasMap()) {
+        pb::ui::sectionLabel("THIS MAP");
+        ImGui::Dummy(ImVec2(0, 4));
+        const glm::vec3 span = mesh_.playBoundsMax - mesh_.playBoundsMin;
+        ImGui::BulletText("%zu point ents, %zu props", mesh_.pointEntities.size(),
+                          mesh_.props.size());
+        ImGui::BulletText("play area  %.0f x %.0f x %.0f", span.x, span.y, span.z);
+    } else {
+        ImGui::PushStyleColor(ImGuiCol_Text, pb::ui::col::faint);
+        ImGui::TextWrapped("Open a .bsp (Ctrl+O) or drag one onto the window to get "
+                           "started.");
+        ImGui::PopStyleColor();
+    }
+    ImGui::Dummy(ImVec2(0, pb::ui::dp(12.0f)));  // breathing room at the bottom
+    ImGui::EndChild();
+    ImGui::End();
+}
+
+void Editor::drawProperties() {
+    ImGui::Begin("Properties");
+    ImGui::BeginChild("##propbody", ImVec2(0, 0), ImGuiChildFlags_None,
+                      ImGuiWindowFlags_AlwaysVerticalScrollbar);
+    if (tool_ == Tool::Texture && hasDoc())
+        drawFaceEditPanel();
+    else if (selectedEntity_ >= 0 &&
+        selectedEntity_ < static_cast<int>(doc_.entities().size()))
+        drawEntityProperties();
+    else if (hasDoc())
+        drawBrushInspector();
+    else
+        ImGui::TextDisabled("Load a map to edit brushes.");
+    ImGui::Dummy(ImVec2(0, pb::ui::dp(12.0f)));
+    ImGui::EndChild();
+    ImGui::End();
+}
+
+void Editor::drawIoEditor(map::MapEntity& e, bool* committed) {
+    using namespace pb::ui;
+    // VMF connection: "OutputName" "target,InputName,parameter,delay,timesToFire"
+    if (ImGui::BeginTable("io", 6,
+                          ImGuiTableFlags_Borders | ImGuiTableFlags_SizingStretchProp |
+                              ImGuiTableFlags_RowBg)) {
+        ImGui::TableSetupColumn("On (output)");
+        ImGui::TableSetupColumn("Target");
+        ImGui::TableSetupColumn("Input");
+        ImGui::TableSetupColumn("Parameter");
+        ImGui::TableSetupColumn("Delay", ImGuiTableColumnFlags_WidthFixed, 46);
+        ImGui::TableSetupColumn("##x", ImGuiTableColumnFlags_WidthFixed, 24);
+        ImGui::TableHeadersRow();
+
+        int removeRow = -1;
+        for (int i = 0; i < static_cast<int>(e.connections.size()); ++i) {
+            auto& c = e.connections[i];
+            // split the value on commas into 5 slots
+            std::array<std::string, 5> f;
+            {
+                std::string s = c.second;
+                size_t start = 0;
+                for (int k = 0; k < 5; ++k) {
+                    size_t comma = s.find(',', start);
+                    f[k] = s.substr(start, comma == std::string::npos
+                                               ? std::string::npos
+                                               : comma - start);
+                    if (comma == std::string::npos) break;
+                    start = comma + 1;
+                }
+            }
+            ImGui::PushID(i);
+            ImGui::TableNextRow();
+            auto cell = [&](int col, std::string& v, float w) {
+                ImGui::TableSetColumnIndex(col);
+                char b[160];
+                std::snprintf(b, sizeof(b), "%s", v.c_str());
+                ImGui::SetNextItemWidth(w > 0 ? w : -1);
+                ImGui::PushID(col);
+                if (ImGui::InputText("##c", b, sizeof(b))) v = b;
+                if (committed && ImGui::IsItemDeactivatedAfterEdit()) *committed = true;
+                ImGui::PopID();
+            };
+            cell(0, c.first, -1);
+            cell(1, f[1], -1);
+            cell(2, f[2], -1);
+            cell(3, f[3], -1);
+            cell(4, f[4], 40);
+            ImGui::TableSetColumnIndex(5);
+            if (ImGui::SmallButton(ICON_FA_XMARK)) removeRow = i;
+            ImGui::PopID();
+
+            std::string joined = f[1];
+            for (int k = 2; k < 5; ++k) joined += "," + f[k];
+            c.second = joined;
+        }
+        ImGui::EndTable();
+        if (removeRow >= 0) {
+            e.connections.erase(e.connections.begin() + removeRow);
+            if (committed) *committed = true;
+        }
+    }
+    if (ImGui::SmallButton(ICON_FA_PLUS "  Add output")) {
+        e.connections.push_back({"OnTrigger", ",Trigger,,0,-1"});
+        if (committed) *committed = true;
+    }
+}
+
+void Editor::drawEntityProperties() {
+    using namespace pb::ui;
+    map::MapEntity& e = doc_.entities()[selectedEntity_];
+    const fgd::EntityClass* ec = fgd_.flattened(e.classname);
+
+    if (fontUiMed) ImGui::PushFont(fontUiMed);
+    ImGui::PushStyleColor(ImGuiCol_Text, col::acc);
+    ImGui::Text(ICON_FA_CIRCLE_NODES "  %s", e.classname.c_str());
+    ImGui::PopStyleColor();
+    if (fontUiMed) ImGui::PopFont();
+    if (ec && !ec->description.empty()) {
+        ImGui::PushStyleColor(ImGuiCol_Text, col::faint);
+        ImGui::TextWrapped("%s", ec->description.c_str());
+        ImGui::PopStyleColor();
+    }
+    if (!ec) {
+        ImGui::PushStyleColor(ImGuiCol_Text, col::warn);
+        ImGui::TextWrapped(ICON_FA_TRIANGLE_EXCLAMATION
+                           "  Not in the FGD — showing raw keys only.");
+        ImGui::PopStyleColor();
+    }
+
+    bool committed = false;
+
+    // Name is the thing you reach for most — keep it pinned at the top.
+    {
+        char nm[128];
+        std::snprintf(nm, sizeof(nm), "%s", e.kv.get("targetname").c_str());
+        ImGui::SetNextItemWidth(-1);
+        if (ImGui::InputTextWithHint("##tn", "targetname (name)", nm, sizeof(nm)))
+            e.kv.set("targetname", nm);
+        if (ImGui::IsItemDeactivatedAfterEdit()) committed = true;
+    }
+
+    ImGui::SetNextItemWidth(-1);
+    ImGui::InputTextWithHint("##pf", ICON_FA_MAGNIFYING_GLASS " filter keys",
+                             propFilter_, sizeof(propFilter_));
+    const std::string filt = propFilter_;
+    auto match = [&](const fgd::Var& v) {
+        if (filt.empty()) return true;
+        auto has = [&](const std::string& s) {
+            auto it = std::search(
+                s.begin(), s.end(), filt.begin(), filt.end(),
+                [](char a, char b) { return std::tolower(a) == std::tolower(b); });
+            return it != s.end();
+        };
+        return has(v.key) || has(v.displayName);
+    };
+
+    // Names for target dropdowns.
+    std::vector<std::string> names;
+    for (const auto& other : doc_.entities()) {
+        const std::string n = other.kv.get("targetname");
+        if (!n.empty() && std::find(names.begin(), names.end(), n) == names.end())
+            names.push_back(n);
+    }
+    std::sort(names.begin(), names.end());
+
+    ImGui::Dummy(ImVec2(0, 4));
+    sectionLabel("PROPERTIES");
+    const fgd::Var* spawnflags = nullptr;
+    int inheritedShown = 0;
+    if (ec) {
+        // This class's own keys first (the ones you usually came here to set).
+        for (const auto& v : ec->vars) {
+            if (v.type == fgd::VarType::Flags || v.key == "spawnflags") {
+                spawnflags = &v;
+                continue;
+            }
+            if (v.key == "targetname" || v.inherited) continue;
+            if (!match(v)) continue;
+            if (pb::ui::fgdField(v, e.kv, names, &committed)) docMeshDirty_ = true;
+        }
+        for (const auto& v : ec->vars)
+            if (v.inherited && v.key != "targetname" &&
+                v.type != fgd::VarType::Flags && match(v))
+                ++inheritedShown;
+
+        if (inheritedShown > 0) {
+            ImGui::Dummy(ImVec2(0, 2));
+            if (ImGui::CollapsingHeader("Shared keys (angles, parent, render, …)",
+                                        filt.empty() ? 0
+                                                     : ImGuiTreeNodeFlags_DefaultOpen)) {
+                for (const auto& v : ec->vars) {
+                    if (v.inherited && v.key != "targetname" &&
+                        v.type != fgd::VarType::Flags && match(v))
+                        if (pb::ui::fgdField(v, e.kv, names, &committed))
+                            docMeshDirty_ = true;
+                }
+            }
+        }
+    }
+
+    if (spawnflags && filt.empty()) {
+        ImGui::Dummy(ImVec2(0, 4));
+        sectionLabel("FLAGS");
+        if (pb::ui::fgdFlags(*spawnflags, e.kv, &committed)) docMeshDirty_ = true;
+    }
+
+    // Any keys not described by the FGD — always editable, never hidden.
+    if (filt.empty()) {
+        std::vector<const std::pair<std::string, std::string>*> extra;
+        for (const auto& p : e.kv.pairs) {
+            if (p.first == "classname" || p.first == "id") continue;
+            bool known = (p.first == "targetname" || p.first == "spawnflags");
+            if (ec)
+                for (const auto& v : ec->vars)
+                    if (v.key == p.first) known = true;
+            if (!known) extra.push_back(&p);
+        }
+        if (!extra.empty()) {
+            ImGui::Dummy(ImVec2(0, 4));
+            if (ImGui::CollapsingHeader("Other keys (not in FGD)",
+                                        ImGuiTreeNodeFlags_DefaultOpen)) {
+                for (const auto* p : extra) {
+                    char b[320];
+                    std::snprintf(b, sizeof(b), "%s", p->second.c_str());
+                    ImGui::SetNextItemWidth(-1);
+                    ImGui::PushID(p->first.c_str());
+                    if (ImGui::InputText(p->first.c_str(), b, sizeof(b))) {
+                        e.kv.set(p->first, b);
+                        docMeshDirty_ = true;
+                    }
+                    if (ImGui::IsItemDeactivatedAfterEdit()) committed = true;
+                    ImGui::PopID();
+                }
+            }
+        }
+    }
+
+    ImGui::Dummy(ImVec2(0, 6));
+    sectionLabel("OUTPUTS  (I/O)");
+    drawIoEditor(e, &committed);
+
+    ImGui::Dummy(ImVec2(0, 8));
+    if (ImGui::Button(ICON_FA_TRASH "  Delete entity")) {
+        doc_.entities().erase(doc_.entities().begin() + selectedEntity_);
+        selectedEntity_ = -1;
+        afterEdit("Delete entity");
+        return;
+    }
+
+    // Keep origin/x-y-z in sync and record one undo step per finished edit.
+    if (docMeshDirty_) {
+        const std::string o = e.kv.get("origin");
+        if (!o.empty()) {
+            glm::vec3 v = e.origin;
+            std::sscanf(o.c_str(), "%f %f %f", &v.x, &v.y, &v.z);
+            e.origin = v;
+        }
+    }
+    if (committed) {
+        afterEdit("Edit entity");
+    } else if (docMeshDirty_) {
+        buildAndUpload(meshOpts_);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Panels
+// ---------------------------------------------------------------------------
+void Editor::drawOutliner() {
+    ImGui::Begin("Contents");
+    if (!hasMap()) {
+        ImGui::TextDisabled("No map loaded.");
+        ImGui::End();
+        return;
+    }
+
+    std::string needle;
+
+    if (hasDoc()) {
+        ImGui::Text(ICON_FA_DIAGRAM_PROJECT "  %s%s",
+                    doc_.name().empty() ? "untitled" : doc_.name().c_str(),
+                    doc_.dirty() ? " *" : "");
+        ImGui::Separator();
+        ImGui::SetNextItemWidth(-1);
+        ImGui::InputTextWithHint("##filter", ICON_FA_MAGNIFYING_GLASS " filter",
+                                 outlinerFilter_, sizeof(outlinerFilter_));
+        needle = outlinerFilter_;
+        std::transform(needle.begin(), needle.end(), needle.begin(), ::tolower);
+        auto pass = [&](const std::string& s) {
+            if (needle.empty()) return true;
+            std::string t = s;
+            std::transform(t.begin(), t.end(), t.begin(), ::tolower);
+            return t.find(needle) != std::string::npos;
+        };
+        auto focusOn = [&](const glm::vec3& c) {
+            for (auto& v : views_) {
+                if (v.kind == ViewKind::Perspective)
+                    v.camera.pos = c - v.camera.forward() * 320.0f;
+                else
+                    v.camera.orthoCenter = c;
+            }
+        };
+
+        const auto& ents = doc_.entities();
+        const auto& world = doc_.worldSolids();
+
+        // ---- Entities ----------------------------------------------------
+        int shown = 0;
+        for (const auto& e : ents)
+            if (pass(e.classname) || pass(e.kv.get("targetname"))) ++shown;
+        char eh[64];
+        std::snprintf(eh, sizeof(eh), "Entities  (%d)###ents", (int)ents.size());
+        if (ImGui::CollapsingHeader(eh, ImGuiTreeNodeFlags_DefaultOpen)) {
+            if (ImGui::BeginChild("entlist", ImVec2(0, 240))) {
+                for (int i = 0; i < (int)ents.size(); ++i) {
+                    const auto& e = ents[i];
+                    const std::string tn = e.kv.get("targetname");
+                    if (!pass(e.classname) && !pass(tn)) continue;
+                    ImGui::PushID(i);
+                    glm::vec3 rgb(0.85f, 0.78f, 0.6f);
+                    if (const fgd::EntityClass* ec = fgd_.flattened(e.classname);
+                        ec && ec->hasColor)
+                        rgb = ec->color;
+                    ImGui::ColorButton("##c",
+                                       ImVec4(rgb.r, rgb.g, rgb.b, 1.0f),
+                                       ImGuiColorEditFlags_NoTooltip |
+                                           ImGuiColorEditFlags_NoDragDrop,
+                                       ImVec2(10, 10));
+                    ImGui::SameLine(0, 6);
+                    std::string lbl = (e.solids.empty() ? "" : ICON_FA_CUBE "  ") +
+                                      e.classname;
+                    if (!tn.empty()) lbl += "  [" + tn + "]";
+                    if (ImGui::Selectable(lbl.c_str(), selectedEntity_ == i,
+                                          ImGuiSelectableFlags_AllowDoubleClick)) {
+                        selectedEntity_ = i;
+                        selection_.clear();
+                        if (!e.solids.empty())
+                            selection_.push_back({i, 0});
+                        rebuildSelectionWire();
+                        status_ = e.classname + " selected";
+                        if (ImGui::IsMouseDoubleClicked(0)) {
+                            glm::vec3 c = e.origin;
+                            if (!e.solids.empty())
+                                c = 0.5f * (e.solids[0].boundsMin + e.solids[0].boundsMax);
+                            focusOn(c);
+                        }
+                    }
+                    ImGui::PopID();
+                }
+                if (ents.empty())
+                    ImGui::TextDisabled("No entities yet — add from the catalogue.");
+            }
+            ImGui::EndChild();
+        }
+
+        // ---- World brushes --------------------------------------------------
+        char wh[64];
+        std::snprintf(wh, sizeof(wh), "World brushes  (%d)###world", (int)world.size());
+        if (ImGui::CollapsingHeader(wh, ImGuiTreeNodeFlags_DefaultOpen)) {
+            if (ImGui::BeginChild("worldlist", ImVec2(0, 220))) {
+                for (int i = 0; i < (int)world.size(); ++i) {
+                    const auto& s = world[i];
+                    const std::string mat =
+                        s.faces.empty() ? std::string("brush") : s.faces[0].material;
+                    char row[160];
+                    std::snprintf(row, sizeof(row), "brush %d   %s", s.id, mat.c_str());
+                    if (!pass(row)) continue;
+                    const bool sel =
+                        std::find(selection_.begin(), selection_.end(),
+                                  map::SolidRef{-1, i}) != selection_.end();
+                    ImGui::PushID(1000000 + i);
+                    if (ImGui::Selectable(row, sel,
+                                          ImGuiSelectableFlags_AllowDoubleClick)) {
+                        if (!ImGui::GetIO().KeyShift) selection_.clear();
+                        selection_.push_back({-1, i});
+                        selectedEntity_ = -1;
+                        rebuildSelectionWire();
+                        status_ = std::to_string(selection_.size()) + " brush(es) selected";
+                        if (ImGui::IsMouseDoubleClicked(0)) focusOn(s.center());
+                    }
+                    if (!s.valid && ImGui::IsItemHovered())
+                        ImGui::SetTooltip("invalid brush (not convex / <4 planes)");
+                    ImGui::PopID();
+                }
+                if (world.empty())
+                    ImGui::TextDisabled("No world brushwork yet.");
+            }
+            ImGui::EndChild();
+        }
+        ImGui::End();
+        return;
+    }
+
+    // ---- BSP-only view: keep the read-only stats -----------------------------
+    ImGui::Text("%s", bsp_.name().c_str());
+    ImGui::Separator();
+    ImGui::InputTextWithHint("##filter", "filter", outlinerFilter_,
+                             sizeof(outlinerFilter_));
+    needle = outlinerFilter_;
+    std::transform(needle.begin(), needle.end(), needle.begin(), ::tolower);
+    auto pass = [&](const std::string& s) {
+        if (needle.empty()) return true;
+        std::string t = s;
+        std::transform(t.begin(), t.end(), t.begin(), ::tolower);
+        return t.find(needle) != std::string::npos;
+    };
+
+    if (ImGui::CollapsingHeader("World geometry", ImGuiTreeNodeFlags_DefaultOpen)) {
+        ImGui::BulletText("%zu faces drawn (%zu skipped)", mesh_.drawnFaces,
+                          mesh_.skippedFaces);
+        ImGui::BulletText("%zu draw batches", mesh_.batches.size());
+        ImGui::BulletText("bounds  %.0f %.0f %.0f  ->  %.0f %.0f %.0f", mesh_.boundsMin.x,
+                          mesh_.boundsMin.y, mesh_.boundsMin.z, mesh_.boundsMax.x,
+                          mesh_.boundsMax.y, mesh_.boundsMax.z);
+    }
+    if (ImGui::CollapsingHeader("Static props", ImGuiTreeNodeFlags_DefaultOpen)) {
+        ImGui::Text("%zu props", mesh_.props.size());
+        if (ImGui::BeginChild("props", ImVec2(0, 180))) {
+            for (size_t i = 0; i < mesh_.props.size(); ++i) {
+                const auto& pr = mesh_.props[i];
+                if (!pass(pr.model)) continue;
+                ImGui::PushID(static_cast<int>(i));
+                if (ImGui::Selectable(pr.model.empty() ? "(prop)" : pr.model.c_str())) {
+                    for (auto& v : views_) {
+                        if (v.kind == ViewKind::Perspective)
+                            v.camera.pos = pr.pos - v.camera.forward() * 200.0f;
+                        else
+                            v.camera.orthoCenter = pr.pos;
+                    }
+                }
+                ImGui::PopID();
+            }
+        }
+        ImGui::EndChild();
+    }
+    if (ImGui::CollapsingHeader("Entities", ImGuiTreeNodeFlags_DefaultOpen)) {
+        if (ImGui::BeginChild("ents", ImVec2(0, 220))) {
+            for (size_t i = 0; i < mesh_.pointEntities.size(); ++i) {
+                const auto& e = mesh_.pointEntities[i];
+                std::string label = e.classname;
+                if (!e.targetname.empty()) label += "  [" + e.targetname + "]";
+                if (!pass(label)) continue;
+                ImGui::PushID(static_cast<int>(i + 100000));
+                if (ImGui::Selectable(label.c_str())) {
+                    for (auto& v : views_) {
+                        if (v.kind == ViewKind::Perspective)
+                            v.camera.pos = e.pos - v.camera.forward() * 200.0f;
+                        else
+                            v.camera.orthoCenter = e.pos;
+                    }
+                }
+                ImGui::PopID();
+            }
+        }
+        ImGui::EndChild();
+    }
+    ImGui::End();
+}
+
+void Editor::applyBrowserMaterial(const std::string& mat) {
+    if (mat.empty()) return;
+    recentMaterials_.erase(
+        std::remove(recentMaterials_.begin(), recentMaterials_.end(), mat),
+        recentMaterials_.end());
+    recentMaterials_.insert(recentMaterials_.begin(), mat);
+    if (recentMaterials_.size() > 24) recentMaterials_.resize(24);
+
+    blockMaterial_ = mat;
+    std::snprintf(texMaterial_, sizeof(texMaterial_), "%s", mat.c_str());
+
+    // Paint whatever is actually selected: individual faces under the Surface
+    // tool, otherwise every face of the selected brushes (so "click a wall,
+    // click a texture" just works), otherwise arm it for new brushwork.
+    if (tool_ == Tool::Texture && !texFaces_.empty()) {
+        applyToTexFaces([&](map::BrushFace& f) { f.material = mat; }, "Apply material",
+                        true);
+        status_ = "Applied " + mat + " to " + std::to_string(texFaces_.size()) +
+                  " face(s)";
+        return;
+    }
+    if (!selection_.empty()) {
+        int faces = 0;
+        for (const auto& r : selection_)
+            if (map::Solid* sl = doc_.resolve(r))
+                for (auto& f : sl->faces) {
+                    if (f.material.rfind("tools/", 0) == 0) continue;  // keep tool faces
+                    f.material = mat;
+                    ++faces;
+                }
+        if (faces) {
+            afterEdit("Apply material");
+            status_ = "Applied " + mat + " to " + std::to_string(selection_.size()) +
+                      " brush(es)";
+            return;
+        }
+    }
+    status_ = "Material set: " + mat + "  (block tool + new brushwork)";
+}
+
+void Editor::drawTextureBrowser() {
+    ImGui::Begin("Textures");
+    drawMaterialGrid();
+    ImGui::End();
+}
+
+// Shared body: the Pro "Textures" dock and the Simple kit's Textures tab both
+// draw this.
+void Editor::drawMaterialGrid() {
+    using namespace pb::ui;
+    if (!sourceFs_.ready()) {
+        ImGui::TextDisabled("No game content mounted (install / locate TF2).");
+        return;
+    }
+
+    // Lazy: enumerate + theme-bucket every material once (like the model browser).
+    if (!materialListBuilt_) {
+        for (std::string m : sourceFs_.listFiles("materials/", ".vmt")) {
+            if (m.rfind("materials/", 0) == 0) m = m.substr(10);
+            if (m.size() > 4 && m.substr(m.size() - 4) == ".vmt") m.resize(m.size() - 4);
+            materialList_.push_back(std::move(m));
+        }
+        materialListBuilt_ = true;
+        PB_INFO("material browser: %zu materials", materialList_.size());
+
+        auto theme = [](std::string s) -> std::string {
+            auto has = [&](const char* k) { return s.find(k) != std::string::npos; };
+            struct R { const char* key; const char* theme; };
+            static const R rules[] = {
+                {"concrete", "Concrete & stone"}, {"stone", "Concrete & stone"},
+                {"rock", "Concrete & stone"},     {"gravel", "Concrete & stone"},
+                {"brick", "Brick & tile"},        {"tile", "Brick & tile"},
+                {"metal", "Metal"},               {"metaltruss", "Metal"},
+                {"wood", "Wood"},                 {"plank", "Wood"},
+                {"plaster", "Plaster & walls"},   {"wall", "Plaster & walls"},
+                {"drywall", "Plaster & walls"},   {"glass", "Glass & windows"},
+                {"window", "Glass & windows"},    {"nature", "Nature & ground"},
+                {"dirt", "Nature & ground"},      {"grass", "Nature & ground"},
+                {"sand", "Nature & ground"},      {"snow", "Nature & ground"},
+                {"water", "Liquids"},             {"slime", "Liquids"},
+                {"lava", "Liquids"},              {"sky", "Skybox"},
+                {"light", "Lights & glows"},      {"lamp", "Lights & glows"},
+                {"tools", "Tool textures"},       {"dev", "Dev & measure"},
+                {"sign", "Signs & overlays"},     {"overlay", "Signs & overlays"},
+                {"decal", "Signs & overlays"},    {"poster", "Signs & overlays"},
+                {"door", "Doors & trim"},         {"trim", "Doors & trim"},
+                {"roof", "Roof & exterior"},      {"awning", "Roof & exterior"},
+                {"models", "Model skins"},        {"effects", "Effects"},
+                {"particle", "Effects"},          {"props", "Prop textures"},
+                {"backpack", "UI & menus"},       {"vgui", "UI & menus"},
+                {"hud", "UI & menus"},            {"console", "UI & menus"},
+                {"menu", "UI & menus"},           {"ambient", "UI & menus"},
+                {"hay", "Farm & sawmill"},        {"barn", "Farm & sawmill"},
+                {"sawmill", "Farm & sawmill"},    {"egypt", "Desert & badlands"},
+                {"desert", "Desert & badlands"},  {"badlands", "Desert & badlands"},
+                {"mvm", "Desert & badlands"},     {"spytech", "Spytech & sci-fi"},
+                {"cliff", "Concrete & stone"},
+            };
+            for (const auto& r : rules)
+                if (has(r.key)) return r.theme;
+            // Otherwise: the first path segment, title-cased.
+            const size_t sl = s.find('/');
+            std::string seg = sl == std::string::npos ? s : s.substr(0, sl);
+            if (seg.empty()) return "Other";
+            seg[0] = (char)std::toupper((unsigned char)seg[0]);
+            return seg;
+        };
+        std::map<std::string, std::vector<int>> cats;
+        for (int i = 0; i < (int)materialList_.size(); ++i)
+            cats[theme(materialList_[i])].push_back(i);
+        std::vector<int> misc;
+        for (auto it = cats.begin(); it != cats.end();) {
+            if (it->second.size() < 20 && it->first != "Other") {
+                misc.insert(misc.end(), it->second.begin(), it->second.end());
+                it = cats.erase(it);
+            } else {
+                ++it;
+            }
+        }
+        if (!misc.empty()) {
+            auto& o = cats["Other"];
+            o.insert(o.end(), misc.begin(), misc.end());
+        }
+        materialCats_.assign(cats.begin(), cats.end());
+        // Rank by usefulness for texturing brushwork, not by raw count — the
+        // enormous UI/model-skin buckets would otherwise bury the wall and
+        // floor materials people actually reach for.
+        auto rank = [](const std::string& n) {
+            static const char* kFirst[] = {
+                "Concrete & stone", "Brick & tile", "Metal", "Wood",
+                "Plaster & walls", "Nature & ground", "Glass & windows",
+                "Roof & exterior", "Doors & trim", "Liquids", "Skybox",
+                "Lights & glows", "Desert & badlands", "Farm & sawmill",
+                "Spytech & sci-fi", "Dev & measure", "Tool textures"};
+            for (int i = 0; i < (int)(sizeof(kFirst) / sizeof(kFirst[0])); ++i)
+                if (n == kFirst[i]) return i;
+            // Everything else after, with the pure-noise buckets last.
+            if (n == "Signs & overlays" || n == "Effects") return 100;
+            if (n == "Prop textures") return 101;
+            if (n == "Model skins") return 200;
+            if (n == "UI & menus") return 201;
+            return 50;
+        };
+        std::sort(materialCats_.begin(), materialCats_.end(),
+                  [&](const auto& a, const auto& b) {
+                      const int ra = rank(a.first), rb = rank(b.first);
+                      if (ra != rb) return ra < rb;
+                      return a.second.size() > b.second.size();
+                  });
+    }
+
+    // Materials actually used in the loaded map (from the render batches).
+    std::vector<std::string> inMap;
+    for (const auto& b : mesh_.batches) inMap.push_back(b.material);
+    std::sort(inMap.begin(), inMap.end());
+    inMap.erase(std::unique(inMap.begin(), inMap.end()), inMap.end());
+
+    ImGui::SetNextItemWidth(-1);
+    ImGui::InputTextWithHint("##matfilter",
+                             ICON_FA_MAGNIFYING_GLASS " search every material…",
+                             materialFilter_, sizeof(materialFilter_));
+    std::string needle = materialFilter_;
+    std::transform(needle.begin(), needle.end(), needle.begin(), ::tolower);
+
+    auto catIcon = [](const std::string& n) -> const char* {
+        if (n == "Concrete & stone")  return ICON_FA_CUBES_STACKED;
+        if (n == "Brick & tile")      return ICON_FA_BORDER_ALL;
+        if (n == "Metal")             return ICON_FA_GEARS;
+        if (n == "Wood")              return ICON_FA_TREE;
+        if (n == "Plaster & walls")   return ICON_FA_SQUARE;
+        if (n == "Glass & windows")   return ICON_FA_WINDOW_MAXIMIZE;
+        if (n == "Nature & ground")   return ICON_FA_MOUND;
+        if (n == "Liquids")           return ICON_FA_WATER;
+        if (n == "Skybox")            return ICON_FA_CLOUD;
+        if (n == "Lights & glows")    return ICON_FA_LIGHTBULB;
+        if (n == "Tool textures")     return ICON_FA_SCREWDRIVER_WRENCH;
+        if (n == "Dev & measure")     return ICON_FA_RULER_COMBINED;
+        if (n == "Signs & overlays")  return ICON_FA_SIGN_HANGING;
+        if (n == "Doors & trim")      return ICON_FA_DOOR_OPEN;
+        if (n == "Roof & exterior")   return ICON_FA_HOUSE;
+        if (n == "Model skins")       return ICON_FA_CUBE;
+        if (n == "Effects")           return ICON_FA_SPRAY_CAN;
+        if (n == "Prop textures")     return ICON_FA_BOXES_STACKED;
+        if (n == "Farm & sawmill")    return ICON_FA_TRACTOR;
+        if (n == "Desert & badlands") return ICON_FA_SUN;
+        if (n == "Spytech & sci-fi")  return ICON_FA_USER_SECRET;
+        return ICON_FA_IMAGE;
+    };
+
+    materialCat_ = std::clamp(materialCat_, 0, (int)materialCats_.size() + 2);
+    if (needle.empty() &&
+        ImGui::CollapsingHeader("Categories", ImGuiTreeNodeFlags_DefaultOpen)) {
+        const float listH =
+            dp(std::min(280.0f, 76.0f + materialCats_.size() * 19.0f));
+        if (ImGui::BeginChild("##matcats", ImVec2(0, listH), true)) {
+            auto row = [&](int id, const char* icon, const std::string& name,
+                           size_t n) {
+                char buf[96];
+                std::snprintf(buf, sizeof(buf), "%s  %s  (%zu)", icon, name.c_str(), n);
+                if (ImGui::Selectable(buf, materialCat_ == id)) materialCat_ = id;
+            };
+            row(0, ICON_FA_LAYER_GROUP, "All materials", materialList_.size());
+            row(1, ICON_FA_MAP_LOCATION_DOT, "In this map", inMap.size());
+            row(2, ICON_FA_CLOCK, "Recently used", recentMaterials_.size());
+            ImGui::Separator();
+            for (int c = 0; c < (int)materialCats_.size(); ++c)
+                row(c + 3, catIcon(materialCats_[c].first), materialCats_[c].first,
+                    materialCats_[c].second.size());
+        }
+        ImGui::EndChild();
+    }
+
+    std::vector<const std::string*> shown;
+    shown.reserve(256);
+    if (!needle.empty()) {
+        for (const auto& m : materialList_) {
+            std::string t = m;
+            std::transform(t.begin(), t.end(), t.begin(), ::tolower);
+            if (t.find(needle) == std::string::npos) continue;
+            shown.push_back(&m);
+            if (shown.size() >= 5000) break;
+        }
+    } else if (materialCat_ == 0) {
+        for (const auto& m : materialList_) shown.push_back(&m);
+    } else if (materialCat_ == 1) {
+        for (const auto& m : inMap) shown.push_back(&m);
+    } else if (materialCat_ == 2) {
+        for (const auto& m : recentMaterials_) shown.push_back(&m);
+    } else {
+        for (int idx : materialCats_[materialCat_ - 3].second)
+            shown.push_back(&materialList_[idx]);
+    }
+
+    const char* dst = (tool_ == Tool::Texture && !texFaces_.empty())
+                          ? "click a material to paint the selected face(s)"
+                          : "click a material for the block tool + new brushwork";
+    ImGui::TextDisabled("%zu materials  —  %s", shown.size(), dst);
+
+    const float cell = dp(84.0f);
+    const int cols =
+        std::max(1, (int)(ImGui::GetContentRegionAvail().x / (cell + dp(8.0f))));
+    if (ImGui::BeginChild("matgrid")) {
+        int budget = 4;  // decode at most a few VTFs per frame
+        ImGuiListClipper clip;
+        clip.Begin((int)((shown.size() + cols - 1) / cols), cell + dp(30.0f));
+        while (clip.Step()) {
+            for (int row = clip.DisplayStart; row < clip.DisplayEnd; ++row) {
+                for (int c = 0; c < cols; ++c) {
+                    const int i = row * cols + c;
+                    if (i >= (int)shown.size()) break;
+                    const std::string& name = *shown[i];
+                    ImGui::PushID(i);
+
+                    GLuint tex = 0;
+                    const bool cached = materials_.cached(name);
+                    if (cached || budget > 0) {
+                        const auto& info = materials_.get(name);
+                        tex = info.texture;
+                        if (!cached) --budget;
+                    }
+                    const bool on = blockMaterial_ == name;
+                    ImGui::BeginGroup();
+                    if (tex) {
+                        if (on)
+                            ImGui::PushStyleColor(ImGuiCol_Border, col::acc);
+                        ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, on ? 2.0f : 0.0f);
+                        if (ImGui::ImageButton("##m",
+                                               static_cast<ImTextureID>((intptr_t)tex),
+                                               ImVec2(cell, cell)))
+                            applyBrowserMaterial(name);
+                        ImGui::PopStyleVar();
+                        if (on) ImGui::PopStyleColor();
+                    } else {
+                        ImGui::PushStyleColor(ImGuiCol_Button, col::bg2);
+                        if (ImGui::Button(ICON_FA_IMAGE "##p", ImVec2(cell + 8, cell + 8)))
+                            applyBrowserMaterial(name);
+                        ImGui::PopStyleColor();
+                    }
+                    std::string label = name.substr(name.rfind('/') + 1);
+                    ImGui::PushTextWrapPos(ImGui::GetCursorPos().x + cell);
+                    ImGui::TextWrapped("%s", label.c_str());
+                    ImGui::PopTextWrapPos();
+                    ImGui::EndGroup();
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("%s", name.c_str());
+                    if ((i % cols) != cols - 1) ImGui::SameLine();
+                    ImGui::PopID();
+                }
+            }
+        }
+    }
+    ImGui::EndChild();
+}
+
+void Editor::drawModelBrowser() {
+    ImGui::Begin("Models");
+    drawModelGrid();
+    ImGui::End();
+}
+
+void Editor::drawModelGrid() {
+    using namespace pb::ui;
+    if (!sourceFs_.ready()) {
+        ImGui::TextDisabled("No game content mounted (install / locate TF2).");
+        return;
+    }
+    if (!modelListBuilt_) {
+        modelList_ = sourceFs_.listFiles("models/", ".mdl");
+        modelListBuilt_ = true;
+        PB_INFO("model browser: %zu models", modelList_.size());
+
+        // Bucket models into big, recognisable *theme* groups. Each rule maps a
+        // substring of the folder name to a theme; first match wins.
+        auto friendly = [](const std::string& segIn) -> std::string {
+            std::string s = segIn;
+            if (s.rfind("props_", 0) == 0) s = s.substr(6);
+            auto has = [&](const char* k) { return s.find(k) != std::string::npos; };
+            struct R { const char* key; const char* theme; };
+            static const R rules[] = {
+                {"snow", "Winter & alpine"}, {"alpine", "Winter & alpine"},
+                {"ice", "Winter & alpine"}, {"frost", "Winter & alpine"},
+                {"cold", "Winter & alpine"}, {"xmas", "Holiday & event"},
+                {"christmas", "Holiday & event"}, {"halloween", "Holiday & event"},
+                {"hallow", "Holiday & event"}, {"holiday", "Holiday & event"},
+                {"pumpkin", "Holiday & event"}, {"desert", "Desert & badlands"},
+                {"badlands", "Desert & badlands"}, {"dust", "Desert & badlands"},
+                {"hoodoo", "Desert & badlands"}, {"mesa", "Desert & badlands"},
+                {"egypt", "Desert & badlands"}, {"mvm", "Desert & badlands"},
+                {"farm", "Farm & sawmill"}, {"sawmill", "Farm & sawmill"},
+                {"lumber", "Farm & sawmill"}, {"granary", "Farm & sawmill"},
+                {"barn", "Farm & sawmill"}, {"swamp", "Swamp & jungle"},
+                {"island", "Swamp & jungle"}, {"jungle", "Swamp & jungle"},
+                {"tropic", "Swamp & jungle"}, {"medieval", "Medieval"},
+                {"castle", "Medieval"}, {"degroot", "Medieval"},
+                {"spytech", "Spytech & sci-fi"}, {"moonbase", "Spytech & sci-fi"},
+                {"space", "Spytech & sci-fi"}, {"nucleus", "Spytech & sci-fi"},
+                {"door", "Doors & gates"}, {"gate", "Doors & gates"},
+                {"light", "Lighting"}, {"lamp", "Lighting"},
+                {"furniture", "Furniture & interiors"},
+                {"interior", "Furniture & interiors"},
+                {"office", "Furniture & interiors"}, {"chair", "Furniture & interiors"},
+                {"desk", "Furniture & interiors"}, {"sign", "Signs & posters"},
+                {"poster", "Signs & posters"}, {"billboard", "Signs & posters"},
+                {"vehicle", "Vehicles"}, {"car", "Vehicles"}, {"truck", "Vehicles"},
+                {"train", "Vehicles"}, {"cart", "Vehicles"},
+                {"gameplay", "Gameplay markers"}, {"teamplay", "Gameplay markers"},
+                {"trigger", "Gameplay markers"}, {"junk", "Junk & debris"},
+                {"debris", "Junk & debris"}, {"trash", "Junk & debris"},
+                {"rubble", "Junk & debris"}, {"skybox", "Skybox / 3D-sky"},
+                {"nature", "Nature & rock"}, {"foliage", "Nature & rock"},
+                {"forest", "Nature & rock"}, {"rock", "Nature & rock"},
+                {"tree", "Nature & rock"}, {"cliff", "Nature & rock"},
+                {"plant", "Nature & rock"}, {"industrial", "Industrial & urban"},
+                {"pipe", "Industrial & urban"}, {"urban", "Industrial & urban"},
+                {"wasteland", "Industrial & urban"}, {"factory", "Industrial & urban"},
+                {"generic", "Industrial & urban"}, {"metal", "Industrial & urban"},
+                {"warehouse", "Industrial & urban"},
+                {"c17", "Half-Life 2"}, {"combine", "Half-Life 2"},
+                {"weapon", "Characters & items"}, {"item", "Characters & items"},
+                {"class", "Characters & items"}, {"buildable", "Characters & items"},
+                {"gib", "Characters & items"}, {"effect", "Effects & decals"},
+                {"decal", "Effects & decals"}, {"particle", "Effects & decals"},
+                {"2fort", "Map packs"}, {"well", "Map packs"}, {"gravel", "Map packs"},
+                {"hydro", "Map packs"}, {"manor", "Map packs"}, {"lakeside", "Map packs"},
+                {"frontline", "Map packs"}, {"mining", "Map packs"},
+            };
+            for (const auto& r : rules)
+                if (has(r.key)) return r.theme;
+            if (s.empty()) return "Other";
+            s[0] = (char)std::toupper((unsigned char)s[0]);
+            return s;
+        };
+        // The nth '/'-separated segment of a path (0-based), or "".
+        auto segAt = [](const std::string& m, int n) -> std::string {
+            size_t p = 0;
+            for (int k = 0; k < n; ++k) {
+                p = m.find('/', p);
+                if (p == std::string::npos) return "";
+                ++p;
+            }
+            const size_t e = m.find('/', p);
+            return e == std::string::npos ? m.substr(p) : m.substr(p, e - p);
+        };
+        std::map<std::string, std::vector<int>> cats;
+        for (int i = 0; i < (int)modelList_.size(); ++i) {
+            const std::string& m = modelList_[i];  // "models/<seg1>/<seg2>/..."
+            std::string seg = segAt(m, 1);
+            std::string label;
+            // Player cosmetics dominate the model set — give them their own
+            // bucket so the mapping-relevant categories stay usable.
+            if ((seg == "workshop" || seg == "workshop_partner") &&
+                segAt(m, 2) == "player") {
+                label = "Cosmetics (hats)";
+            } else if (seg == "workshop" || seg == "workshop_partner") {
+                // Otherwise bucket workshop packs by the pack name one deeper.
+                std::string deeper = segAt(m, 2);
+                label = friendly(deeper.empty() ? seg : deeper);
+            } else if (seg == "player" || seg == "bots") {
+                label = "Cosmetics (hats)";
+            } else {
+                label = friendly(seg.empty() ? "other" : seg);
+            }
+            cats[label].push_back(i);
+        }
+        // Fold tiny buckets (< 12 models) into a single "Other" so the list
+        // stays scannable.
+        std::vector<int> misc;
+        for (auto it2 = cats.begin(); it2 != cats.end();) {
+            if (it2->second.size() < 12 && it2->first != "Other") {
+                misc.insert(misc.end(), it2->second.begin(), it2->second.end());
+                it2 = cats.erase(it2);
+            } else {
+                ++it2;
+            }
+        }
+        if (!misc.empty()) {
+            auto& o = cats["Other"];
+            o.insert(o.end(), misc.begin(), misc.end());
+        }
+        modelCats_.assign(cats.begin(), cats.end());
+        std::sort(modelCats_.begin(), modelCats_.end(),
+                  [](const auto& x, const auto& y) {
+                      return x.second.size() > y.second.size();
+                  });
+    }
+
+    // Search spans every model; when it's empty the category list drives the grid.
+    ImGui::SetNextItemWidth(-1);
+    ImGui::InputTextWithHint("##mdlfilter",
+                             ICON_FA_MAGNIFYING_GLASS " search all models…",
+                             modelFilter_, sizeof(modelFilter_));
+    std::string needlePre = modelFilter_;
+
+    // A themed icon per category name.
+    auto catIcon = [](const std::string& n) -> const char* {
+        if (n == "Winter & alpine")        return ICON_FA_SNOWFLAKE;
+        if (n == "Holiday & event")        return ICON_FA_GHOST;
+        if (n == "Desert & badlands")      return ICON_FA_SUN;
+        if (n == "Farm & sawmill")         return ICON_FA_TRACTOR;
+        if (n == "Swamp & jungle")         return ICON_FA_FROG;
+        if (n == "Medieval")               return ICON_FA_CHESS_ROOK;
+        if (n == "Spytech & sci-fi")       return ICON_FA_USER_SECRET;
+        if (n == "Doors & gates")          return ICON_FA_DOOR_OPEN;
+        if (n == "Lighting")               return ICON_FA_LIGHTBULB;
+        if (n == "Furniture & interiors")  return ICON_FA_COUCH;
+        if (n == "Signs & posters")        return ICON_FA_SIGN_HANGING;
+        if (n == "Vehicles")               return ICON_FA_TRUCK;
+        if (n == "Gameplay markers")       return ICON_FA_FLAG;
+        if (n == "Junk & debris")          return ICON_FA_TRASH_CAN;
+        if (n == "Skybox / 3D-sky")        return ICON_FA_CLOUD;
+        if (n == "Nature & rock")          return ICON_FA_TREE;
+        if (n == "Industrial & urban")     return ICON_FA_GEARS;
+        if (n == "Half-Life 2")            return ICON_FA_CITY;
+        if (n == "Characters & items")     return ICON_FA_PERSON;
+        if (n == "Effects & decals")       return ICON_FA_SPRAY_CAN;
+        if (n == "Cosmetics (hats)")       return ICON_FA_HAT_WIZARD;
+        if (n == "Map packs")              return ICON_FA_MAP;
+        return ICON_FA_CUBES;
+    };
+
+    // Collapsible category list (always-visible, scrollable). Row 0 = all,
+    // row 1 = recently used, then one row per theme group.
+    modelCat_ = std::clamp(modelCat_, 0, (int)modelCats_.size() + 1);
+    if (needlePre.empty() &&
+        ImGui::CollapsingHeader("Categories", ImGuiTreeNodeFlags_DefaultOpen)) {
+        const float listH = pb::ui::dp(std::min(260.0f,
+                                     56.0f + modelCats_.size() * 19.0f));
+        if (ImGui::BeginChild("##mdlcats", ImVec2(0, listH), true)) {
+            auto row = [&](int id, const char* icon, const std::string& name,
+                           size_t n) {
+                char buf[96];
+                std::snprintf(buf, sizeof(buf), "%s  %s  (%zu)", icon,
+                              name.c_str(), n);
+                if (ImGui::Selectable(buf, modelCat_ == id)) modelCat_ = id;
+            };
+            row(0, ICON_FA_LAYER_GROUP, "All models", modelList_.size());
+            row(1, ICON_FA_CLOCK, "Recently used", recentModels_.size());
+            ImGui::Separator();
+            for (int c = 0; c < (int)modelCats_.size(); ++c)
+                row(c + 2, catIcon(modelCats_[c].first), modelCats_[c].first,
+                    modelCats_[c].second.size());
+        }
+        ImGui::EndChild();
+    }
+    std::string needle = modelFilter_;
+    std::transform(needle.begin(), needle.end(), needle.begin(), ::tolower);
+
+    std::vector<const std::string*> shown;
+    shown.reserve(256);
+    if (!needle.empty()) {
+        for (const auto& m : modelList_) {
+            if (m.find(needle) == std::string::npos) continue;
+            shown.push_back(&m);
+            if (shown.size() >= 4000) break;
+        }
+    } else if (modelCat_ == 1) {
+        for (const auto& p : recentModels_) shown.push_back(&p);
+    } else if (modelCat_ == 0) {
+        for (const auto& m : modelList_) shown.push_back(&m);
+    } else {
+        for (int idx : modelCats_[modelCat_ - 2].second)
+            shown.push_back(&modelList_[idx]);
+    }
+    ImGui::TextDisabled("%zu models   —   click one, or drag it into a viewport",
+                        shown.size());
+    if (!placing_.empty() && placing_.rfind("@model:", 0) == 0) {
+        ImGui::SameLine();
+        if (ImGui::SmallButton("cancel")) placing_.clear();
+    }
+
+    const float cell = dp(84.0f);
+    const int cols = std::max(1, (int)(ImGui::GetContentRegionAvail().x / (cell + dp(8.0f))));
+    if (ImGui::BeginChild("mdlgrid")) {
+        int budget = 3;  // resolve at most a few MDLs per frame to stay smooth
+        ImGuiListClipper clip;
+        clip.Begin((int)((shown.size() + cols - 1) / cols), cell + dp(30.0f));
+        while (clip.Step()) {
+            for (int row = clip.DisplayStart; row < clip.DisplayEnd; ++row) {
+                for (int cIdx = 0; cIdx < cols; ++cIdx) {
+                    const int i = row * cols + cIdx;
+                    if (i >= (int)shown.size()) break;
+                    const std::string& path = *shown[i];
+                    ImGui::PushID(i);
+
+                    // Icon = a real rendered 3/4-view of the model, cached;
+                    // rendered a few per frame so scrolling stays smooth.
+                    GLuint tex = 0;
+                    if (modelThumbs_.has(path)) {
+                        tex = modelThumbs_.get(path, model::loadStudioModel(sourceFs_, path),
+                                               materials_);
+                    } else if (budget > 0) {
+                        tex = modelThumbs_.get(
+                            path, model::loadStudioModel(sourceFs_, path), materials_);
+                        --budget;
+                    }
+
+                    const bool on = placing_ == "@model:" + path;
+                    std::string label = path.substr(path.rfind('/') + 1);
+                    if (label.size() > 4) label.resize(label.size() - 4);  // .mdl
+
+                    ImGui::BeginGroup();
+                    if (tex)
+                        ImGui::ImageButton("##b", static_cast<ImTextureID>((intptr_t)tex),
+                                           ImVec2(cell, cell));
+                    else {
+                        ImGui::PushStyleColor(ImGuiCol_Button, col::bg2);
+                        ImGui::Button(ICON_FA_CUBE "##t", ImVec2(cell + 8, cell + 8));
+                        ImGui::PopStyleColor();
+                    }
+                    const bool cardHit =
+                        ImGui::IsItemDeactivated() &&
+                        !ImGui::IsMouseDragPastThreshold(ImGuiMouseButton_Left, 6.0f);
+                    if (ImGui::IsItemActive() &&
+                        ImGui::IsMouseDragPastThreshold(ImGuiMouseButton_Left, 6.0f)) {
+                        dragPlace_ = "@model:" + path;
+                        ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+                        ImGui::SetTooltip("%s   — drop on a viewport", label.c_str());
+                    }
+                    if (on)
+                        ImGui::GetWindowDrawList()->AddRect(
+                            ImGui::GetItemRectMin(), ImGui::GetItemRectMax(),
+                            u32(col::acc), 3.0f, 0, 2.0f);
+                    ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + cell);
+                    ImGui::TextWrapped("%s", label.c_str());
+                    ImGui::PopTextWrapPos();
+                    ImGui::EndGroup();
+                    if (cardHit) {
+                        placing_ = "@model:" + path;
+                        status_ = "Placing prop  " + label +
+                                  "  — click a viewport (or drag me there)";
+                    }
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("%s\ndrag into a viewport, or click then "
+                                          "click the grid",
+                                          path.c_str());
+                    if (cIdx + 1 < cols) ImGui::SameLine();
+                    ImGui::PopID();
+                }
+            }
+        }
+    }
+    ImGui::EndChild();
+}
+
+void Editor::drawMaterialList() {
+    ImGui::Begin("Materials");
+    if (!hasMap()) {
+        ImGui::TextDisabled("No map loaded.");
+        ImGui::End();
+        return;
+    }
+    ImGui::InputTextWithHint("##matfilter", "filter", materialFilter_,
+                             sizeof(materialFilter_));
+    std::string needle = materialFilter_;
+    std::transform(needle.begin(), needle.end(), needle.begin(), ::tolower);
+    ImGui::Separator();
+    ImGui::Text("%zu materials in view", mesh_.batches.size());
+    if (ImGui::BeginChild("matlist")) {
+        for (const auto& b : mesh_.batches) {
+            if (!needle.empty()) {
+                std::string t = b.material;
+                std::transform(t.begin(), t.end(), t.begin(), ::tolower);
+                if (t.find(needle) == std::string::npos) continue;
+            }
+            ImGui::Selectable(b.material.empty() ? "(unnamed)" : b.material.c_str());
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("%u triangles%s", b.indexCount / 3,
+                                  b.translucent ? "  (translucent)" : "");
+        }
+    }
+    ImGui::EndChild();
+    ImGui::End();
+}
+
+void Editor::drawEntityCatalog() {
+    using namespace pb::ui;
+    ImGui::Begin("Entities");
+
+    if (fgd_.empty()) {
+        ImGui::TextDisabled("No FGD loaded — entity catalogue unavailable.");
+        ImGui::End();
+        return;
+    }
+
+    ImGui::SetNextItemWidth(-1);
+    ImGui::InputTextWithHint("##entfilter", ICON_FA_MAGNIFYING_GLASS " search entities",
+                             materialFilter_, sizeof(materialFilter_));
+    const std::string filt = materialFilter_;
+    auto icontains = [](const std::string& h, const std::string& n) {
+        if (n.empty()) return true;
+        auto it = std::search(h.begin(), h.end(), n.begin(), n.end(),
+                              [](char a, char b) {
+                                  return std::tolower(a) == std::tolower(b);
+                              });
+        return it != h.end();
+    };
+
+    if (!placing_.empty() && placing_.rfind("@ent:", 0) == 0) {
+        ImGui::PushStyleColor(ImGuiCol_Text, col::acc);
+        ImGui::Text(ICON_FA_ARROW_POINTER "  Placing %s — click a viewport",
+                    placing_.c_str() + 5);
+        ImGui::PopStyleColor();
+        if (ImGui::SmallButton("Cancel##ent")) placing_.clear();
+        ImGui::Separator();
+    }
+
+    const bool haveBrushSel =
+        !selection_.empty() &&
+        std::all_of(selection_.begin(), selection_.end(),
+                    [](const map::SolidRef& r) { return r.entity < 0; });
+
+    auto row = [&](const std::string& cls, bool solid) {
+        const fgd::EntityClass* ec = fgd_.find(cls);
+        if (!filt.empty() && !icontains(cls, filt) &&
+            !(ec && icontains(ec->description, filt)))
+            return;
+        ImGui::PushID(cls.c_str());
+        const bool sel = placing_ == "@ent:" + cls;
+        if (ImGui::Selectable("##r", sel, 0, ImVec2(0, 30))) {
+            if (solid && haveBrushSel) {
+                tieSelectionToEntity(cls);
+                placing_.clear();
+            } else {
+                placing_ = "@ent:" + cls;
+                status_ = "Placing " + cls + " — click a viewport, or drag me there.";
+            }
+        }
+        if (!solid && ImGui::IsItemActive() &&
+            ImGui::IsMouseDragPastThreshold(ImGuiMouseButton_Left, 6.0f)) {
+            dragPlace_ = "@ent:" + cls;
+            ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+            ImGui::SetTooltip("%s   — drop on a viewport", cls.c_str());
+        }
+        ImGui::SameLine(6);
+        if (ec && ec->hasColor) {
+            ImGui::ColorButton(
+                "##c",
+                ImVec4(ec->color.r, ec->color.g, ec->color.b, 1.0f),
+                ImGuiColorEditFlags_NoTooltip | ImGuiColorEditFlags_NoBorder,
+                ImVec2(12, 12));
+            ImGui::SameLine(0, 6);
+        } else {
+            ImGui::PushStyleColor(ImGuiCol_Text, col::faint);
+            ImGui::TextUnformatted(solid ? ICON_FA_CUBE : ICON_FA_LIGHTBULB);
+            ImGui::PopStyleColor();
+            ImGui::SameLine(0, 6);
+        }
+        ImGui::TextUnformatted(cls.c_str());
+        if (ec && !ec->description.empty()) {
+            ImGui::SameLine(0, 8);
+            ImGui::PushStyleColor(ImGuiCol_Text, col::faint);
+            ImGui::TextUnformatted(ec->description.c_str());
+            ImGui::PopStyleColor();
+        }
+        ImGui::PopID();
+    };
+
+    if (haveBrushSel) {
+        ImGui::PushStyleColor(ImGuiCol_Text, col::faint);
+        ImGui::TextWrapped("%zu brush(es) selected — pick a brush entity to tie "
+                           "them to it.", selection_.size());
+        ImGui::PopStyleColor();
+    }
+
+    if (ImGui::BeginChild("entlist", ImVec2(0, 0))) {
+        if (ImGui::CollapsingHeader("Point entities", ImGuiTreeNodeFlags_DefaultOpen)) {
+            for (const auto& c : fgd_.pointClasses()) row(c, false);
+        }
+        if (ImGui::CollapsingHeader("Brush entities", ImGuiTreeNodeFlags_DefaultOpen)) {
+            for (const auto& c : fgd_.solidClasses()) row(c, true);
+        }
+    }
+    ImGui::EndChild();
+    ImGui::End();
+}
+
+void Editor::drawStatusBar() {
+    ImGuiViewport* vp = ImGui::GetMainViewport();
+    const float h = ImGui::GetFrameHeight();
+    ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x, vp->WorkPos.y + vp->WorkSize.y - h));
+    ImGui::SetNextWindowSize(ImVec2(vp->WorkSize.x, h));
+    ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoDocking |
+                             ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoMove |
+                             ImGuiWindowFlags_NoSavedSettings;
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, pb::ui::col::bg1);
+    if (ImGui::Begin("##status", nullptr, flags)) {
+        const Camera& c3d = views_[0].camera;
+        ImGui::PushStyleColor(ImGuiCol_Text, pb::ui::col::acc);
+        ImGui::TextUnformatted(mode_ == Mode::Guided     ? "Guided"
+                               : mode_ == Mode::Standard ? "Standard"
+                                                         : "Full");
+        ImGui::PopStyleColor();
+        ImGui::SameLine(0, 14);
+        ImGui::Text("%s", status_.c_str());
+        ImGui::SameLine(0, 18);
+        if (pb::ui::fontMono) ImGui::PushFont(pb::ui::fontMono);
+        ImGui::TextDisabled("cam %.0f %.0f %.0f  yaw %.0f  pitch %.0f", c3d.pos.x,
+                            c3d.pos.y, c3d.pos.z, c3d.yawDeg, c3d.pitchDeg);
+        if (hasMap()) {
+            ImGui::SameLine(0, 18);
+            ImGui::TextDisabled("%zu tris", mesh_.indices.size() / 3);
+        }
+        if (pb::ui::fontMono) ImGui::PopFont();
+    }
+    ImGui::End();
+    ImGui::PopStyleColor();
+    ImGui::PopStyleVar();
+}
+
+// ---------------------------------------------------------------------------
+// Quality-of-life: history panel, map check, command palette, autosave
+// ---------------------------------------------------------------------------
+void Editor::drawHistoryPanel() {
+    ImGui::Begin("History");
+    if (!hasDoc()) {
+        ImGui::TextDisabled("Start a map — every change shows up here.");
+        ImGui::End();
+        return;
+    }
+    const size_t n = history_.count(), cur = history_.current();
+    if (ImGui::Button(ICON_FA_ROTATE_LEFT "  Undo", ImVec2(-1, 0)) &&
+        history_.canUndo())
+        undo();
+    if (ImGui::Button(ICON_FA_ROTATE_RIGHT "  Redo", ImVec2(-1, 0)) &&
+        history_.canRedo())
+        redo();
+    ImGui::PushStyleColor(ImGuiCol_Text, pb::ui::col::faint);
+    ImGui::TextWrapped("Click a step to jump back or forward. (Ctrl+Z / Ctrl+Y)");
+    ImGui::PopStyleColor();
+    ImGui::Separator();
+
+    if (ImGui::BeginChild("hist")) {
+        for (size_t i = 0; i < n; ++i) {
+            const bool isCur = i == cur;
+            const bool future = i > cur;  // steps you've undone past
+            ImGui::PushID((int)i);
+            std::string lbl = history_.labelAt(i);
+            if (i == 0) lbl = "New map";
+            char row[176];
+            std::snprintf(row, sizeof(row), "  %s%s",
+                          isCur ? ICON_FA_LOCATION_CROSSHAIRS "  " : "     ",
+                          lbl.c_str());
+            if (future) ImGui::PushStyleColor(ImGuiCol_Text, pb::ui::col::dim);
+            if (ImGui::Selectable(row, isCur) && !isCur) {
+                history_.jumpTo(doc_, i);
+                clearSelection();
+                buildAndUpload(meshOpts_);
+                status_ = "Jumped to: " + lbl;
+            }
+            if (future) ImGui::PopStyleColor();
+            if (isCur) ImGui::SetScrollHereY(0.7f);
+            ImGui::PopID();
+        }
+    }
+    ImGui::EndChild();
+    ImGui::End();
+}
+
+void Editor::runMapCheck() {
+    mapCheck_.clear();
+    mapCheckRan_ = true;
+    if (!hasDoc()) return;
+    auto add = [&](int sev, std::string m, int ent = -2, int sol = -1,
+                   glm::vec3 p = glm::vec3(0)) {
+        mapCheck_.push_back({std::move(m), sev, ent, sol, p});
+    };
+
+    int spawns = 0, lights = 0, objectives = 0, invalid = 0;
+    int cubemaps = 0, respawnRooms = 0, redSpawns = 0, bluSpawns = 0;
+    bool skyBrush = false;
+    glm::vec3 dmn(1e9f), dmx(-1e9f);
+    for (int i = 0; i < (int)doc_.worldSolids().size(); ++i) {
+        const auto& s = doc_.worldSolids()[i];
+        if (!s.valid) { ++invalid; add(2, "Invalid world brush (not convex / <4 planes)", -1, i, s.center()); }
+        for (const auto& f : s.faces)
+            if (f.material == "tools/toolsskybox" ||
+                f.material == "tools/toolsskybox2d")
+                skyBrush = true;
+        dmn = glm::min(dmn, s.boundsMin);
+        dmx = glm::max(dmx, s.boundsMax);
+        const glm::vec3 sz = s.boundsMax - s.boundsMin;
+        if (std::max({sz.x, sz.y, sz.z}) > 16384.0f)
+            add(1, "Very large brush (>16384u) — check it's intentional", -1, i, s.center());
+    }
+    // Collect targetnames for dangling-I/O detection.
+    std::vector<std::string> names;
+    for (const auto& e : doc_.entities()) {
+        const std::string tn = e.kv.get("targetname");
+        if (!tn.empty()) names.push_back(tn);
+    }
+    for (int i = 0; i < (int)doc_.entities().size(); ++i) {
+        const auto& e = doc_.entities()[i];
+        const std::string& c = e.classname;
+        if (c == "info_player_teamspawn" || c == "info_player_start") {
+            ++spawns;
+            const std::string tn = e.kv.get("TeamNum");
+            if (tn == "2") ++redSpawns;
+            else if (tn == "3") ++bluSpawns;
+        }
+        if (c.rfind("light", 0) == 0) ++lights;
+        if (c == "env_cubemap") ++cubemaps;
+        if (c == "func_respawnroom") ++respawnRooms;
+        if (c == "team_control_point" || c == "trigger_capture_area" ||
+            c == "func_capturezone" || c.rfind("func_tracktrain", 0) == 0)
+            ++objectives;
+        // Displacements only compile on world brushes.
+        for (const auto& s : e.solids)
+            for (const auto& f : s.faces)
+                if (f.hasDisp) {
+                    add(2, c + " has a displacement face — vbsp only allows those "
+                              "on world brushes; untie it first", i, -1, e.origin);
+                    break;
+                }
+        for (const auto& conn : e.connections) {
+            std::string tgt = conn.second.substr(0, conn.second.find_first_of(",\x1b"));
+            if (tgt.empty() || tgt == "!activator" || tgt == "!self" ||
+                tgt == "!player")
+                continue;
+            if (std::find(names.begin(), names.end(), tgt) == names.end())
+                add(2,
+                    c + " fires \"" + conn.first + "\" at missing target \"" + tgt +
+                        "\"",
+                    i, -1, e.origin);
+        }
+        // Missing model/material references are resolved lazily; flag obvious ones.
+        const std::string mdl = e.kv.get("model");
+        if (!mdl.empty() && mdl[0] != '*' && mdl.find(".mdl") == std::string::npos &&
+            mdl.find(".vmf") == std::string::npos)
+            add(1, c + " model \"" + mdl + "\" has no .mdl extension", i, -1, e.origin);
+    }
+
+    if (spawns < 1) add(2, "No player spawns (info_player_teamspawn)");
+    else if (spawns < 2) add(1, "Only one spawn point — add a few per team");
+    if (spawns >= 1 && (redSpawns == 0 || bluSpawns == 0))
+        add(1, "Spawns are all one team (set TeamNum 2 = RED, 3 = BLU)");
+    if (spawns >= 1 && respawnRooms < 1)
+        add(1, "Spawns but no func_respawnroom — no spawn protection or "
+               "resupply trigger");
+    if (lights < 1) add(1, "No lights — the map will be fullbright");
+    if (cubemaps < 1)
+        add(1, "No env_cubemap — reflective surfaces render black until "
+               "buildcubemaps is run");
+    if (objectives < 1) add(1, "No objective entity (control point / cap zone / cart)");
+    if (doc_.worldExtra().get("skyname").empty())
+        add(2, "worldspawn has no skyname — the map won't seal");
+    else if (!skyBrush)
+        add(2, "skyname is set but no tools/toolsskybox brush — the sky won't "
+               "seal the map");
+    if (doc_.worldSolids().empty())
+        add(2, "No world brushwork at all");
+
+    if (mapCheck_.empty()) add(0, "No problems found. Nice.");
+    // errors first, then warnings, then info
+    std::stable_sort(mapCheck_.begin(), mapCheck_.end(),
+                     [](const CheckHit& a, const CheckHit& b) {
+                         return a.severity > b.severity;
+                     });
+}
+
+void Editor::drawMapCheckPanel() {
+    ImGui::Begin("Map Check");
+
+    // Leak trace (from the last compile, or loaded by hand).
+    if (!leakLine_.empty()) {
+        ImGui::PushStyleColor(ImGuiCol_Text, pb::ui::col::warn);
+        ImGui::TextUnformatted(ICON_FA_CIRCLE_EXCLAMATION
+                               "  Leak — the map isn't sealed");
+        ImGui::PopStyleColor();
+        ImGui::TextDisabled("Trace: %zu points from the leaked entity to the void.",
+                            leakLine_.size());
+        if (ImGui::Button(ICON_FA_MAGNIFYING_GLASS "  Frame the leak", ImVec2(-1, 0)))
+            frameLeak();
+        if (ImGui::Button("Load a .lin / .pts pointfile…", ImVec2(-1, 0))) {
+            std::string p = openFileDialog(
+                "Load leak pointfile", "Pointfile\0*.lin;*.pts\0All files\0*.*\0");
+            if (!p.empty()) loadPointfile(p);
+        }
+        if (ImGui::Button("Clear leak trace", ImVec2(-1, 0))) leakLine_.clear();
+        ImGui::Separator();
+    } else if (hasDoc()) {
+        if (ImGui::SmallButton("Load leak pointfile…")) {
+            std::string p = openFileDialog(
+                "Load leak pointfile", "Pointfile\0*.lin;*.pts\0All files\0*.*\0");
+            if (!p.empty()) loadPointfile(p);
+        }
+    }
+
+    if (ImGui::Button(ICON_FA_STETHOSCOPE "  Run check", ImVec2(-1, 0))) runMapCheck();
+    if (!mapCheckRan_) {
+        ImGui::TextDisabled("Checks spawns, lights, skybox, invalid brushes, "
+                            "dangling I/O targets, oversized geometry.");
+        ImGui::End();
+        return;
+    }
+    int err = 0, warn = 0;
+    for (const auto& h : mapCheck_) {
+        if (h.severity == 2) ++err;
+        else if (h.severity == 1) ++warn;
+    }
+    ImGui::Text("%d error%s, %d warning%s", err, err == 1 ? "" : "s", warn,
+                warn == 1 ? "" : "s");
+    ImGui::Separator();
+    if (ImGui::BeginChild("mc")) {
+        for (size_t i = 0; i < mapCheck_.size(); ++i) {
+            const auto& h = mapCheck_[i];
+            const ImVec4 c = h.severity == 2   ? pb::ui::col::warn
+                             : h.severity == 1 ? pb::ui::col::acc
+                                               : pb::ui::col::good;
+            const char* ic = h.severity == 2   ? ICON_FA_CIRCLE_EXCLAMATION
+                             : h.severity == 1 ? ICON_FA_TRIANGLE_EXCLAMATION
+                                               : ICON_FA_CIRCLE_CHECK;
+            ImGui::PushID((int)i);
+            ImGui::PushStyleColor(ImGuiCol_Text, c);
+            ImGui::TextUnformatted(ic);
+            ImGui::PopStyleColor();
+            ImGui::SameLine();
+            const bool clickable = h.entity != -2;
+            if (ImGui::Selectable(h.msg.c_str(), false,
+                                  clickable ? 0 : ImGuiSelectableFlags_Disabled) &&
+                clickable) {
+                if (h.entity >= 0) {
+                    selectedEntity_ = h.entity;
+                    selection_.clear();
+                } else if (h.solid >= 0) {
+                    selection_ = {{-1, h.solid}};
+                    selectedEntity_ = -1;
+                }
+                rebuildSelectionWire();
+                for (auto& v : views_) {
+                    if (v.kind == ViewKind::Perspective)
+                        v.camera.pos = h.pos - v.camera.forward() * 400.0f;
+                    else
+                        v.camera.orthoCenter = h.pos;
+                }
+            }
+            ImGui::PopID();
+        }
+    }
+    ImGui::EndChild();
+    ImGui::End();
+}
+
+void Editor::drawCommandPalette() {
+    if (!showPalette_) return;
+    ImGuiViewport* vp = ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos(ImVec2(vp->GetCenter().x, vp->WorkPos.y + vp->WorkSize.y * 0.18f),
+                            ImGuiCond_Always, ImVec2(0.5f, 0.0f));
+    ImGui::SetNextWindowSize(ImVec2(std::min(560.0f * pb::ui::g_scale, vp->WorkSize.x * 0.8f), 0));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12, 12));
+    if (ImGui::Begin("##palette", &showPalette_,
+                     ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+                         ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoSavedSettings)) {
+        struct Cmd { const char* name; std::function<void()> run; };
+        std::vector<Cmd> cmds = {
+            {"Save map", [&] { saveMap(false); }},
+            {"Save map as…", [&] { saveMap(true); }},
+            {"Build & play", [&] { showCompile_ = true; if (hasDoc()) startCompile(); }},
+            {"Run map check", [&] { runMapCheck(); }},
+            {"Frame map (F)", [&] { if (hasMap()) frameAllViews(); }},
+            {"Undo", [&] { undo(); }},
+            {"Redo", [&] { redo(); }},
+            {"Tool: Select", [&] { tool_ = Tool::Select; }},
+            {"Tool: Block", [&] { tool_ = Tool::Block; }},
+            {"Tool: Vertex/Edge/Face", [&] { tool_ = Tool::Vertex; }},
+            {"Tool: Clip", [&] { tool_ = Tool::Clip; }},
+            {"Tool: Texture", [&] { tool_ = Tool::Texture; }},
+            {"Dial: Guided", [&] { mode_ = Mode::Guided; layoutDirty_ = true; }},
+            {"Dial: Standard", [&] { mode_ = Mode::Standard; layoutDirty_ = true; }},
+            {"Dial: Full (Pro)", [&] { mode_ = Mode::Full; layoutDirty_ = true; }},
+            {"Reset window layout", [&] { layoutDirty_ = true; }},
+            {"Open map…", [&] { promptOpenMap(); }},
+            {"Import 3D model…", [&] { openModelImport(); }},
+            {"Publish to Steam Workshop", [&] { showWorkshop_ = true; }},
+        };
+        // Entity classes are matched straight from fgd_ below (not copied into
+        // `cmds`) so the palette stays cheap.
+
+        ImGui::PushItemWidth(-1);
+        if (ImGui::IsWindowAppearing()) ImGui::SetKeyboardFocusHere();
+        ImGui::InputTextWithHint("##q", ICON_FA_MAGNIFYING_GLASS "  Type a command or entity…",
+                                 paletteQuery_, sizeof(paletteQuery_));
+        ImGui::PopItemWidth();
+        const std::string q = paletteQuery_;
+        auto icontains = [](const std::string& h, const std::string& n) {
+            if (n.empty()) return true;
+            auto it = std::search(h.begin(), h.end(), n.begin(), n.end(),
+                                  [](char a, char b) {
+                                      return std::tolower(a) == std::tolower(b);
+                                  });
+            return it != h.end();
+        };
+
+        struct Row { std::string label; int kind; int idx; };  // kind 0 cmd, 1 entity
+        std::vector<Row> rows;
+        for (int i = 0; i < (int)cmds.size(); ++i)
+            if (cmds[i].name && icontains(cmds[i].name, q))
+                rows.push_back({cmds[i].name, 0, i});
+        if (q.size() >= 2)
+            for (int i = 0; i < (int)fgd_.pointClasses().size(); ++i)
+                if (icontains(fgd_.pointClasses()[i], q)) {
+                    rows.push_back({"Place entity:  " + fgd_.pointClasses()[i], 1, i});
+                    if (rows.size() > 60) break;
+                }
+
+        if (paletteSel_ >= (int)rows.size()) paletteSel_ = (int)rows.size() - 1;
+        if (paletteSel_ < 0) paletteSel_ = 0;
+        if (ImGui::IsKeyPressed(ImGuiKey_DownArrow)) ++paletteSel_;
+        if (ImGui::IsKeyPressed(ImGuiKey_UpArrow)) --paletteSel_;
+        paletteSel_ = std::clamp(paletteSel_, 0, std::max(0, (int)rows.size() - 1));
+
+        const bool go = ImGui::IsKeyPressed(ImGuiKey_Enter) ||
+                        ImGui::IsKeyPressed(ImGuiKey_KeypadEnter);
+        ImGui::BeginChild("rows", ImVec2(0, 260));
+        for (int i = 0; i < (int)rows.size(); ++i) {
+            const bool sel = i == paletteSel_;
+            if (ImGui::Selectable(rows[i].label.c_str(), sel) || (go && sel)) {
+                if (rows[i].kind == 0) {
+                    cmds[rows[i].idx].run();
+                } else {
+                    placing_ = "@ent:" + fgd_.pointClasses()[rows[i].idx];
+                    status_ = "Click in a viewport to place " +
+                              fgd_.pointClasses()[rows[i].idx];
+                }
+                showPalette_ = false;
+                paletteQuery_[0] = 0;
+                paletteSel_ = 0;
+            }
+        }
+        ImGui::EndChild();
+        if (ImGui::IsKeyPressed(ImGuiKey_Escape)) showPalette_ = false;
+    }
+    ImGui::End();
+    ImGui::PopStyleVar();
+}
+
+void Editor::writeBackup(const std::string& vmfPath) {
+    std::error_code ec;
+    if (!fs::exists(vmfPath, ec)) return;
+    const fs::path p(vmfPath);
+    auto bak = [&](int n) { return p.string() + ".bak" + std::to_string(n); };
+    fs::remove(bak(3), ec);
+    for (int n = 2; n >= 1; --n)
+        if (fs::exists(bak(n), ec))
+            fs::rename(bak(n), bak(n + 1), ec);
+    fs::copy_file(vmfPath, bak(1), fs::copy_options::overwrite_existing, ec);
+}
+
+void Editor::drawLogPanel() {
+    ImGui::Begin("Log");
+    ImGui::Checkbox("follow", &logAutoScroll_);
+    ImGui::SameLine();
+    if (ImGui::SmallButton("copy all")) {
+        std::string all;
+        for (const auto& l : logTail(2000)) all += l.text + "\n";
+        ImGui::SetClipboardText(all.c_str());
+    }
+    ImGui::Separator();
+    if (pb::ui::fontMono) ImGui::PushFont(pb::ui::fontMono);
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, pb::ui::col::bg0);
+    if (ImGui::BeginChild("##log", ImVec2(0, 0), ImGuiChildFlags_Borders)) {
+        const auto lines = logTail(800);
+        ImGuiListClipper clip;
+        clip.Begin((int)lines.size());
+        while (clip.Step())
+            for (int i = clip.DisplayStart; i < clip.DisplayEnd; ++i) {
+                const auto& l = lines[i];
+                const ImVec4 c = l.level == LogLevel::Error ? pb::ui::col::warn
+                                 : l.level == LogLevel::Warn ? pb::ui::col::acc
+                                                             : pb::ui::col::dim;
+                ImGui::PushStyleColor(ImGuiCol_Text, c);
+                ImGui::TextUnformatted(l.text.c_str());
+                ImGui::PopStyleColor();
+            }
+        const size_t seq = logSeq();
+        if (logAutoScroll_ && seq != logSeen_) {
+            ImGui::SetScrollHereY(1.0f);
+            logSeen_ = seq;
+        }
+    }
+    ImGui::EndChild();
+    ImGui::PopStyleColor();
+    if (pb::ui::fontMono) ImGui::PopFont();
+    ImGui::End();
+}
+
+void Editor::saveProject(bool forceDialog) {
+    if (!hasDoc()) { status_ = "Open a map before saving a project."; return; }
+    if (doc_.path().empty() && !saveMap(false)) return;  // project references the vmf
+
+    std::string out = projectPath_;
+    if (out.empty() || forceDialog) {
+        out = saveFileDialog("Save project", "Pootis project\0*.pbproj\0",
+                             doc_.name().c_str(), "pbproj",
+                             out.empty() ? nullptr : out.c_str());
+        if (out.empty()) return;
+    }
+    projectPath_ = out;
+
+    map::KvNode root;
+    root.name = "#root";
+    map::KvNode pj;
+    pj.name = "pbproj";
+    pj.set("version", "1");
+    pj.set("vmf", doc_.path());
+    pj.set("grid", std::to_string(gridSize_));
+    pj.set("cordon", cordonOn_ ? "1" : "0");
+    char b[96];
+    std::snprintf(b, sizeof(b), "%g %g %g", cordonMin_.x, cordonMin_.y, cordonMin_.z);
+    pj.set("cordon_min", b);
+    std::snprintf(b, sizeof(b), "%g %g %g", cordonMax_.x, cordonMax_.y, cordonMax_.z);
+    pj.set("cordon_max", b);
+    pj.set("compile_profile", std::to_string(compileProfile_));
+    pj.set("compile_pack", compilePack_ ? "1" : "0");
+    for (int i = 0; i < 6; ++i) {
+        if (!camMarks_[i].set) continue;
+        std::snprintf(b, sizeof(b), "%g %g %g %g %g", camMarks_[i].pos.x,
+                      camMarks_[i].pos.y, camMarks_[i].pos.z, camMarks_[i].yaw,
+                      camMarks_[i].pitch);
+        pj.set("cam" + std::to_string(i), b);
+    }
+    for (const auto& pf : packFiles_) pj.set("pack", pf);
+    root.children.push_back(std::move(pj));
+
+    const std::string text = map::writeKv(root);
+    FILE* f = std::fopen(out.c_str(), "wb");
+    if (!f) { status_ = "Could not write " + out; return; }
+    std::fwrite(text.data(), 1, text.size(), f);
+    std::fclose(f);
+    status_ = "Saved project  " + fs::path(out).filename().string();
+    prefs_.pushRecent(out);
+    prefs_.save();
+}
+
+void Editor::openProject(const std::string& path) {
+    const std::string text = readTextFile(path);
+    if (text.empty()) { status_ = "Cannot read " + path; return; }
+    const map::KvNode root = map::parseKv(text);
+    const map::KvNode* pj = root.child("pbproj");
+    if (!pj) { status_ = "Not a Pootis project: " + path; return; }
+    projectPath_ = path;
+
+    const std::string vmf = pj->get("vmf");
+    if (!vmf.empty() && !openMap(vmf)) {
+        status_ = "Project's map is missing: " + vmf;
+        return;
+    }
+    if (int g = pj->getInt("grid")) gridSize_ = g;
+    cordonOn_ = pj->getInt("cordon") != 0;
+    std::sscanf(pj->get("cordon_min").c_str(), "%f %f %f", &cordonMin_.x,
+                &cordonMin_.y, &cordonMin_.z);
+    std::sscanf(pj->get("cordon_max").c_str(), "%f %f %f", &cordonMax_.x,
+                &cordonMax_.y, &cordonMax_.z);
+    compileProfile_ = pj->getInt("compile_profile");
+    compilePack_ = pj->getInt("compile_pack") != 0;
+    for (int i = 0; i < 6; ++i) {
+        const std::string s = pj->get("cam" + std::to_string(i));
+        if (s.empty()) continue;
+        CamMark m;
+        m.set = std::sscanf(s.c_str(), "%f %f %f %f %f", &m.pos.x, &m.pos.y, &m.pos.z,
+                            &m.yaw, &m.pitch) == 5;
+        if (m.set) camMarks_[i] = m;
+    }
+    packFiles_.clear();
+    for (const auto& kv : pj->pairs)
+        if (kv.first == "pack") packFiles_.push_back(kv.second);
+    status_ = "Opened project  " + fs::path(path).filename().string();
+    prefs_.pushRecent(path);
+    prefs_.save();
+}
+
+void Editor::drawVisgroupsPanel() {
+    ImGui::Begin("Visgroups");
+    if (!hasDoc()) {
+        ImGui::TextDisabled("Open an editable map to use visgroups.");
+        ImGui::End();
+        return;
+    }
+    ImGui::PushStyleColor(ImGuiCol_Text, pb::ui::col::faint);
+    ImGui::TextWrapped("Toggle whole categories of the map on and off. Hidden "
+                       "objects don't render or pick, and are skipped by compile.");
+    ImGui::PopStyleColor();
+
+    // Auto categories: predicate over an entity or a world solid.
+    struct Cat {
+        const char* label;
+        std::function<bool(const map::MapEntity*)> entMatch;
+        std::function<bool(const map::Solid&)> worldMatch;
+    };
+    auto pfx = [](const std::string& s, const char* p) {
+        return s.rfind(p, 0) == 0;
+    };
+    std::vector<Cat> cats = {
+        {"World brushwork", nullptr, [](const map::Solid&) { return true; }},
+        {"Tool brushes",
+         nullptr,
+         [](const map::Solid& s) {
+             return !s.faces.empty() && s.faces[0].material.rfind("tools/", 0) == 0;
+         }},
+        {"Lights",
+         [pfx](const map::MapEntity* e) { return pfx(e->classname, "light"); },
+         nullptr},
+        {"Triggers",
+         [pfx](const map::MapEntity* e) { return pfx(e->classname, "trigger"); },
+         nullptr},
+        {"Props",
+         [pfx](const map::MapEntity* e) { return pfx(e->classname, "prop_"); },
+         nullptr},
+        {"Logic / relays",
+         [pfx](const map::MapEntity* e) {
+             return pfx(e->classname, "logic_") || pfx(e->classname, "math_") ||
+                    pfx(e->classname, "filter_") ||
+                    pfx(e->classname, "point_template");
+         },
+         nullptr},
+        {"Spawns & pickups",
+         [pfx](const map::MapEntity* e) {
+             return pfx(e->classname, "info_player") || pfx(e->classname, "item_") ||
+                    pfx(e->classname, "func_regenerate");
+         },
+         nullptr},
+        {"Brush entities (func_*)",
+         [pfx](const map::MapEntity* e) {
+             return pfx(e->classname, "func_") && !e->solids.empty();
+         },
+         nullptr},
+    };
+
+    ImGui::Separator();
+    bool changed = false;
+    for (auto& c : cats) {
+        int total = 0, hidden = 0;
+        if (c.worldMatch) {
+            for (auto& s : doc_.worldSolids())
+                if (c.worldMatch(s)) { ++total; hidden += s.hidden ? 1 : 0; }
+        }
+        if (c.entMatch) {
+            for (auto& e : doc_.entities())
+                if (c.entMatch(&e)) { ++total; hidden += e.hidden ? 1 : 0; }
+        }
+        if (total == 0) continue;
+        bool vis = hidden < total;
+        ImGui::PushID(c.label);
+        if (ImGui::Checkbox("##v", &vis)) {
+            if (c.worldMatch)
+                for (auto& s : doc_.worldSolids())
+                    if (c.worldMatch(s)) s.hidden = !vis;
+            if (c.entMatch)
+                for (auto& e : doc_.entities())
+                    if (c.entMatch(&e)) {
+                        e.hidden = !vis;
+                        for (auto& s : e.solids) s.hidden = !vis;
+                    }
+            changed = true;
+        }
+        ImGui::SameLine();
+        ImGui::Text("%s", c.label);
+        ImGui::SameLine();
+        ImGui::TextDisabled("(%d)", total);
+        ImGui::PopID();
+    }
+
+    ImGui::Separator();
+    if (ImGui::Button(ICON_FA_EYE "  Show everything", ImVec2(-1, 0))) {
+        for (auto& s : doc_.worldSolids()) s.hidden = false;
+        for (auto& e : doc_.entities()) {
+            e.hidden = false;
+            for (auto& s : e.solids) s.hidden = false;
+        }
+        changed = true;
+    }
+    if (changed) {
+        clearSelection();
+        buildAndUpload(meshOpts_);
+        rebuildSelectionWire();
+    }
+    ImGui::End();
+}
+
+void Editor::drawPrefabPanel() {
+    ImGui::Begin("Prefabs");
+    ImGui::PushStyleColor(ImGuiCol_Text, pb::ui::col::faint);
+    ImGui::TextWrapped("Reusable chunks of brushwork + entities. Click one, then "
+                       "click in a viewport to drop it (snaps to grid).");
+    ImGui::PopStyleColor();
+
+    if (hasDoc() && !selection_.empty() &&
+        ImGui::Button(ICON_FA_FLOPPY_DISK "  Save selection as prefab…", ImVec2(-1, 0)))
+        saveSelectionAsPrefab();
+    ImGui::Separator();
+
+    static std::vector<std::string> dirs = {
+        executableDir() + "/assets/prefabs",
+        executableDir() + "/../assets/prefabs",
+        std::string(kTf2Maps).substr(0, std::string(kTf2Maps).size() - 5) + "/prefabs",
+    };
+    int shown = 0;
+    for (const auto& d : dirs) {
+        std::error_code ec;
+        if (!fs::is_directory(d, ec)) continue;
+        for (auto& de : fs::directory_iterator(d, ec)) {
+            if (de.path().extension() != ".vmf") continue;
+            ++shown;
+            const std::string full = de.path().string();
+            const std::string name = de.path().stem().string();
+            const bool on = placing_ == "@prefab:" + full;
+            ImGui::PushID(full.c_str());
+            if (ImGui::Selectable(name.c_str(), on)) {
+                placing_ = "@prefab:" + full;
+                status_ = "Click in a viewport to place prefab '" + name + "'";
+            }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", full.c_str());
+            ImGui::PopID();
+        }
+    }
+    if (shown == 0) {
+        ImGui::PushStyleColor(ImGuiCol_Text, pb::ui::col::faint);
+        ImGui::TextWrapped("No prefabs found. Drop .vmf files in "
+                           "<app>/assets/prefabs/, or use the button above.");
+        ImGui::PopStyleColor();
+    }
+    ImGui::End();
+}
+
+void Editor::placePrefab(const std::string& path, const glm::vec3& atRaw) {
+    if (!doc_.active()) doc_.newBlank("untitled");
+    map::MapDocument tmp;
+    std::string err;
+    if (!tmp.loadVmf(path, &err)) {
+        status_ = "Prefab load failed: " + err;
+        return;
+    }
+    glm::vec3 mn, mx;
+    tmp.bounds(mn, mx);
+    const glm::vec3 anchor(0.5f * (mn.x + mx.x), 0.5f * (mn.y + mx.y), mn.z);
+    const glm::vec3 d = snapVec(atRaw) - anchor;
+
+    selection_.clear();
+    for (auto s : tmp.worldSolids()) {
+        s.id = doc_.nextId();
+        s.group = 0;
+        s.translate(d);
+        doc_.worldSolids().push_back(std::move(s));
+        selection_.push_back({-1, (int)doc_.worldSolids().size() - 1});
+    }
+    for (auto e : tmp.entities()) {
+        e.id = doc_.nextId();
+        for (auto& s : e.solids) { s.id = doc_.nextId(); s.translate(d); }
+        e.origin += d;
+        e.kv.set("origin", std::to_string((int)e.origin.x) + " " +
+                               std::to_string((int)e.origin.y) + " " +
+                               std::to_string((int)e.origin.z));
+        doc_.entities().push_back(std::move(e));
+    }
+    afterEdit("Insert prefab");
+    status_ = "Placed prefab (" + std::to_string(tmp.worldSolids().size()) +
+              " brushes, " + std::to_string(tmp.entities().size()) + " entities)";
+}
+
+void Editor::saveSelectionAsPrefab() {
+    if (selection_.empty()) return;
+    const std::string dir = executableDir() + "/assets/prefabs";
+    std::error_code ec;
+    fs::create_directories(dir, ec);
+    const std::string out = saveFileDialog(
+        "Save prefab", "Hammer VMF\0*.vmf\0", "prefab", "vmf", dir.c_str());
+    if (out.empty()) return;
+
+    map::MapDocument tmp;
+    tmp.newBlank(fs::path(out).stem().string());
+    for (const auto& r : selection_) {
+        const map::Solid* s = doc_.resolve(r);
+        if (!s) continue;
+        if (r.entity < 0) {
+            tmp.worldSolids().push_back(*s);
+        } else {
+            const auto& e = doc_.entities()[r.entity];
+            map::MapEntity ce = e;
+            tmp.entities().push_back(std::move(ce));
+        }
+    }
+    std::string err;
+    if (tmp.saveVmf(out, &err, /*updateState=*/false))
+        status_ = "Saved prefab  " + fs::path(out).filename().string();
+    else
+        status_ = "Prefab save failed: " + err;
+}
+
+void Editor::drawCordonOverlay(ViewPanel& p, float aspect, ImDrawList* dl) {
+    if (!cordonOn_ && !(cordonShow_ && p.kind != ViewKind::Perspective)) return;
+    if (!cordonOn_) return;
+    const glm::vec3 mn = glm::min(cordonMin_, cordonMax_);
+    const glm::vec3 mx = glm::max(cordonMin_, cordonMax_);
+    const glm::mat4 vp = p.camera.proj(aspect) * p.camera.view();
+    const glm::vec3 c[8] = {
+        {mn.x, mn.y, mn.z}, {mx.x, mn.y, mn.z}, {mx.x, mx.y, mn.z}, {mn.x, mx.y, mn.z},
+        {mn.x, mn.y, mx.z}, {mx.x, mn.y, mx.z}, {mx.x, mx.y, mx.z}, {mn.x, mx.y, mx.z}};
+    ImVec2 s[8];
+    bool ok = true;
+    for (int i = 0; i < 8; ++i) {
+        bool o;
+        s[i] = projectPt(p.kind, vp, p.contentMin, p.contentSize, c[i], o);
+        ok = ok && o;
+    }
+    if (!ok) return;
+    static const int E[12][2] = {{0, 1}, {1, 2}, {2, 3}, {3, 0}, {4, 5}, {5, 6},
+                                 {6, 7}, {7, 4}, {0, 4}, {1, 5}, {2, 6}, {3, 7}};
+    const ImU32 col = IM_COL32(255, 90, 70, 230);
+    for (auto& e : E) dl->AddLine(s[e[0]], s[e[1]], col, 1.5f);
+    dl->AddText(ImVec2(p.contentMin.x + 8, p.contentMin.y + 40), col, "CORDON");
+}
+
+void Editor::handleCordonDrag(ViewPanel&) {}  // numeric editing only, for now
+
+namespace {
+// World axis indices spanned by an ortho view: {right, up}.
+inline void orthoAxes(ViewKind k, int& u, int& v) {
+    switch (k) {
+        case ViewKind::Top:   u = 0; v = 1; break;  // X, Y
+        case ViewKind::Front: u = 0; v = 2; break;  // X, Z
+        default:              u = 1; v = 2; break;  // Side: Y, Z
+    }
+}
+
+// Resize-handle sizing, shared between the hit test and both draw sites so
+// the drawn square and the grabbable area can never drift apart. The squares
+// were easy to miss and fiddly to grab — this makes them plainly bigger.
+constexpr float kHandleReach2D = 22.0f;   // hit-test radius, ortho views
+constexpr float kHandleReach3D = 24.0f;   // hit-test radius, perspective
+constexpr float kHandleDraw2D = 9.0f;     // half-size of the drawn square
+constexpr float kHandleDraw2DHot = 12.0f;
+constexpr float kHandleDraw3D = 10.0f;
+constexpr float kHandleDraw3DHot = 13.0f;
+}  // namespace
+
+void Editor::handleSelectionResize(ViewPanel& p) {
+    if (tool_ != Tool::Select || selection_.empty() || gizmoUsing_) {
+        resizeHot_ = -1;
+        return;
+    }
+    const bool persp = p.kind == ViewKind::Perspective;
+
+    glm::vec3 mn(1e30f), mx(-1e30f);
+    for (const auto& r : selection_)
+        if (const map::Solid* s = doc_.resolve(r)) {
+            mn = glm::min(mn, s->boundsMin);
+            mx = glm::max(mx, s->boundsMax);
+        }
+    if (mn.x > mx.x) { resizeHot_ = -1; return; }
+    // Mid-drag the live bounds are already deformed; measuring against them
+    // makes the handle accelerate away from the cursor. Use the grab-time box.
+    if (resizeHandle_ >= 0) {
+        mn = resizeStartMin_;
+        mx = resizeStartMax_;
+    }
+
+    int au = 0, av = 1;
+    if (!persp) orthoAxes(p.kind, au, av);
+    const float aspect = p.contentSize.x / std::max(1.0f, p.contentSize.y);
+    const glm::mat4 vp = p.camera.proj(aspect) * p.camera.view();
+    const glm::vec3 ctr = 0.5f * (mn + mx);
+    const int nHandles = persp ? 6 : 8;
+
+    // Perspective: 6 face-centre handles, one per +/- world axis.
+    // Ortho: 4 corners + 4 edge midpoints in the view plane.
+    auto handleWorld = [&](int h) {
+        glm::vec3 w = ctr;
+        if (persp) {
+            const int ax = h / 2;
+            w[ax] = (h & 1) ? mx[ax] : mn[ax];
+            return w;
+        }
+        const float lo[2] = {mn[au], mn[av]}, hi[2] = {mx[au], mx[av]};
+        const float mid[2] = {ctr[au], ctr[av]};
+        float cu = mid[0], cv = mid[1];
+        switch (h) {
+            case 0: cu = lo[0]; cv = lo[1]; break;
+            case 1: cu = hi[0]; cv = lo[1]; break;
+            case 2: cu = hi[0]; cv = hi[1]; break;
+            case 3: cu = lo[0]; cv = hi[1]; break;
+            case 4: cu = lo[0]; cv = mid[1]; break;
+            case 5: cu = hi[0]; cv = mid[1]; break;
+            case 6: cu = mid[0]; cv = lo[1]; break;
+            case 7: cu = mid[0]; cv = hi[1]; break;
+        }
+        w[au] = cu;
+        w[av] = cv;
+        return w;
+    };
+    auto project = [&](const glm::vec3& w) {
+        const glm::vec4 c = vp * glm::vec4(w, 1.0f);
+        if (c.w <= 1e-4f) return ImVec2(-9999, -9999);
+        return ImVec2(p.contentMin.x + (c.x / c.w * 0.5f + 0.5f) * p.contentSize.x,
+                      p.contentMin.y + (1.0f - (c.y / c.w * 0.5f + 0.5f)) * p.contentSize.y);
+    };
+
+    const ImVec2 m = ImGui::GetMousePos();
+    resizeHot_ = -1;
+    if (resizeHandle_ < 0 && p.hovered) {
+        const float reach = pb::ui::dp(persp ? kHandleReach3D : kHandleReach2D);
+        float best = reach;
+        for (int h = 0; h < nHandles; ++h) {
+            const ImVec2 s = project(handleWorld(h));
+            float d = std::hypot(s.x - m.x, s.y - m.y);
+            // On a small selection the edge handles crowd the corners; bias so
+            // a corner wins the tie and you can actually grab two axes at once.
+            if (!persp && h < 4) d -= reach * 0.35f;
+            if (d < best) { best = d; resizeHot_ = h; }
+        }
+    }
+
+    if (resizeHot_ >= 0 && p.hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+        resizeHandle_ = resizeHot_;
+        dragView_ = static_cast<int>(p.kind);
+        resizeStartMin_ = mn;
+        resizeStartMax_ = mx;
+        resizeAnchor_ = ctr;
+        const int h = resizeHandle_;
+        if (persp) {
+            const int ax = h / 2;
+            resizeAnchor_[ax] = (h & 1) ? mn[ax] : mx[ax];  // opposite face
+        } else {
+            if (h == 0 || h == 3 || h == 4) resizeAnchor_[au] = mx[au];
+            if (h == 1 || h == 2 || h == 5) resizeAnchor_[au] = mn[au];
+            if (h == 0 || h == 1 || h == 6) resizeAnchor_[av] = mx[av];
+            if (h == 2 || h == 3 || h == 7) resizeAnchor_[av] = mn[av];
+        }
+        resizeSnap_.clear();
+        resizeRefs_.clear();
+        for (const auto& r : selection_)
+            if (const map::Solid* s = doc_.resolve(r)) {
+                resizeSnap_.push_back(*s);
+                resizeRefs_.push_back(r);
+            }
+    }
+
+    if (resizeHandle_ >= 0 && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+        const int h = resizeHandle_;
+        glm::vec3 nmn = resizeStartMin_, nmx = resizeStartMax_;
+
+        auto applyAxis = [&](int ax, float coord) {
+            if (resizeAnchor_[ax] == resizeStartMin_[ax])
+                nmx[ax] = std::max(coord, resizeAnchor_[ax] + 1.0f);
+            else
+                nmn[ax] = std::min(coord, resizeAnchor_[ax] - 1.0f);
+        };
+
+        if (persp) {
+            const int ax = h / 2;
+            glm::vec3 ro, rd;
+            p.camera.pixelRay({m.x - p.contentMin.x, m.y - p.contentMin.y},
+                              p.contentSize, ro, rd);
+            // Closest approach between the ray and the world-axis line through ctr.
+            glm::vec3 u(0.0f);
+            u[ax] = 1.0f;
+            const glm::vec3 w0 = ctr - ro;
+            const float b = glm::dot(u, rd), c = glm::dot(rd, rd);
+            const float d = glm::dot(u, w0), e = glm::dot(rd, w0);
+            const float denom = c - b * b;
+            const float t = std::fabs(denom) > 1e-5f ? (b * e - c * d) / denom : 0.0f;
+            applyAxis(ax, snapF(ctr[ax] + t));
+        } else {
+            const glm::vec3 hit = snapVec(viewPlanePoint(p, m));
+            if (h != 6 && h != 7) applyAxis(au, hit[au]);
+            if (h != 4 && h != 5) applyAxis(av, hit[av]);
+        }
+
+        const glm::vec3 os = glm::max(resizeStartMax_ - resizeStartMin_,
+                                      glm::vec3(1e-3f));
+        const glm::vec3 sc = glm::max(nmx - nmn, glm::vec3(1.0f)) / os;
+        glm::mat4 mtx(1.0f);
+        mtx = glm::translate(mtx, nmn);
+        mtx = glm::scale(mtx, sc);
+        mtx = glm::translate(mtx, -resizeStartMin_);
+        for (size_t i = 0; i < resizeRefs_.size(); ++i)
+            if (map::Solid* s = doc_.resolve(resizeRefs_[i])) {
+                *s = resizeSnap_[i];
+                s->transform(mtx);
+            }
+        docMeshDirty_ = true;
+    }
+
+    if (resizeHandle_ >= 0 && ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
+        resizeHandle_ = -1;
+        dragView_ = -1;
+        resizeSnap_.clear();
+        resizeRefs_.clear();
+        afterEdit("Resize");
+    }
+
+    // Tell the cursor what the handle under it will do.
+    if (p.hovered && (resizeHot_ >= 0 || resizeHandle_ >= 0)) {
+        const int h = resizeHandle_ >= 0 ? resizeHandle_ : resizeHot_;
+        ImGuiMouseCursor c = ImGuiMouseCursor_ResizeAll;
+        if (!persp) {
+            // Screen Y runs opposite world V, so lo/lo reads as bottom-left.
+            if (h == 0 || h == 2) c = ImGuiMouseCursor_ResizeNESW;
+            else if (h == 1 || h == 3) c = ImGuiMouseCursor_ResizeNWSE;
+            else if (h == 4 || h == 5) c = ImGuiMouseCursor_ResizeEW;
+            else if (h == 6 || h == 7) c = ImGuiMouseCursor_ResizeNS;
+        }
+        ImGui::SetMouseCursor(c);
+    }
+}
+
+// Soft outline of whatever the cursor is over, so you can see what a click or
+// drag will grab before you commit.
+void Editor::updateHoverHighlight(ViewPanel& p) {
+    const bool busy = gizmoUsing_ || resizeHandle_ >= 0 || moveDrag_ != 0 ||
+                      subDragging_ || movePending_;
+    if (!hasDoc() || tool_ != Tool::Select || !placing_.empty() || busy) {
+        if ((hoverRef_.valid() || hoverEnt_ >= 0)) {
+            hoverRef_ = {};
+            hoverEnt_ = -1;
+            renderer_.setHoverWire({});
+        }
+        return;
+    }
+    if (!p.hovered) return;  // another panel may own the hover this frame
+
+    glm::vec3 ro, rd;
+    const ImVec2 m = ImGui::GetMousePos();
+    p.camera.pixelRay({m.x - p.contentMin.x, m.y - p.contentMin.y}, p.contentSize,
+                      ro, rd);
+
+    float bestT = 1e30f;
+    map::SolidRef hit;
+    int hitEnt = -1;
+    auto test = [&](const map::Solid& s, int ent, int idx) {
+        float t;
+        if (s.valid && !s.hidden && map::raySolid(ro, rd, s, t) && t > 0 && t < bestT) {
+            bestT = t;
+            hit = {ent, idx};
+            hitEnt = -1;
+        }
+    };
+    for (int i = 0; i < (int)doc_.worldSolids().size(); ++i)
+        test(doc_.worldSolids()[i], -1, i);
+    for (int e = 0; e < (int)doc_.entities().size(); ++e) {
+        const auto& ent = doc_.entities()[e];
+        if (ent.hidden) continue;
+        for (int i = 0; i < (int)ent.solids.size(); ++i) test(ent.solids[i], e, i);
+        if (ent.solids.empty()) {  // point entity: small box
+            float t;
+            map::Solid box = map::Solid::makeBox(ent.origin - glm::vec3(18),
+                                                 ent.origin + glm::vec3(18), "");
+            if (map::raySolid(ro, rd, box, t) && t > 0 && t < bestT) {
+                bestT = t;
+                hit = {};
+                hitEnt = e;
+            }
+        }
+    }
+
+    // Don't highlight what's already selected.
+    bool selected = hitEnt >= 0 ? (hitEnt == selectedEntity_)
+                                : std::find(selection_.begin(), selection_.end(),
+                                            hit) != selection_.end();
+
+    if ((hit == hoverRef_ && hitEnt == hoverEnt_)) return;  // unchanged
+    hoverRef_ = hit;
+    hoverEnt_ = hitEnt;
+
+    std::vector<glm::vec3> wire;
+    if (!selected) {
+        if (hitEnt >= 0) {
+            const glm::vec3 o = doc_.entities()[hitEnt].origin;
+            map::Solid box = map::Solid::makeBox(o - glm::vec3(18), o + glm::vec3(18),
+                                                 "");
+            wire = map::solidWire(box);
+        } else if (const map::Solid* s = doc_.resolve(hit)) {
+            wire = map::solidWire(*s);
+        }
+    }
+    renderer_.setHoverWire(wire);
+}
+
+// Grab anywhere on the selected object and drag it. 3D view moves along the
+// ground (hold Shift for up/down); the 2D views move in the view plane.
+// Adjust a proposed move delta so a corner of the selection's bounding box
+// lands exactly on the nearest vertex of some *other* brush. Returns true and
+// sets snapMark_ when it snapped.
+bool Editor::geoSnapDelta(glm::vec3& d, const glm::vec3& selMn,
+                          const glm::vec3& selMx) {
+    snapMarkOn_ = false;
+    if (!snapGeo_) return false;
+    // Candidate anchor points on the moved selection.
+    const glm::vec3 mn = selMn + d, mx = selMx + d;
+    const glm::vec3 anchors[9] = {
+        mn, mx, {mn.x, mn.y, mx.z}, {mx.x, mn.y, mn.z}, {mn.x, mx.y, mn.z},
+        {mx.x, mx.y, mn.z}, {mn.x, mx.y, mx.z}, {mx.x, mn.y, mx.z},
+        0.5f * (mn + mx)};
+    const float R = std::max(4.0f, float(gridSize_)) * 1.5f;  // world radius
+    float best = R * R;
+    glm::vec3 bestFix(0), bestPt(0);
+    auto consider = [&](const map::Solid& s, bool skip) {
+        if (skip || !s.valid) return;
+        for (const auto& f : s.faces)
+            for (const auto& v : f.verts)
+                for (const auto& a : anchors) {
+                    const glm::vec3 diff = v - a;
+                    const float q = glm::dot(diff, diff);
+                    if (q < best) { best = q; bestFix = diff; bestPt = v; }
+                }
+    };
+    // Skip the brushes being moved.
+    std::vector<const map::Solid*> moving;
+    for (const auto& r : selection_)
+        if (const map::Solid* s = doc_.resolve(r)) moving.push_back(s);
+    auto isMoving = [&](const map::Solid& s) {
+        for (auto* m : moving) if (m == &s) return true;
+        return false;
+    };
+    for (const auto& s : doc_.worldSolids()) consider(s, isMoving(s));
+    for (const auto& e : doc_.entities())
+        for (const auto& s : e.solids) consider(s, isMoving(s));
+
+    if (best < R * R) {
+        d += bestFix;
+        snapMark_ = bestPt;
+        snapMarkOn_ = true;
+        return true;
+    }
+    return false;
+}
+
+void Editor::handleSelectionMove(ViewPanel& p) {
+    if (tool_ != Tool::Select || gizmoUsing_ || resizeHandle_ >= 0 ||
+        resizeHot_ >= 0)
+        return;
+
+    const bool haveBrush = !selection_.empty();
+    const bool haveEnt = !haveBrush && selectedEntity_ >= 0 &&
+                         selectedEntity_ < (int)doc_.entities().size();
+    if (!haveBrush && !haveEnt) return;
+
+    glm::vec3 mn(1e30f), mx(-1e30f);
+    if (haveBrush) {
+        for (const auto& r : selection_)
+            if (const map::Solid* s = doc_.resolve(r)) {
+                mn = glm::min(mn, s->boundsMin);
+                mx = glm::max(mx, s->boundsMax);
+            }
+    } else {
+        mn = doc_.entities()[selectedEntity_].origin - glm::vec3(20);
+        mx = doc_.entities()[selectedEntity_].origin + glm::vec3(20);
+    }
+    if (mn.x > mx.x) return;
+    const glm::vec3 ctr = 0.5f * (mn + mx);
+    const ImVec2 m = ImGui::GetMousePos();
+    const bool persp = p.kind == ViewKind::Perspective;
+    glm::vec3 ro, rd;
+    p.camera.pixelRay({m.x - p.contentMin.x, m.y - p.contentMin.y}, p.contentSize,
+                      ro, rd);
+
+    auto planePt = [&](float planeZ, bool vertical) -> glm::vec3 {
+        if (vertical) {
+            // closest approach of the ray to the vertical line through ctr
+            const glm::vec3 u(0, 0, 1);
+            const glm::vec3 w0 = ctr - ro;
+            const float b = glm::dot(u, rd), c = glm::dot(rd, rd);
+            const float dd = glm::dot(u, w0), e = glm::dot(rd, w0);
+            const float den = c - b * b;
+            const float t = std::fabs(den) > 1e-5f ? (b * e - c * dd) / den : 0.0f;
+            return glm::vec3(ctr.x, ctr.y, ctr.z + t);
+        }
+        if (std::fabs(rd.z) < 1e-4f) return ctr;
+        const float t = (planeZ - ro.z) / rd.z;
+        return ro + rd * t;
+    };
+
+    // Is the cursor over the selection's body (as opposed to a handle or empty
+    // space)? Used both to arm a drag and to show the move cursor.
+    auto overBody = [&]() -> bool {
+        bool over = false;
+        if (persp) {
+            float t;
+            if (haveBrush) {
+                for (const auto& r : selection_)
+                    if (const map::Solid* s = doc_.resolve(r))
+                        if (s->valid && map::raySolid(ro, rd, *s, t)) { over = true; break; }
+            }
+            if (!over) {  // fall back to the projected bbox
+                const glm::mat4 vp =
+                    p.camera.proj(p.contentSize.x / std::max(1.0f, p.contentSize.y)) *
+                    p.camera.view();
+                const glm::vec4 cc = vp * glm::vec4(ctr, 1.0f);
+                if (cc.w > 1e-4f) {
+                    const ImVec2 sp(
+                        p.contentMin.x + (cc.x / cc.w * 0.5f + 0.5f) * p.contentSize.x,
+                        p.contentMin.y +
+                            (1.0f - (cc.y / cc.w * 0.5f + 0.5f)) * p.contentSize.y);
+                    over = std::hypot(sp.x - m.x, sp.y - m.y) < pb::ui::dp(28.0f);
+                }
+            }
+        } else {
+            // inside the projected 2D box, inset so the edge handles still win
+            const glm::mat4 vp =
+                p.camera.proj(p.contentSize.x / std::max(1.0f, p.contentSize.y)) *
+                p.camera.view();
+            auto pr = [&](const glm::vec3& w) {
+                const glm::vec4 c = vp * glm::vec4(w, 1.0f);
+                return ImVec2(
+                    p.contentMin.x + (c.x / c.w * 0.5f + 0.5f) * p.contentSize.x,
+                    p.contentMin.y + (1.0f - (c.y / c.w * 0.5f + 0.5f)) * p.contentSize.y);
+            };
+            const ImVec2 a = pr(mn), b = pr(mx);
+            const float x0 = std::min(a.x, b.x) + 10, x1 = std::max(a.x, b.x) - 10;
+            const float y0 = std::min(a.y, b.y) + 10, y1 = std::max(a.y, b.y) - 10;
+            over = m.x > x0 && m.x < x1 && m.y > y0 && m.y < y1;
+        }
+        return over;
+    };
+
+    // ---- arm on press over the body; only becomes a move once you drag ----
+    if (moveDrag_ == 0 && !movePending_ && p.hovered &&
+        ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+        if (overBody()) {
+            movePending_ = true;
+            dragView_ = static_cast<int>(p.kind);
+            moveIsEnt_ = haveEnt;
+            if (haveEnt) moveEntStart_ = doc_.entities()[selectedEntity_].origin;
+            resizeSnap_.clear();
+            resizeRefs_.clear();
+            if (haveBrush)
+                for (const auto& r : selection_)
+                    if (const map::Solid* s = doc_.resolve(r)) {
+                        resizeSnap_.push_back(*s);
+                        resizeRefs_.push_back(r);
+                    }
+        }
+    }
+
+    // While the cursor is over the body, say so — otherwise there's no hint
+    // that a press-and-drag here moves the thing.
+    if (p.hovered && moveDrag_ == 0 && !movePending_ && resizeHot_ < 0 &&
+        overBody())
+        ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeAll);
+
+    // Promote to an actual move once the cursor leaves the click point.
+    if (movePending_ && moveDrag_ == 0 &&
+        ImGui::IsMouseDragPastThreshold(ImGuiMouseButton_Left, 4.0f)) {
+        moveDrag_ = (persp && ImGui::GetIO().KeyShift) ? 2 : 1;
+        moveGrab_ = planePt(ctr.z, moveDrag_ == 2);
+    }
+
+    // ---- dragging ----
+    if (moveDrag_ != 0 && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+        const glm::vec3 now = planePt(moveGrab_.z, moveDrag_ == 2);
+        glm::vec3 d = now - moveGrab_;
+        if (moveDrag_ == 1) d.z = 0.0f;
+        else d = glm::vec3(0, 0, d.z);
+        d = snapVec(d);
+        if (!moveIsEnt_ && !resizeSnap_.empty()) {
+            glm::vec3 smn(1e30f), smx(-1e30f);
+            for (const auto& s : resizeSnap_) {
+                smn = glm::min(smn, s.boundsMin);
+                smx = glm::max(smx, s.boundsMax);
+            }
+            geoSnapDelta(d, smn, smx);
+        }
+        if (d != glm::vec3(0)) {
+            if (moveIsEnt_) {
+                auto& e = doc_.entities()[selectedEntity_];
+                e.origin = moveEntStart_ + d;
+                e.kv.set("origin", std::to_string((int)e.origin.x) + " " +
+                                       std::to_string((int)e.origin.y) + " " +
+                                       std::to_string((int)e.origin.z));
+            } else {
+                for (size_t i = 0; i < resizeRefs_.size(); ++i)
+                    if (map::Solid* s = doc_.resolve(resizeRefs_[i])) {
+                        *s = resizeSnap_[i];
+                        s->translate(d);
+                    }
+            }
+            docMeshDirty_ = true;
+        }
+    }
+
+    if (moveDrag_ != 0) ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeAll);
+
+    if (ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
+        const bool didMove = moveDrag_ != 0;
+        moveDrag_ = 0;
+        movePending_ = false;
+        if (dragView_ == static_cast<int>(p.kind)) dragView_ = -1;
+        resizeSnap_.clear();
+        resizeRefs_.clear();
+        if (didMove) {
+            afterEdit("Move");
+            status_ = moveIsEnt_ ? "Moved entity" : "Moved selection";
+        }
+    }
+}
+
+void Editor::drawSelectionDims(ViewPanel& p, float aspect, ImDrawList* dl) {
+    if (selection_.empty()) return;
+    glm::vec3 mn(1e30f), mx(-1e30f);
+    for (const auto& r : selection_)
+        if (const map::Solid* s = doc_.resolve(r)) {
+            mn = glm::min(mn, s->boundsMin);
+            mx = glm::max(mx, s->boundsMax);
+        }
+    if (mn.x > mx.x) return;
+    const glm::mat4 vp = p.camera.proj(aspect) * p.camera.view();
+    auto pr = [&](const glm::vec3& w, bool& ok) {
+        return projectPt(p.kind, vp, p.contentMin, p.contentSize, w, ok);
+    };
+
+    // 3D view: 6 face-centre handles + a faint box, no dimension text.
+    if (p.kind == ViewKind::Perspective) {
+        if (tool_ != Tool::Select) return;
+        const glm::vec3 ctr = 0.5f * (mn + mx);
+        for (int hnd = 0; hnd < 6; ++hnd) {
+            const int ax = hnd / 2;
+            glm::vec3 wp = ctr;
+            wp[ax] = (hnd & 1) ? mx[ax] : mn[ax];
+            bool ok;
+            const ImVec2 s = pr(wp, ok);
+            if (!ok) continue;
+            const bool hot = (hnd == resizeHot_ || hnd == resizeHandle_);
+            const float r = pb::ui::dp(hot ? kHandleDraw3DHot : kHandleDraw3D);
+            const ImU32 hc = hot ? IM_COL32(255, 180, 90, 255)
+                                 : IM_COL32(255, 214, 150, 235);
+            dl->AddRectFilled(ImVec2(s.x - r, s.y - r), ImVec2(s.x + r, s.y + r), hc,
+                              pb::ui::dp(2.0f));
+            dl->AddRect(ImVec2(s.x - r, s.y - r), ImVec2(s.x + r, s.y + r),
+                        IM_COL32(15, 15, 18, 235), pb::ui::dp(2.0f), 0, 1.5f);
+        }
+        return;
+    }
+
+    bool a, b;
+    const ImVec2 s0 = pr(mn, a);
+    const ImVec2 s1 = pr(mx, b);
+    if (!a || !b) return;
+    const glm::vec3 rt = p.camera.orthoRightAxis(), up = p.camera.orthoUpAxis();
+    const float w = std::fabs(glm::dot(mx - mn, rt));
+    const float h = std::fabs(glm::dot(mx - mn, up));
+    const float x0 = std::min(s0.x, s1.x), x1 = std::max(s0.x, s1.x);
+    const float y0 = std::min(s0.y, s1.y), y1 = std::max(s0.y, s1.y);
+    const ImU32 c = IM_COL32(255, 210, 140, 220);
+    char b1[32], b2[32];
+    std::snprintf(b1, sizeof(b1), "%.0f", w);
+    std::snprintf(b2, sizeof(b2), "%.0f", h);
+    dl->AddText(ImVec2((x0 + x1) * 0.5f - ImGui::CalcTextSize(b1).x * 0.5f, y0 - 16), c, b1);
+    dl->AddText(ImVec2(x1 + 4, (y0 + y1) * 0.5f - 7), c, b2);
+    dl->AddRect(ImVec2(x0, y0), ImVec2(x1, y1), IM_COL32(255, 210, 140, 90));
+
+    // Live readout while a move/resize is in progress: centre + (for a move) the
+    // delta from where it started.
+    const bool moving = moveDrag_ != 0 || mx_.op == 1;
+    if (moving || resizeHandle_ >= 0) {
+        const glm::vec3 ctr = 0.5f * (mn + mx);
+        char line[80];
+        if (moving && !resizeSnap_.empty()) {
+            glm::vec3 s0c(0);
+            for (const auto& s : resizeSnap_) s0c += s.center();
+            s0c /= float(resizeSnap_.size());
+            const glm::vec3 d = ctr - s0c;
+            std::snprintf(line, sizeof(line), "d %+.0f %+.0f %+.0f", d.x, d.y, d.z);
+        } else {
+            std::snprintf(line, sizeof(line), "%.0f  %.0f  %.0f", ctr.x, ctr.y, ctr.z);
+        }
+        dl->AddRectFilled(ImVec2(x0, y1 + 4), ImVec2(x0 + ImGui::CalcTextSize(line).x + 8,
+                          y1 + 20), IM_COL32(20, 22, 26, 220), 3.0f);
+        dl->AddText(ImVec2(x0 + 4, y1 + 5), IM_COL32(255, 235, 200, 255), line);
+    }
+
+    // Hammer-style resize handles (Select tool only).
+    if (tool_ != Tool::Select) return;
+    const ImVec2 pts[8] = {
+        {x0, y0}, {x1, y0}, {x1, y1}, {x0, y1},
+        {x0, (y0 + y1) * 0.5f}, {x1, (y0 + y1) * 0.5f},
+        {(x0 + x1) * 0.5f, y0}, {(x0 + x1) * 0.5f, y1}};
+    for (int i = 0; i < 8; ++i) {
+        const bool hot = (i == resizeHot_ || i == resizeHandle_);
+        const float r = pb::ui::dp(hot ? kHandleDraw2DHot : kHandleDraw2D);
+        const ImU32 hc = hot ? IM_COL32(255, 180, 90, 255)
+                             : IM_COL32(255, 214, 150, 230);
+        dl->AddRectFilled(ImVec2(pts[i].x - r, pts[i].y - r),
+                          ImVec2(pts[i].x + r, pts[i].y + r), hc, pb::ui::dp(2.0f));
+        dl->AddRect(ImVec2(pts[i].x - r, pts[i].y - r),
+                    ImVec2(pts[i].x + r, pts[i].y + r), IM_COL32(15, 15, 18, 235),
+                    pb::ui::dp(2.0f), 0, 1.5f);
+    }
+}
+
+void Editor::autosaveTick() {
+    if (!autosaveOn_ || !hasDoc() || !doc_.dirty()) return;
+    const double now = ImGui::GetTime();
+    if (lastAutosave_ == 0.0) { lastAutosave_ = now; return; }
+    if (now - lastAutosave_ < autosaveMins_ * 60.0) return;
+    lastAutosave_ = now;
+
+    std::string base = doc_.path();
+    if (base.empty())
+        base = (fs::path(executableDir()) / "autosave" /
+                ((doc_.name().empty() ? "untitled" : doc_.name()) + ".vmf"))
+                   .string();
+    const std::string as = base + ".autosave.vmf";
+    std::string err;
+    if (doc_.saveVmf(as, &err, /*updateState=*/false))
+        status_ = "Autosaved  " + fs::path(as).filename().string();
+}
+
+// ---------------------------------------------------------------------------
+// Offscreen screenshot
+// ---------------------------------------------------------------------------
+bool Editor::renderToImage(ViewKind view, int w, int h, std::vector<uint8_t>& rgba) {
+    Camera cam;
+    cam.kind = view;
+    if (hasMap()) cam.frameBounds(mesh_.playBoundsMin, mesh_.playBoundsMax);
+
+    Framebuffer fb;
+    fb.resize(w, h);
+    fb.bind();
+    renderer_.renderView(cam, w, h, settings_);
+
+    rgba.assign(static_cast<size_t>(w) * h * 4, 0);
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, rgba.data());
+    Framebuffer::unbind();
+
+    // Flip vertically so row 0 is the top.
+    const size_t rowBytes = static_cast<size_t>(w) * 4;
+    std::vector<uint8_t> tmp(rowBytes);
+    for (int y = 0; y < h / 2; ++y) {
+        uint8_t* a = rgba.data() + y * rowBytes;
+        uint8_t* b = rgba.data() + (h - 1 - y) * rowBytes;
+        std::memcpy(tmp.data(), a, rowBytes);
+        std::memcpy(a, b, rowBytes);
+        std::memcpy(b, tmp.data(), rowBytes);
+    }
+    return true;
+}
+
+bool Editor::renderQuadToImage(int w, int h, std::vector<uint8_t>& rgba) {
+    for (auto& v : views_) v.camera.kind = v.kind;
+    if (hasMap()) frameAllViews();
+
+    Framebuffer fb;
+    fb.resize(w, h);
+    fb.bind();
+    glDisable(GL_SCISSOR_TEST);
+    glViewport(0, 0, w, h);
+    glClearColor(0.05f, 0.05f, 0.06f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+    const int hw = w / 2, hh = h / 2;
+    const int gap = 1;
+    // Match the on-screen dock order: 3D top-left, Top top-right,
+    // Front bottom-left, Side bottom-right. FBO origin is bottom-left.
+    struct Q {
+        int idx, x, y;
+    } quads[4] = {
+        {0, 0, hh + gap},        // 3D  (top-left)
+        {1, hw + gap, hh + gap}, // Top (top-right)
+        {2, 0, 0},               // Front (bottom-left)
+        {3, hw + gap, 0},        // Side (bottom-right)
+    };
+    for (const Q& q : quads)
+        renderer_.renderView(views_[q.idx].camera, hw - gap, hh - gap, settings_, q.x,
+                             q.y);
+
+    rgba.assign(static_cast<size_t>(w) * h * 4, 0);
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, rgba.data());
+    Framebuffer::unbind();
+
+    const size_t rowBytes = static_cast<size_t>(w) * 4;
+    std::vector<uint8_t> tmp(rowBytes);
+    for (int y = 0; y < h / 2; ++y) {
+        uint8_t* a = rgba.data() + y * rowBytes;
+        uint8_t* b = rgba.data() + (h - 1 - y) * rowBytes;
+        std::memcpy(tmp.data(), a, rowBytes);
+        std::memcpy(a, b, rowBytes);
+        std::memcpy(b, tmp.data(), rowBytes);
+    }
+    return true;
+}
+
+}  // namespace pb

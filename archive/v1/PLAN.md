@@ -1,0 +1,197 @@
+# Pootis Builder — next: five gaps to 1.0
+
+The original roadmap (ROADMAP.md, milestones A–H) is essentially spent: A–F, C, D
+are done, most of section G is done. The app **loads any TF2 `.bsp` faithfully**
+and **builds a greybox fast**. It is not yet a tool you'd finish a shippable map
+in. Five gaps stand between here and there, and they are **gated** — finish one
+before starting the next, because each is the ground the next stands on.
+
+Shareable version of this plan (status grid + rationale):
+https://claude.ai/code/artifact/b0d70464-a7af-46ab-bda2-cd76ab3cb6e5
+
+## Where it stands (HEAD 63ab736)
+
+| System | State |
+| --- | --- |
+| BSP viewer & renderer (textures, lightmaps, HDR, LZMA, props, displacements) | solid |
+| Decompile → editable VMF (BSPSource, lossy) | works |
+| Simple-mode kit (52 pieces, options, drag+ghost, 7 templates, checklist) | solid |
+| Save · compile · play (`vbsp/vvis/vrad`, live log, `+map`, `bspzip`) | works |
+| Transforms (gizmo + 2D handles + body-drag + grid snap) | thin — no keyboard G/R/S, no numeric, no snap-to-vertex |
+| Brush-entity editing | **blocked** — "editing is limited for now"; real maps are mostly brush entities |
+| Sub-object vertex/edge/face | thin — Pro-only, one solid at a time |
+| Texture / UV tool | thin — approximate UV basis, no `$basetexture2`, no lightmap workflow |
+| Displacements | view only — no sculpt / sew / alpha paint / create |
+| Quality-of-life (autosave, history, map-check, palette, prefabs, cordon, visgroups, .pbproj) | deep |
+
+## The five phases
+
+### Phase 1 — Edit any brush, anywhere  (essentially done)
+Real maps are 60%+ brush entities; right now they're second-class.
+- [x] transform (gizmo / 2D handles / rotate) on entity brushes.
+- [x] delete removes individual entity brushes, drops emptied entities.
+- [x] duplicate includes entity brushes (copy into world).
+- [x] `untieSelectionToWorld()` + "part of <class>" identity + "Select all of it".
+- [x] tie-to-entity class picker ("Make it a…") in the Selection panel.
+- [x] vertex/edge/face editing works on an entity's brush.
+- [x] clip on entity brushes (back half stays in the entity, emptied entities dropped).
+- [x] `--phase1-test` on decompiled `cp_process_final`: nudge / duplicate / delete /
+      untie a `func_illusionary` brush — 4/4.
+- [ ] grouping + visgroups across entity boundaries (deferred — niche).
+- carve / hollow stay world-only by design (they rebuild worldSolids); noted in the UI.
+- **Done:** open decompiled `cp_process_final`, move / reshape / duplicate / untie a
+  func_* brush — no dead ends.
+
+### Phase 2 — Precise transforms  (essentially done)
+Everyday editing feel. No way to say "move it exactly 64 on X".
+- [x] Keyboard ops: `G`/`R`/`S`, then `X`/`Y`/`Z` to lock an axis, type a number,
+      Enter commits, Esc cancels. HUD shows op/axis/value. `--mx-test` 4/4.
+- [x] "Snap selection to grid" button; live centre + move-delta readout on 2D drags.
+- [x] Snap-to-geometry (magnet toggle): a selection bbox corner snaps onto the nearest
+      vertex of another brush, cyan ring marks the lock. In body-drag + modal G.
+- [x] Block tool: viewport depth field + live "W x H (deep D)" dimensions.
+- [x] Rotate/scale about the cursor — hold Alt when starting R / S.
+- [ ] (nice-to-have) edge-midpoint / face-centre snap targets; drag a 2D edge to a
+      typed value inline.
+- **Done:** lay a wall to exact size via the block depth field + SIZE panel; move a
+  brush corner exactly onto another with the magnet; `G X 64 ⏎`.
+
+### Phase 3 — Surfaces  (core done)
+A map's look is 90% surfaces; the texture tool was rough and displacements read-only.
+- [x] Face-edit tool on a correct UV basis: world/face align, fit / centre / justify,
+      per-face lightmap scale, **"treat as one"** (continuous projection across a
+      multi-face selection), **Alt-click eyedropper** (lift a face's whole projection).
+- [x] Material browser: every `materials/**.vmt` themed into groups (Concrete, Metal,
+      Wood, …), All / In this map / Recently used, full-path search, click-to-apply
+      to the selected face(s).
+- [x] Displacements: preserved losslessly through load→save (was silently flattening
+      every decompiled hillside); rendered as real sculpted terrain in the editor;
+      **create** from any 4-sided face at power 2/3/4; **raise / lower** with a
+      smoothstep-falloff brush. `--disp-test` 7/7.
+- [ ] Blend materials (`$basetexture2` alpha paint) — deferred.
+- [ ] Interactive drag-sculpt in the 3D viewport, smooth/noise, sew, subdivide,
+      alpha paint; smoothing-group UI — deferred (panel raise/lower + create cover
+      the "reshape a hillside" bar).
+- **Done:** retexture a room, reshape a hillside — both in Pootis Builder. Blending
+  two ground materials still needs Hammer.
+
+### Phase 4 — One adaptive workspace  (dial shipped)
+The seam between Simple and Pro was an abrupt app-swap.
+- [x] **The complexity dial**: `Guided · Standard · Full` replaces the binary
+      Simple/Pro switch. Guided and Standard share one friendly docking; only Full
+      swaps layout. Position persists (`Settings::workspaceDial`). `--dial <n>`.
+- [x] The full tool strip (Select / Block / Vertex / Clip / Surface / Entity) is
+      available at Standard, not just Full — reach a Pro tool without changing layout.
+- [x] The Surface panel, Textures browser, Outliner and Map Check are all reachable
+      at Standard; `drawSelectionPanel` routes to the tool-context panel like Pro's.
+- [ ] A kit piece stays a live, re-optionable object until "bake to brushes" — deferred
+      (needs a KitInstance layer over the doc).
+- [ ] Preview-everywhere: entity / prefab / preset thumbnails, hover previews, kit
+      cards with a mini 3D render — deferred.
+- [ ] The 3-step guided first map (coach marks) — deferred.
+- **Done:** a beginner on Guided grows to Standard, then Full, on the same map — same
+  document, camera, undo, selection — and never hits "you can't edit that here".
+
+### Phase 5 — Ship it  (in progress)
+The compile-test loop and content pipeline aren't fast/trustworthy enough yet.
+- [x] **Leak diagnostics**: `MapCompiler` grabs the `.lin` pointfile vbsp drops on
+      a leak; the editor auto-loads it, draws the trace as a glowing line in every
+      view with a "leaked entity" marker, and Map Check gets a "Frame the leak" /
+      "Load pointfile" / "Clear" section. `--leak-test`.
+- [x] **Map Check depth**: no-skybox-brush (with skyname set), no `env_cubemap`,
+      one-team spawns, spawns-without-`func_respawnroom`, displacement on a brush
+      entity. (Dangling entity I/O + invalid/oversized brushes were already in.)
+- [x] **Content packing auto-detect**: `publish/AssetScan` walks face materials
+      (+ `$basetexture`/`$basetexture2`), entity models (+ `.vvd`/`.vtx`/`.phy`)
+      and sound keys; `SourceFs::assetOrigin()` splits Base (official VPK) from
+      Custom (loose → bspzip) from Missing. "Scan map for custom content" in the
+      compile window fills the pack list and flags missing refs. `--pack-scan`.
+- [ ] Iteration loop: changed-leaves-only, auto `+map` reload, per-stage
+      compile timing (fast profile + live log + `+map` launch already exist).
+- [ ] Workshop publish end-to-end (window + steamcmd hand-off exist; needs a real
+      tested submission).
+- **Done when:** decompile → edit → compile → play → publish, no step back to Valve's tools.
+
+## Runs alongside (ships in small pieces on top of the active phase)
+- **Fidelity:** `$basetexture2` in the viewport, soundscape / particle / `env_cubemap`
+  helpers, a water plane, a 3D-skybox scale-linked preview.
+- **The turbine bar:** keep rebuilding `ctf_turbine` from the kit until a side-by-side with
+  the decompile is genuinely hard to call. The honest integration test.
+- **Stability:** `./test.sh` green on every commit; crash-recovery from autosave exercised.
+
+## Not now
+- FBX / glTF import beyond OBJ — vendored-importer rabbit hole; after 1.0.
+- VScript / a visual I/O graph — keyvalue + connections editor is enough to ship a map.
+- Hammer++ instance depth (parameters, manifest maps) — basic `func_instance` is in.
+- Other Source games — TF2 FGD/content paths are wired throughout; post-1.0 refactor.
+- Real-time collaboration — not a solo-mapper need.
+
+## The 1.0 bar (one sentence)
+Decompile `cp_process_final`, fix a sightline, retexture a room, adjust a displacement,
+pack it, compile it, and **play it** — without opening Hammer once.
+
+---
+
+# UI plan — one workspace
+
+Companion to the phases above. Shareable version (with layout diagrams):
+https://claude.ai/code/artifact/e26c3dca-fabd-4152-8425-82ffd9053980
+
+Today Simple and Pro are two different apps on one engine — different panels, different
+layout, jarring switch. Every phase above would be built twice or pick a side. Fix:
+**one adaptive workspace with a complexity dial, not a mode switch.**
+
+## Foundation (do first — gates every phase)
+- **One inspector component.** World brush, entity, face, kit piece, displacement — all
+  render in the same panel: identity header (+ `part of: func_detail #12` line), context
+  sections, every field typed (reuse `app/PropWidgets` as the universal field kit),
+  promoted/advanced split, live viewport preview. Nothing removed.
+- **Panel grammar.** Every panel = header (title + overflow) · optional filter row ·
+  scroll body · optional footer action. The floating windows (Options, Compile, Publish,
+  Import) become docked panels under this grammar.
+- **Semantic colour, separate from the orange accent.** good / warning / critical triad
+  for map-check severity, field validation, compile status — encoded by shape + label too.
+- **Shortcut registry.** Every control shows its key (tooltip min); F1 sheet + command
+  palette generated from the same registry so they can't drift.
+
+## One workspace (the core move — ships with Phase 4)
+- **3-stop complexity dial:** Guided · Standard · Full. Shows/hides panels + advanced
+  fields; does NOT load a different app. Map, selection, camera, undo untouched on change.
+  Guided ≈ today's Simple, Full ≈ today's Pro, middle is continuous.
+- **Left tool rail** (always visible): Select · Draw brush · Vertex/Edge/Face · Clip ·
+  Surface · Displacement · Entity · Measure. Replaces the Pro-only top-bar tool strip +
+  scattered viewport toggles. Active tool's params in a context bar under it.
+- **Kit / asset panel** — Build Kit + models + prefabs + entity catalogue, one tabbed
+  browser, available at every dial stop.
+- **Inspector + Outliner / History / Map Check** as sibling tabs, one click away always.
+
+## UI work per phase
+- **P1 brush-entity:** Outliner → primary tab; "part of / select siblings / tie / untie"
+  in the selection header with a class picker; real combined-state fields for mixed
+  selections (replace the greyed-out apology).
+- **P2 precise transform:** transform HUD (G/R/S overlay, axis lit in its colour, live
+  value + text cursor); 2D rulers + dimension-entry field on every drag; snap-target
+  picker (grid/vertex/edge-mid/face-centre) + in-range dot; movable pivot marker.
+- **P3 surfaces:** Surface tool + context bar (themed material picker, visual UV grid,
+  lightmap stepper, align toggle, treat-as-one); displacement brush palette
+  (raise/lower/smooth/noise/alpha) + falloff-curve editor + radius/strength readout;
+  blend-material paint shows both source textures + alpha under cursor.
+- **P4 continuity:** the dial ships (Simple/Pro merge); kit pieces = first-class Outliner
+  objects with re-openable option panels until "bake to brushes"; finish preview-
+  everywhere (entity/prefab/preset thumbnails, hover previews, mini-3D kit cards);
+  guided first map = dismissible coach-marks on the real workspace.
+- **P5 ship:** compile → a "run bar" (profile · est. time · one button · progress ·
+  "reload in game"), log one expand away; Map Check → review surface (grouped by
+  severity, expand-to-fix, "fix all safe", jump-to-problem, leak drawn as a line to the
+  hole); Publish → 3-step wizard (identity · preview+packing list · notes).
+
+## Cross-cutting
+- Toasts for async results; inline field validation; one shared "busy" affordance.
+- Command palette = universal entry point, shortcuts shown; empty-viewport state points
+  to it.
+- Every panel has a useful empty state.
+- Visible focus ring everywhere; severity by shape+label; reduced-motion honoured;
+  `dp()` scaling honest 100–200%.
+
+## UI bar (one sentence)
+A new user and a veteran use the **same screen** — the veteran just turned the dial up.

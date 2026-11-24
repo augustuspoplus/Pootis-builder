@@ -27,27 +27,32 @@ set(GLFW_INSTALL OFF CACHE BOOL "" FORCE)
 FetchContent_Declare(glfw
     GIT_REPOSITORY https://github.com/glfw/glfw.git
     GIT_TAG 3.4
-    GIT_SHALLOW ON)
+    GIT_SHALLOW ON
+    UPDATE_COMMAND "")
 
 FetchContent_Declare(imgui
     GIT_REPOSITORY https://github.com/ocornut/imgui.git
     GIT_TAG docking
-    GIT_SHALLOW ON)
+    GIT_SHALLOW ON
+    UPDATE_COMMAND "")
 
 FetchContent_Declare(glm
     GIT_REPOSITORY https://github.com/g-truc/glm.git
     GIT_TAG 1.0.1
-    GIT_SHALLOW ON)
+    GIT_SHALLOW ON
+    UPDATE_COMMAND "")
 
 FetchContent_Declare(stb
     GIT_REPOSITORY https://github.com/nothings/stb.git
     GIT_TAG master
-    GIT_SHALLOW ON)
+    GIT_SHALLOW ON
+    UPDATE_COMMAND "")
 
 FetchContent_Declare(imguizmo
     GIT_REPOSITORY https://github.com/CedricGuillemet/ImGuizmo.git
     GIT_TAG master
-    GIT_SHALLOW ON)
+    GIT_SHALLOW ON
+    UPDATE_COMMAND "")
 
 FetchContent_MakeAvailable(glfw imgui glm stb)
 

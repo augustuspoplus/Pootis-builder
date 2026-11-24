@@ -163,6 +163,7 @@ bool Editor::openMap(const std::string& path) {
             return false;
         }
         bsp_ = BspFile{};
+        sourceFs_.clearBspPak();
         history_.reset(doc_);
         buildAndUpload(meshOpts_);
         frameAllViews();
@@ -184,6 +185,14 @@ bool Editor::openMap(const std::string& path) {
     if (!bsp_.load(path, &err)) {
         status_ = "Failed to load: " + err;
         return false;
+    }
+    const int pakOff = bsp_.lumpOffset(bsp::LUMP_PAKFILE);
+    const int pakLen = bsp_.lumpLength(bsp::LUMP_PAKFILE);
+    if (pakOff > 0 && pakLen > 0 &&
+        static_cast<size_t>(pakOff) + static_cast<size_t>(pakLen) <= bsp_.fileSize()) {
+        sourceFs_.mountBspPak(bsp_.fileData() + pakOff, static_cast<size_t>(pakLen));
+    } else {
+        sourceFs_.clearBspPak();
     }
     doc_.clear();
     buildAndUpload(meshOpts_);
@@ -397,14 +406,22 @@ void Editor::frame() {
     ImGui::Begin("##PootisHost", nullptr, host);
     ImGui::PopStyleVar(3);
 
-    drawTopBar();
+    if (!useWorkshopUi_)
+        drawTopBar();
 
-    const ImGuiID dockId = ImGui::GetID("PootisDockV3");
+    const ImGuiID dockId = ImGui::GetID(useWorkshopUi_ ? "PootisHudDockV5" : "PootisDockV3");
     if (layoutDirty_ || !ImGui::DockBuilderGetNode(dockId)) {
-        buildDockLayout(dockId, ImGui::GetContentRegionAvail());
+        if (useWorkshopUi_)
+            drawWorkshopDockLayout(dockId, ImGui::GetContentRegionAvail());
+        else
+            buildDockLayout(dockId, ImGui::GetContentRegionAvail());
         layoutDirty_ = false;
     }
-    ImGui::DockSpace(dockId, ImVec2(0, 0), ImGuiDockNodeFlags_PassthruCentralNode);
+    const ImGuiDockNodeFlags dFlags =
+        useWorkshopUi_
+            ? (ImGuiDockNodeFlags_PassthruCentralNode | ImGuiDockNodeFlags_AutoHideTabBar)
+            : ImGuiDockNodeFlags_PassthruCentralNode;
+    ImGui::DockSpace(dockId, ImVec2(0, 0), dFlags);
     ImGui::End();
 
     // A modal G/R/S transform owns the keyboard until it commits or cancels.
@@ -451,6 +468,22 @@ void Editor::frame() {
         }
         if (pk(ImGuiKey_LeftBracket)) rotateSelection(2, shift ? 15.0f : -15.0f);
         if (pk(ImGuiKey_RightBracket)) rotateSelection(2, shift ? -15.0f : 15.0f);
+        // Pootis Builder 2.0 tool & studio hotkeys (suppressed while RMB flying)
+        if (!ImGui::IsMouseDown(ImGuiMouseButton_Right)) {
+            if (pk(ImGuiKey_V)) { tool_ = Tool::Select; status_ = "Tool: Select (V)"; }
+            if (pk(ImGuiKey_P)) { tool_ = Tool::PushPull; status_ = "Tool: Push/Pull Face (P)"; }
+            if (pk(ImGuiKey_B)) { tool_ = Tool::Block; status_ = "Tool: Draw Block (B)"; }
+            if (pk(ImGuiKey_C)) { tool_ = Tool::Clip; status_ = "Tool: Clip Knife (C)"; }
+            if (pk(ImGuiKey_T)) { tool_ = Tool::Texture; status_ = "Tool: Surface UV Paint (T)"; }
+            if (pk(ImGuiKey_L)) { tool_ = Tool::Wire; status_ = "Tool: 3D Logic Wire (L)"; }
+            if (pk(ImGuiKey_Q)) {
+                showPieMenu_ = !showPieMenu_;
+                if (showPieMenu_) pieMenuCenter_ = ImGui::GetMousePos();
+            }
+            if (pk(ImGuiKey_Space) && views_[0].hovered && !ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+                swapPipView();
+            }
+        }
         // Blender-style modal transform: G move / R rotate / S scale — with a
         // selection, not while RMB-flying, not while typing.
         if (hasDoc() && !typing && !ctrl && !selection_.empty() &&
@@ -471,30 +504,39 @@ void Editor::frame() {
     drawKeysOverlay();
     drawSettingsWindow();
 
-    if (mode_ != Mode::Full) {
-        drawBuildKit();
-        drawTextureBrowser();  // tabbed with Build Kit; feeds the Surface tool
-        drawSelectionPanel();
-        drawHistoryPanel();
-        if (mode_ == Mode::Standard) {  // one step up: the grown-up panels appear
+    if (!useWorkshopUi_) {
+        if (mode_ != Mode::Full) {
+            drawBuildKit();
+            drawTextureBrowser();  // tabbed with Build Kit; feeds the Surface tool
+            drawSelectionPanel();
+            drawHistoryPanel();
+            if (mode_ == Mode::Standard) {  // one step up: the grown-up panels appear
+                drawOutliner();
+                drawMapCheckPanel();
+            }
+        } else {
+            drawProperties();
             drawOutliner();
+            drawTextureBrowser();
+            drawModelBrowser();
+            drawMaterialList();
+            drawEntityCatalog();
+            drawHistoryPanel();
             drawMapCheckPanel();
+            drawLogPanel();
+            drawPrefabPanel();
+            drawVisgroupsPanel();
         }
-    } else {
-        drawProperties();
-        drawOutliner();
-        drawTextureBrowser();
-        drawModelBrowser();
-        drawMaterialList();
-        drawEntityCatalog();
-        drawHistoryPanel();
-        drawMapCheckPanel();
-        drawLogPanel();
-        drawPrefabPanel();
-        drawVisgroupsPanel();
     }
     for (int i = 0; i < 4; ++i)
         if (viewOpen_[i]) drawViewportPanel(views_[i], i == 0 ? nullptr : &viewOpen_[i]);
+
+    // Mockup 3: Floating TF2 In-Game HUD overlays rendered cleanly on top of the full-bleed 3D canvas
+    if (useWorkshopUi_) {
+        drawWorkshopTopBar();
+        drawWorkshopSidebar();
+        drawWorkshopReadinessBar();
+    }
 
     // Manual drag-and-drop: a menu card set dragPlace_ while being dragged;
     // when the mouse is released over a viewport, drop it there. (ImGui's own
@@ -515,11 +557,13 @@ void Editor::frame() {
         dragPlace_.clear();
     }
 
-    drawStatusBar();
+    if (!useWorkshopUi_)
+        drawStatusBar();
     drawCompileWindow();
     drawModelImportDialog();
     drawWorkshopWindow();
     drawCommandPalette();
+    drawRadialPieMenu();
     drawWelcome();
 
     if (focusPanelFrames_ > 0) {
@@ -527,11 +571,11 @@ void Editor::frame() {
         --focusPanelFrames_;
     }
 
-    // Live preview while dragging (gizmo, bbox handles, body-move, sub-object).
+    // Live preview while dragging (gizmo, bbox handles, body-move, sub-object, push/pull).
     // History is recorded once on release.
     const bool dragging =
         gizmoUsing_ || resizeHandle_ >= 0 || moveDrag_ != 0 || subDragging_ ||
-        mx_.op != 0;
+        mx_.op != 0 || ppDragging_;
     if (docMeshDirty_ && dragging) {
         // Heavy map: the selection wireframe follows the cursor every frame, but
         // the solid mesh only rebuilds on release — a full rebuild per frame is
@@ -699,24 +743,31 @@ void Editor::drawTopBar() {
         }
     }
 
-    // Tool strip — Standard and Full (Guided is pure Build Kit).
+    // Tool strip — Standard and Full (Guided uses the left floating rail + Build Kit).
     if (mode_ != Mode::Guided) {
-        ImGui::SameLine(0, dp(14.0f));
+        ImGui::SameLine(0, dp(12.0f));
         ImGui::SetCursorPosY((barH - row) * 0.5f);
-        const char* const tools[] = {ICON_FA_ARROW_POINTER, ICON_FA_CUBE,
-                                     ICON_FA_BEZIER_CURVE,   ICON_FA_SCISSORS,
-                                     ICON_FA_IMAGE,          ICON_FA_LIGHTBULB};
-        int r = segmented("tool", tools, 6, static_cast<int>(tool_), row);
+        const char* const tools[] = {
+            ICON_FA_ARROW_POINTER,         // Select (V)
+            ICON_FA_UP_DOWN_LEFT_RIGHT,    // Push/Pull (P)
+            ICON_FA_CUBE,                  // Block (B)
+            ICON_FA_BEZIER_CURVE,          // Vertex/Edge/Face
+            ICON_FA_SCISSORS,              // Clip (C)
+            ICON_FA_IMAGE,                 // Surface (T)
+            ICON_FA_LIGHTBULB,             // Entity
+            ICON_FA_DIAGRAM_PROJECT        // Logic Wire (L)
+        };
+        int r = segmented("tool", tools, 8, static_cast<int>(tool_), row);
         if (r >= 0 && r != static_cast<int>(tool_)) {
             tool_ = static_cast<Tool>(r);
             handlesDirty_ = true;
             subDragging_ = false;
         }
         if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("Select / Block / Vertex / Clip / Surface / Entity");
+            ImGui::SetTooltip("Select (V) / Push-Pull (P) / Block (B) / Vertex / Clip (C) / Surface (T) / Entity / Wire (L)");
 
         if (tool_ == Tool::Vertex) {
-            ImGui::SameLine(0, dp(10.0f));
+            ImGui::SameLine(0, dp(8.0f));
             ImGui::SetCursorPosY((barH - row) * 0.5f);
             const char* const subs[] = {ICON_FA_CIRCLE_DOT "  Vertex",
                                         ICON_FA_GRIP_LINES "  Edge",
@@ -730,14 +781,29 @@ void Editor::drawTopBar() {
         }
     }
 
+    // Central Command & AI Search Pill (Ctrl+K) when window has room
+    if (!narrow) {
+        ImGui::SameLine(0, dp(12.0f));
+        ImGui::SetCursorPosY((barH - row) * 0.5f);
+        ImGui::PushStyleColor(ImGuiCol_Button, col::bg0);
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, col::bg2);
+        ImGui::PushStyleColor(ImGuiCol_Text, col::dim);
+        if (ImGui::Button(ICON_FA_MAGNIFYING_GLASS "  Command / AI layout…  Ctrl+K",
+                          ImVec2(dp(210.0f), row))) {
+            showPalette_ = true;
+        }
+        ImGui::PopStyleColor(3);
+    }
+
     // Right cluster. Measure it; if it won't fit, drop the labels on the
-    // lower-priority buttons so Publish and Build & play always stay whole.
+    // lower-priority buttons so Publish and Play in TF2 always stay whole.
+    const bool sealed = isMapSealed();
+    const char* sealLabel = sealed ? (ICON_FA_CIRCLE_CHECK "  Sealed")
+                                   : (ICON_FA_TRIANGLE_EXCLAMATION "  Seal Map");
     char gridLabel[48];
     std::snprintf(gridLabel, sizeof(gridLabel), ICON_FA_TABLE_CELLS "  Grid %d", gridSize_);
     const char* snapLabel = snap_ ? ICON_FA_CHECK "  Snap" : ICON_FA_XMARK "  Snap";
     auto bw = [&](const char* s) {
-        // CalcTextSize under-reports icon-font runs (the FA merge advance is
-        // tuned wider than the metric), so pad generously.
         return ImGui::CalcTextSize(s, nullptr, true).x +
                ImGui::GetStyle().FramePadding.x * 2.0f + dp(14.0f);
     };
@@ -750,16 +816,43 @@ void Editor::drawTopBar() {
     auto clusterW = [&](bool compact) {
         const char* g = compact ? ICON_FA_TABLE_CELLS : gridLabel;
         const char* s = compact ? (snap_ ? ICON_FA_CHECK : ICON_FA_XMARK) : snapLabel;
+        const char* sl = compact ? (sealed ? ICON_FA_CIRCLE_CHECK : ICON_FA_TRIANGLE_EXCLAMATION) : sealLabel;
         const char* pub = compact ? ICON_FA_CLOUD_ARROW_UP
                                   : ICON_FA_CLOUD_ARROW_UP "  Publish";
-        return bw(g) + gap + bw(s) + gap + bw(ICON_FA_MAGNET) + gap + bw(ICON_FA_GEAR) +
-               gap + bw(ICON_FA_BARS) + gap2 + bw(pub) + gap2 +
-               bw(ICON_FA_PLAY "  Build & play") + padX + dp(28.0f);
+        return bw(sl) + gap2 + bw(g) + gap + bw(s) + gap + bw(ICON_FA_MAGNET) + gap +
+               bw(ICON_FA_PERSON) + gap + bw(ICON_FA_GEAR) + gap + bw(ICON_FA_BARS) +
+               gap2 + bw(pub) + gap2 + bw(ICON_FA_PLAY "  Play in TF2") + dp(26.0f) +
+               padX + dp(28.0f);
     };
     const bool compact = clusterW(false) > avail;
-    ImGui::SetCursorPosX(std::max(curX + dp(12.0f),
+    ImGui::SetCursorPosX(std::max(curX + dp(8.0f),
                                   ImGui::GetWindowWidth() - clusterW(compact)));
     ImGui::SetCursorPosY((barH - row) * 0.5f);
+
+    // Live Map Seal / Leak Health Badge (1-click auto-seal when unsealed)
+    if (hasDoc()) {
+        ImGui::PushStyleColor(ImGuiCol_Button, col::bg2);
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, col::bg3);
+        ImGui::PushStyleColor(ImGuiCol_Text, sealed ? col::good : col::acc);
+        const char* slBtn = compact
+                                ? (sealed ? ICON_FA_CIRCLE_CHECK : ICON_FA_TRIANGLE_EXCLAMATION)
+                                : sealLabel;
+        if (ImGui::Button(slBtn, ImVec2(0, row))) {
+            if (!sealed)
+                quickSealMap();
+            else {
+                runMapCheck();
+                ImGui::SetWindowFocus("Map Check");
+            }
+        }
+        ImGui::PopStyleColor(3);
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip(sealed
+                                  ? "Map is sealed with a skybox shell and 0 leaks.\nClick to run full Map Check."
+                                  : "Map is unsealed (no skybox shell around play space).\nClick to 1-click auto-seal with skybox!");
+        }
+        ImGui::SameLine(0, gap2);
+    }
 
     if (toolButton(compact ? ICON_FA_TABLE_CELLS : gridLabel,
                    false, compact ? "Grid size" : nullptr))
@@ -782,6 +875,11 @@ void Editor::drawTopBar() {
         snapGeo_ = !snapGeo_;
 
     ImGui::SameLine(0, gap);
+    if (toolButton(ICON_FA_PERSON, showScaleGhost_,
+                   "Toggle TF2 player scale & jump-clearance ghost in 3D view"))
+        showScaleGhost_ = !showScaleGhost_;
+
+    ImGui::SameLine(0, gap);
     if (toolButton(ICON_FA_GEAR, showSettings_, "Options")) showSettings_ = !showSettings_;
 
     ImGui::SameLine(0, gap);
@@ -798,14 +896,36 @@ void Editor::drawTopBar() {
     }
 
     ImGui::SameLine(0, gap2);
-    ImGui::PushStyleColor(ImGuiCol_Button, col::bg2);
-    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, col::bg3);
-    ImGui::PushStyleColor(ImGuiCol_Text, col::acc);
-    if (ImGui::Button(ICON_FA_PLAY "  Build & play", ImVec2(0, row))) {
+    ImGui::PushStyleColor(ImGuiCol_Button, col::acc);
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.95f, 0.62f, 0.30f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_Text, col::bg0);
+    if (ImGui::Button(ICON_FA_PLAY "  Play in TF2", ImVec2(0, row))) {
         showCompile_ = true;
         if (!compiler_.running() && hasDoc()) startCompile();
     }
     ImGui::PopStyleColor(3);
+    ImGui::SameLine(0, dp(1.0f));
+    ImGui::PushStyleColor(ImGuiCol_Button, col::bg2);
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, col::bg3);
+    ImGui::PushStyleColor(ImGuiCol_Text, col::acc);
+    if (ImGui::Button(ICON_FA_CARET_DOWN "##playdrop", ImVec2(dp(22.0f), row))) {
+        ImGui::OpenPopup("##compileprofilepop");
+    }
+    ImGui::PopStyleColor(3);
+    if (ImGui::BeginPopup("##compileprofilepop")) {
+        ImGui::TextDisabled("COMPILE PROFILE");
+        if (ImGui::MenuItem(ICON_FA_BOLT "  Fast Compile (4s · no vis)", nullptr,
+                            compileProfile_ == 0))
+            compileProfile_ = 0;
+        if (ImGui::MenuItem(ICON_FA_SUN "  Final Compile (full vis + HDR)", nullptr,
+                            compileProfile_ == 1))
+            compileProfile_ = 1;
+        ImGui::Separator();
+        ImGui::MenuItem("Launch TF2 after compile", nullptr, &compileLaunch_);
+        if (ImGui::MenuItem(ICON_FA_HAMMER "  Open Build & Play window…"))
+            showCompile_ = true;
+        ImGui::EndPopup();
+    }
 
     ImGui::EndChild();
     ImGui::PopStyleColor();
@@ -838,6 +958,15 @@ void Editor::drawViewMenuPopup() {
     ImGui::MenuItem("Static props", nullptr, &settings_.showProps);
     ImGui::MenuItem("Point entities", nullptr, &settings_.showPointEntities);
     ImGui::MenuItem("Wire overlay (3D)", nullptr, &settings_.wireOverlay);
+    ImGui::Separator();
+    ImGui::TextDisabled("Pootis Studio 2.0 Overlays");
+    ImGui::MenuItem("Floating tool rail (left)", nullptr, &showFloatingRail_);
+    ImGui::MenuItem("PiP 2D blueprint minimap (Space)", nullptr, &showPipOrtho_);
+    ImGui::MenuItem("Bottom visual kit dock", nullptr, &showBottomDock_);
+    ImGui::MenuItem("TF2 scale & jump ghost", nullptr, &showScaleGhost_);
+    ImGui::MenuItem("Contextual selection HUD", nullptr, &showContextHud_);
+    ImGui::MenuItem("Gameplay readiness flow bar", nullptr, &showFlowBar_);
+    ImGui::MenuItem("Smart auto-carve doorways/windows", nullptr, &autoCarveDoors_);
     ImGui::Separator();
     ImGui::SetNextItemWidth(160);
     ImGui::SliderFloat("Exposure", &settings_.exposure, 0.2f, 3.0f, "%.2f");
@@ -1615,16 +1744,19 @@ void Editor::drawViewportPanel(ViewPanel& p, bool* pOpen) {
 
     drawGizmo(p, aspect);
 
-    // Corner label like Hammer.
+    // Corner label like Hammer (hidden in clean TF2 In-Game HUD mode).
     ImVec2 tl(p.contentMin.x, p.contentMin.y);
     ImDrawList* dl = ImGui::GetWindowDrawList();
-    dl->AddText(ImVec2(tl.x + 8, tl.y + 6), IM_COL32(210, 210, 210, 200), p.title);
+    if (!useWorkshopUi_)
+        dl->AddText(ImVec2(tl.x + 8, tl.y + 6), IM_COL32(210, 210, 210, 200), p.title);
 
     drawEntityTags(p, aspect, dl);
     drawSubObjectOverlay(p, aspect, dl);
     drawFaceOverlay(p, aspect, dl);
     drawClipOverlay(p, aspect, dl);
     drawBlockOverlay(p, aspect, dl);
+    drawPushPullOverlay(p, aspect, dl);
+    drawScaleGhostOverlay(p, aspect, dl);
 
     // Snap-to-geometry indicator: a ring on the vertex a move locked onto.
     if (snapMarkOn_ && (moveDrag_ != 0 || mx_.op != 0)) {
@@ -1646,7 +1778,9 @@ void Editor::drawViewportPanel(ViewPanel& p, bool* pOpen) {
     drawRoadOverlay(p, aspect, dl);
     drawLeakOverlay(p, aspect, dl);
     drawPlacePreview(p, aspect, dl);
+    drawPaintDragOverlay(p, aspect, dl);
     drawModalXformHud(p, dl);
+    drawWalkPlaytestHud(p, dl);
 
     if (!hasMap() && p.kind == ViewKind::Perspective) {
         const char* msg = "Open a .bsp  —  File > Open BSP  (Ctrl+O)  or drag one in";
@@ -1656,9 +1790,8 @@ void Editor::drawViewportPanel(ViewPanel& p, bool* pOpen) {
                     IM_COL32(180, 180, 185, 220), msg);
     }
 
-    // Floating top-left toolbar (like Blender's header): pick mode always,
-    // plus the Move/Rotate/Scale switcher once something is selected.
-    if (hasDoc() && tool_ == Tool::Select) {
+    // Floating top-left toolbar (classic layout only).
+    if (!useWorkshopUi_ && hasDoc() && tool_ == Tool::Select) {
         ImGui::SetCursorScreenPos(ImVec2(tl.x + 8, tl.y + 26));
         ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(3, 3));
         const ImVec2 bsz(pb::ui::dp(26.0f), pb::ui::dp(22.0f));
@@ -1695,11 +1828,26 @@ void Editor::drawViewportPanel(ViewPanel& p, bool* pOpen) {
         }
         ImGui::PopStyleVar();
     }
+
+    // Classic Canvas Studio overlays (Mockup 3 uses its own floating TF2 In-Game HUD)
+    if (p.kind == ViewKind::Perspective && !useWorkshopUi_) {
+        drawFloatingToolRail(p, dl);
+        drawPipMinimap(p, dl);
+        drawContextualSelectionHud(p, aspect, dl);
+        drawBottomKitDock(p, dl);
+        drawFlowBar(p, dl);
+    }
+
     ImGui::End();
 }
 
 void Editor::drawEntityTags(ViewPanel& p, float aspect, ImDrawList* dl) {
     if (!hasDoc() || doc_.entities().empty()) return;
+    // Keep the 3D TF2 In-Game HUD viewport clean: hide cluttered wireframe entity text unless
+    // in Wire tool or explicitly toggled on via Point Entities!
+    if (useWorkshopUi_ && p.kind == ViewKind::Perspective &&
+        tool_ != Tool::Wire && !settings_.showPointEntities)
+        return;
     // Always show entity markers on a hand-built map; on a big decompile (1000+
     // entities) the 3D view only shows them when "Point entities" is on, or it
     // becomes an unreadable scribble.
@@ -1752,24 +1900,29 @@ void Editor::drawEntityTags(ViewPanel& p, float aspect, ImDrawList* dl) {
         if (!tn.empty()) byName.emplace(tn, i);
     }
 
-    // --- I/O connection lines (drawn first, behind the boxes) ----------------
-    // On a small map every wire is useful context; on a real (often 1000+
-    // entity) decompiled map only the selection's own wiring is drawn, or the
-    // view would be an unreadable scribble.
-    // `linked` collects every entity index at either end of a drawn connection
-    // so the label pass can name just those + the selection.
+    // --- I/O connection Bezier curves (drawn first, behind the boxes) ---------
+    // Pootis Builder 2.0: smooth cubic Bezier curves with glowing mid-wire
+    // [Output ➔ Input] event badges when selected or in Tool::Wire.
     std::vector<char> linked(doc_.entities().size(), 0);
-    const bool wireAll = doc_.entities().size() <= 60;
-    const ImU32 wireCol = IM_COL32(196, 150, 230, 165);
-    const ImU32 wireSel = IM_COL32(255, 190, 120, 235);
+    const bool wireAll = doc_.entities().size() <= 60 || tool_ == Tool::Wire;
+    const ImU32 wireCol = IM_COL32(196, 150, 230, 185);
+    const ImU32 wireSel = IM_COL32(255, 175, 85, 250);
+    const ImU32 wireGlow = IM_COL32(255, 150, 50, 70);
     for (size_t i = 0; i < doc_.entities().size(); ++i) {
         const auto& e = doc_.entities()[i];
         if (e.connections.empty()) continue;
         if (!wireAll && (int)i != selectedEntity_) continue;
         for (const auto& conn : e.connections) {
-            std::string tgt = conn.second;
-            const size_t comma = tgt.find_first_of(",\x1b");
-            if (comma != std::string::npos) tgt = tgt.substr(0, comma);
+            std::string raw = conn.second;
+            std::string tgt = raw;
+            std::string inp = "Trigger";
+            const size_t c1 = raw.find_first_of(",\x1b");
+            if (c1 != std::string::npos) {
+                tgt = raw.substr(0, c1);
+                const size_t c2 = raw.find_first_of(",\x1b", c1 + 1);
+                inp = (c2 != std::string::npos) ? raw.substr(c1 + 1, c2 - c1 - 1)
+                                                : raw.substr(c1 + 1);
+            }
             if (tgt.empty()) continue;
             auto range = byName.equal_range(tgt);
             for (auto it = range.first; it != range.second; ++it) {
@@ -1778,19 +1931,67 @@ void Editor::drawEntityTags(ViewPanel& p, float aspect, ImDrawList* dl) {
                 const ImVec2 s0 = project(centres[i], a);
                 const ImVec2 s1 = project(centres[j], b);
                 if (!a || !b) continue;
-                const bool hot = (int)i == selectedEntity_ || j == selectedEntity_;
+                const bool hot = (int)i == selectedEntity_ || j == selectedEntity_ ||
+                                 tool_ == Tool::Wire;
                 if (hot) { linked[i] = 1; linked[j] = 1; }
-                dl->AddLine(s0, s1, hot ? wireSel : wireCol, hot ? 2.0f : 1.3f);
                 const ImVec2 d(s1.x - s0.x, s1.y - s0.y);
                 const float L = std::sqrt(d.x * d.x + d.y * d.y);
+                const float arch = std::clamp(L * 0.24f, 18.0f, 84.0f);
+                const ImVec2 cp1(s0.x + d.x * 0.30f, s0.y + d.y * 0.30f - arch);
+                const ImVec2 cp2(s0.x + d.x * 0.70f, s0.y + d.y * 0.70f - arch);
+                if (hot)
+                    dl->AddBezierCubic(s0, cp1, cp2, s1, wireGlow, 6.0f);
+                dl->AddBezierCubic(s0, cp1, cp2, s1, hot ? wireSel : wireCol,
+                                   hot ? 2.5f : 1.6f);
                 if (L > 1.0f) {
-                    const ImVec2 u(d.x / L, d.y / L), n(-u.y, u.x);
+                    const ImVec2 td(s1.x - cp2.x, s1.y - cp2.y);
+                    const float tL = std::max(1.0f, std::sqrt(td.x * td.x + td.y * td.y));
+                    const ImVec2 u(td.x / tL, td.y / tL), n(-u.y, u.x);
                     const ImVec2 tip(s1.x - u.x * 13, s1.y - u.y * 13);
                     dl->AddTriangleFilled(s1, ImVec2(tip.x + n.x * 6, tip.y + n.y * 6),
                                           ImVec2(tip.x - n.x * 6, tip.y - n.y * 6),
                                           hot ? wireSel : wireCol);
                 }
+                // Mid-curve event pill badge when hot or in Wire tool
+                if (hot && L > 75.0f) {
+                    const ImVec2 mid(
+                        0.125f * s0.x + 0.375f * cp1.x + 0.375f * cp2.x + 0.125f * s1.x,
+                        0.125f * s0.y + 0.375f * cp1.y + 0.375f * cp2.y + 0.125f * s1.y);
+                    const std::string pill = conn.first + " -> " + inp;
+                    const ImVec2 ts = ImGui::CalcTextSize(pill.c_str());
+                    const ImVec2 pmn(mid.x - ts.x * 0.5f - 6.0f, mid.y - ts.y * 0.5f - 2.0f);
+                    const ImVec2 pmx(mid.x + ts.x * 0.5f + 6.0f, mid.y + ts.y * 0.5f + 2.0f);
+                    dl->AddRectFilled(pmn, pmx, IM_COL32(20, 22, 27, 230), 4.0f);
+                    dl->AddRect(pmn, pmx, wireSel, 4.0f);
+                    dl->AddText(ImVec2(mid.x - ts.x * 0.5f, mid.y - ts.y * 0.5f),
+                                IM_COL32(255, 225, 175, 255), pill.c_str());
+                }
             }
+        }
+    }
+
+    // Interactive 3D Wire drag preview when Tool::Wire is dragging
+    if (tool_ == Tool::Wire && wireDragging_ &&
+        wireSourceEnt_ >= 0 && wireSourceEnt_ < (int)centres.size()) {
+        bool ok0;
+        const ImVec2 s0 = project(centres[wireSourceEnt_], ok0);
+        if (ok0) {
+            ImVec2 s1 = wireDragMouse_;
+            if (wireHoverEnt_ >= 0 && wireHoverEnt_ < (int)centres.size() &&
+                wireHoverEnt_ != wireSourceEnt_) {
+                bool ok1;
+                const ImVec2 sp1 = project(centres[wireHoverEnt_], ok1);
+                if (ok1) s1 = sp1;
+            }
+            const ImVec2 d(s1.x - s0.x, s1.y - s0.y);
+            const float L = std::sqrt(d.x * d.x + d.y * d.y);
+            const float arch = std::clamp(L * 0.25f, 18.0f, 90.0f);
+            const ImVec2 cp1(s0.x + d.x * 0.3f, s0.y + d.y * 0.3f - arch);
+            const ImVec2 cp2(s0.x + d.x * 0.7f, s0.y + d.y * 0.7f - arch);
+            dl->AddBezierCubic(s0, cp1, cp2, s1, IM_COL32(255, 160, 50, 90), 7.0f);
+            dl->AddBezierCubic(s0, cp1, cp2, s1, IM_COL32(255, 190, 90, 255), 3.0f);
+            dl->AddCircleFilled(s0, 6.0f, IM_COL32(255, 190, 90, 255));
+            dl->AddCircleFilled(s1, 6.0f, IM_COL32(100, 230, 140, 255));
         }
     }
 
@@ -2999,11 +3200,19 @@ void Editor::placePiece(const std::string& piece, const glm::vec3& atRaw,
              {{0, -1, 0}, -y0}, {sn, glm::dot(sn, glm::vec3(x1, at.y, z0))}},
             floorMat));
     } else if (piece == "Doorway") {
-        // A wall with a 64x112 gap in the middle.
+        // A wall with a 64x112 gap in the middle — or smart auto-cut through an
+        // existing wall when dropped onto one!
         const float W = 128, H = 160, T = 8, gw = 40, gh = 112;
-        box({at.x - W, at.y - T, at.z}, {at.x - gw, at.y + T, at.z + H}, wallMat);
-        box({at.x + gw, at.y - T, at.z}, {at.x + W, at.y + T, at.z + H}, wallMat);
-        box({at.x - gw, at.y - T, at.z + gh}, {at.x + gw, at.y + T, at.z + H}, wallMat);
+        const int carved =
+            autoCarveDoors_
+                ? autoCarveOpening({at.x - gw, at.y - 32.0f, at.z - 1.0f},
+                                   {at.x + gw, at.y + 32.0f, at.z + gh})
+                : 0;
+        if (carved == 0) {
+            box({at.x - W, at.y - T, at.z}, {at.x - gw, at.y + T, at.z + H}, wallMat);
+            box({at.x + gw, at.y - T, at.z}, {at.x + W, at.y + T, at.z + H}, wallMat);
+            box({at.x - gw, at.y - T, at.z + gh}, {at.x + gw, at.y + T, at.z + H}, wallMat);
+        }
     } else if (piece == "Platform") {
         box({at.x - 96, at.y - 96, at.z + 96}, {at.x + 96, at.y + 96, at.z + 112},
             floorMat);
@@ -3017,13 +3226,21 @@ void Editor::placePiece(const std::string& piece, const glm::vec3& atRaw,
     } else if (piece == "Cover") {
         box({at.x - 96, at.y - 8, at.z}, {at.x + 96, at.y + 8, at.z + 44}, wallMat);
     } else if (piece == "Window") {
-        // A wall with a chest-high rectangular opening.
+        // A wall with a chest-high rectangular opening — or smart auto-cut through
+        // an existing wall when dropped onto one!
         const float W = 128, H = 160, T = 8, gw = 56, sill = 44, head = 128;
-        box({at.x - W, at.y - T, at.z}, {at.x - gw, at.y + T, at.z + H}, wallMat);
-        box({at.x + gw, at.y - T, at.z}, {at.x + W, at.y + T, at.z + H}, wallMat);
-        box({at.x - gw, at.y - T, at.z}, {at.x + gw, at.y + T, at.z + sill}, wallMat);
-        box({at.x - gw, at.y - T, at.z + head}, {at.x + gw, at.y + T, at.z + H},
-            wallMat);
+        const int carved =
+            autoCarveDoors_
+                ? autoCarveOpening({at.x - gw, at.y - 32.0f, at.z + sill},
+                                   {at.x + gw, at.y + 32.0f, at.z + head})
+                : 0;
+        if (carved == 0) {
+            box({at.x - W, at.y - T, at.z}, {at.x - gw, at.y + T, at.z + H}, wallMat);
+            box({at.x + gw, at.y - T, at.z}, {at.x + W, at.y + T, at.z + H}, wallMat);
+            box({at.x - gw, at.y - T, at.z}, {at.x + gw, at.y + T, at.z + sill}, wallMat);
+            box({at.x - gw, at.y - T, at.z + head}, {at.x + gw, at.y + T, at.z + H},
+                wallMat);
+        }
     } else if (piece == "Spiral stairs") {
         const int n = std::clamp(stairSteps_ * 2, 8, 48);
         const float R = std::max(48.0f, stairWidth_ * 0.5f);
@@ -3258,6 +3475,10 @@ void Editor::placePiece(const std::string& piece, const glm::vec3& atRaw,
     } else if (piece == "Health / ammo") {
         ent("item_healthkit_medium", at + glm::vec3(-24, 0, 8), {});
         ent("item_ammopack_medium", at + glm::vec3(24, 0, 8), {});
+    } else if (piece == "Health pack") {
+        ent("item_healthkit_medium", at + glm::vec3(0, 0, 8), {});
+    } else if (piece == "Ammo pack") {
+        ent("item_ammopack_medium", at + glm::vec3(0, 0, 8), {});
     } else if (piece == "Capture point") {
         // A control point + the trigger that captures it, wired together.
         ent("team_control_point", at + glm::vec3(0, 0, 8),
@@ -3895,6 +4116,8 @@ void previewBox(const std::string& piece, glm::vec3& mn, glm::vec3& mx) {
         {"Moving platform", {-108, -96, 0}, {96, 96, 16}},
         {"Resupply", {-32, -16, 0}, {32, 16, 96}},
         {"Health / ammo", {-48, -16, 0}, {48, 16, 40}},
+        {"Health pack", {-20, -16, 0}, {20, 16, 36}},
+        {"Ammo pack", {-20, -16, 0}, {20, 16, 36}},
     };
     for (const auto& b : tbl)
         if (piece == b.n) { mn = b.mn; mx = b.mx; return; }
@@ -4118,10 +4341,25 @@ void Editor::handleViewportInput(ViewPanel& p) {
         if (blockDragging_ && blockView_ == p.kind) handleBlockTool(p);
         if (clipDragging_ && clipView_ == p.kind) handleClipTool(p);
         if (subDragging_ && subDragView_ == p.kind) handleSubObjectInput(p);
+        if (ppDragging_ && ppView_ == &p) handlePushPullTool(p);
         return;
     }
     ImGuiIO& io = ImGui::GetIO();
     const float dt = std::clamp(io.DeltaTime, 0.0f, 0.1f);
+
+    // Instant F5 TF2 Walk/Jump Playtest owns viewport controls while active
+    if (p.kind == ViewKind::Perspective && ImGui::IsKeyPressed(ImGuiKey_F5)) {
+        toggleWalkPlaytest();
+        return;
+    }
+    if (walkPlaytest_) {
+        updateWalkPlaytest(p, dt);
+        return;
+    }
+
+    // Intuitive 3D click-drag Floor / Wall painting
+    handlePaintDrag(p);
+    if (paintDragging_) return;
 
     // Curvy road: each click adds a spline point; Enter finishes, Esc cancels.
     if (placing_ == "Curvy road") {
@@ -4159,6 +4397,8 @@ void Editor::handleViewportInput(ViewPanel& p) {
     }
 
     handleBlockTool(p);
+    handlePushPullTool(p);
+    handleWireTool(p);
 
     // Vertex/Edge/Face editing owns the mouse when a single brush is selected.
     const bool subActive = tool_ == Tool::Vertex && selection_.size() == 1;
@@ -6344,6 +6584,72 @@ struct KitPiece {
     const char* hint;
 };
 
+// Draws a crisp procedural 3D isometric silhouette preview inside a Build Kit card.
+void drawKitIsoGlyph(ImDrawList* dl, const ImVec2& c, float r, const char* name, bool active) {
+    const ImU32 topC = active ? IM_COL32(250, 175, 95, 220) : IM_COL32(115, 130, 150, 165);
+    const ImU32 lftC = active ? IM_COL32(215, 135, 55, 220) : IM_COL32(82, 95, 112, 165);
+    const ImU32 rgtC = active ? IM_COL32(170, 95, 35, 220)  : IM_COL32(58, 68, 84, 165);
+    const ImU32 wire = active ? IM_COL32(255, 215, 155, 240) : IM_COL32(155, 175, 198, 200);
+
+    auto isoPt = [&](float x, float y, float z) -> ImVec2 {
+        return ImVec2(c.x + (x - y) * 0.866f * r,
+                      c.y + (x + y) * 0.5f * r - z * r);
+    };
+    auto drawIsoBox = [&](float x0, float y0, float z0, float x1, float y1, float z1,
+                          ImU32 tc, ImU32 lc, ImU32 rc) {
+        const ImVec2 t0 = isoPt(x0, y0, z1), t1 = isoPt(x1, y0, z1),
+                     t2 = isoPt(x1, y1, z1), t3 = isoPt(x0, y1, z1);
+        const ImVec2 b1 = isoPt(x1, y0, z0), b2 = isoPt(x1, y1, z0),
+                     b3 = isoPt(x0, y1, z0);
+        dl->AddQuadFilled(t0, t1, t2, t3, tc);
+        dl->AddQuadFilled(t3, t2, b2, b3, lc);
+        dl->AddQuadFilled(t2, t1, b1, b2, rc);
+        dl->AddQuad(t0, t1, t2, t3, wire, 1.0f);
+        dl->AddQuad(t3, t2, b2, b3, wire, 1.0f);
+        dl->AddQuad(t2, t1, b1, b2, wire, 1.0f);
+    };
+
+    const std::string n = name ? name : "";
+    if (n == "Floor" || n == "Ceiling" || n == "Route" || n == "Platform") {
+        drawIsoBox(-0.85f, -0.85f, -0.15f, 0.85f, 0.85f, 0.15f, topC, lftC, rgtC);
+    } else if (n == "Wall" || n == "Cover" || n == "Clip wall" || n == "Fence") {
+        drawIsoBox(-0.85f, -0.18f, -0.65f, 0.85f, 0.18f, 0.65f, topC, lftC, rgtC);
+    } else if (n == "Doorway" || n == "Window" || n == "Working door" || n == "Spawn door") {
+        drawIsoBox(-0.85f, -0.18f, -0.65f, -0.28f, 0.18f, 0.65f, topC, lftC, rgtC);
+        drawIsoBox(0.28f, -0.18f, -0.65f, 0.85f, 0.18f, 0.65f, topC, lftC, rgtC);
+        drawIsoBox(-0.28f, -0.18f, 0.22f, 0.28f, 0.18f, 0.65f, topC, lftC, rgtC);
+    } else if (n == "Stairs" || n == "Spiral stairs") {
+        for (int s = 0; s < 3; ++s) {
+            const float y0 = -0.75f + s * 0.50f;
+            const float z1 = -0.45f + (s + 1) * 0.35f;
+            drawIsoBox(-0.65f, y0, -0.55f, 0.65f, y0 + 0.50f, z1, topC, lftC, rgtC);
+        }
+    } else if (n == "Ramp" || n == "Wedge") {
+        const ImVec2 a = isoPt(-0.8f, -0.6f, -0.5f), b = isoPt(0.8f, -0.6f, 0.5f),
+                     c2 = isoPt(0.8f, 0.6f, 0.5f), d = isoPt(-0.8f, 0.6f, -0.5f),
+                     e = isoPt(0.8f, 0.6f, -0.5f), f = isoPt(0.8f, -0.6f, -0.5f);
+        dl->AddQuadFilled(a, b, c2, d, topC);
+        dl->AddTriangleFilled(d, c2, e, lftC);
+        dl->AddQuadFilled(b, f, e, c2, rgtC);
+        dl->AddQuad(a, b, c2, d, wire, 1.0f);
+    } else if (n == "RED spawn") {
+        drawIsoBox(-0.75f, -0.75f, -0.55f, 0.75f, 0.75f, 0.55f,
+                   IM_COL32(220, 75, 70, 210), IM_COL32(175, 50, 48, 210),
+                   IM_COL32(135, 35, 35, 210));
+    } else if (n == "BLU spawn") {
+        drawIsoBox(-0.75f, -0.75f, -0.55f, 0.75f, 0.75f, 0.55f,
+                   IM_COL32(75, 145, 230, 210), IM_COL32(52, 110, 185, 210),
+                   IM_COL32(38, 82, 145, 210));
+    } else if (n == "KOTH point" || n == "Capture point" || n == "CTF setup") {
+        drawIsoBox(-0.80f, -0.80f, -0.45f, 0.80f, 0.80f, -0.20f, topC, lftC, rgtC);
+        dl->AddCircleFilled(ImVec2(c.x, c.y - r * 0.1f), r * 0.36f,
+                            IM_COL32(250, 175, 70, 220), 12);
+        dl->AddCircle(ImVec2(c.x, c.y - r * 0.1f), r * 0.36f, wire, 12, 1.2f);
+    } else {
+        drawIsoBox(-0.68f, -0.68f, -0.55f, 0.68f, 0.68f, 0.55f, topC, lftC, rgtC);
+    }
+}
+
 void kitCards(const KitPiece* pieces, int count, std::string* placing,
               std::string* status, std::string* dragOut = nullptr) {
     using pb::ui::dp;
@@ -6354,7 +6660,7 @@ void kitCards(const KitPiece* pieces, int count, std::string* placing,
     const int ncol = (avail - gap) * 0.5f >= dp(120.0f) ? 2 : 1;
     const float cellW = ncol == 2 ? (avail - gap) * 0.5f : avail;
     // Tall enough for the icon+name row plus two wrapped hint lines at any scale.
-    const float cellH = ImGui::GetTextLineHeight() * 3.4f + dp(16.0f);
+    const float cellH = ImGui::GetTextLineHeight() * 3.4f + dp(18.0f);
     ImDrawList* dl = ImGui::GetWindowDrawList();
     for (int i = 0; i < count; ++i) {
         if (ncol == 2 && (i % 2)) ImGui::SameLine(0, gap);
@@ -6386,19 +6692,24 @@ void kitCards(const KitPiece* pieces, int count, std::string* placing,
         if (hovered && !ImGui::IsMouseDown(ImGuiMouseButton_Left))
             ImGui::SetTooltip("%s\n%s", pieces[i].name, pieces[i].hint);
 
-        // Paint the card over the selectable's rect.
+        // Paint the card over the selectable's rect + 3D isometric preview badge.
         const ImU32 bg = on ? u32(col::bg3) : (hovered ? u32(col::bg3) : u32(col::bg2));
-        dl->AddRectFilled(p0, ImVec2(p0.x + cellW, p0.y + cellH), bg, 4.0f);
+        dl->AddRectFilled(p0, ImVec2(p0.x + cellW, p0.y + cellH), bg, 5.0f);
         dl->AddRect(p0, ImVec2(p0.x + cellW, p0.y + cellH),
-                    on ? u32(col::acc) : u32(col::bd), 4.0f, 0, on ? 2.0f : 1.0f);
+                    on ? u32(col::acc) : u32(col::bd), 5.0f, 0, on ? 2.0f : 1.0f);
         const float pad = dp(9.0f);
+        const float isoW = dp(34.0f);
+        const ImVec2 isoCenter(p0.x + cellW - isoW * 0.55f - dp(4.0f),
+                               p0.y + cellH * 0.52f);
+        drawKitIsoGlyph(dl, isoCenter, dp(13.5f), pieces[i].name, on || hovered);
         dl->AddText(ImVec2(p0.x + pad, p0.y + pad), u32(col::acc), pieces[i].icon);
         dl->AddText(fontUiMed ? fontUiMed : nullptr, 0.0f,
-                    ImVec2(p0.x + pad + dp(22.0f), p0.y + pad - dp(1.0f)),
+                    ImVec2(p0.x + pad + dp(20.0f), p0.y + pad - dp(1.0f)),
                     u32(col::tx), pieces[i].name);
         dl->AddText(nullptr, 0.0f,
                     ImVec2(p0.x + pad, p0.y + pad + ImGui::GetTextLineHeight() + dp(4.0f)),
-                    u32(col::faint), pieces[i].hint, nullptr, cellW - pad * 2.0f);
+                    u32(col::faint), pieces[i].hint, nullptr,
+                    std::max(dp(40.0f), cellW - pad * 2.0f - isoW));
         ImGui::PopID();
     }
 }
@@ -8187,6 +8498,7 @@ void Editor::drawTextureBrowser() {
 // draw this.
 void Editor::drawMaterialGrid() {
     using namespace pb::ui;
+    drawThemeStylerCards();
     if (!sourceFs_.ready()) {
         ImGui::TextDisabled("No game content mounted (install / locate TF2).");
         return;
@@ -9139,11 +9451,20 @@ void Editor::drawCommandPalette() {
             {"Frame map (F)", [&] { if (hasMap()) frameAllViews(); }},
             {"Undo", [&] { undo(); }},
             {"Redo", [&] { redo(); }},
-            {"Tool: Select", [&] { tool_ = Tool::Select; }},
-            {"Tool: Block", [&] { tool_ = Tool::Block; }},
+            {"Tool: Select (V)", [&] { tool_ = Tool::Select; }},
+            {"Tool: Push/Pull Face (P)", [&] { tool_ = Tool::PushPull; }},
+            {"Tool: Block (B)", [&] { tool_ = Tool::Block; }},
             {"Tool: Vertex/Edge/Face", [&] { tool_ = Tool::Vertex; }},
-            {"Tool: Clip", [&] { tool_ = Tool::Clip; }},
-            {"Tool: Texture", [&] { tool_ = Tool::Texture; }},
+            {"Tool: Clip (C)", [&] { tool_ = Tool::Clip; }},
+            {"Tool: Texture (T)", [&] { tool_ = Tool::Texture; }},
+            {"Tool: 3D Logic Wire (L)", [&] { tool_ = Tool::Wire; }},
+            {"1-Click Seal Map with Skybox", [&] { quickSealMap(); }},
+            {"Theme: Alpine Sawmill", [&] { applyBuiltinTheme(0); }},
+            {"Theme: Badlands Desert", [&] { applyBuiltinTheme(1); }},
+            {"Theme: Spytech Secret Base", [&] { applyBuiltinTheme(2); }},
+            {"Theme: Nightfall Industrial", [&] { applyBuiltinTheme(3); }},
+            {"Toggle TF2 Player Scale Ghost", [&] { showScaleGhost_ = !showScaleGhost_; }},
+            {"Swap 2D/3D Blueprint View (Space)", [&] { swapPipView(); }},
             {"Dial: Guided", [&] { mode_ = Mode::Guided; layoutDirty_ = true; }},
             {"Dial: Standard", [&] { mode_ = Mode::Standard; layoutDirty_ = true; }},
             {"Dial: Full (Pro)", [&] { mode_ = Mode::Full; layoutDirty_ = true; }},
@@ -9641,12 +9962,16 @@ void Editor::handleSelectionResize(ViewPanel& p) {
     const int nHandles = persp ? 6 : 8;
 
     // Perspective: 6 face-centre handles, one per +/- world axis.
-    // Ortho: 4 corners + 4 edge midpoints in the view plane.
+    // In Workshop mode, push the handle grab target out to the glowing 3D arrow tip!
     auto handleWorld = [&](int h) {
         glm::vec3 w = ctr;
         if (persp) {
             const int ax = h / 2;
+            const float sign = (h & 1) ? 1.0f : -1.0f;
             w[ax] = (h & 1) ? mx[ax] : mn[ax];
+            if (useWorkshopUi_) {
+                w[ax] += sign * (h == 5 ? 48.0f : 32.0f);
+            }
             return w;
         }
         const float lo[2] = {mn[au], mn[av]}, hi[2] = {mx[au], mx[av]};
@@ -9676,7 +10001,8 @@ void Editor::handleSelectionResize(ViewPanel& p) {
     const ImVec2 m = ImGui::GetMousePos();
     resizeHot_ = -1;
     if (resizeHandle_ < 0 && p.hovered) {
-        const float reach = pb::ui::dp(persp ? kHandleReach3D : kHandleReach2D);
+        const float reach = pb::ui::dp(persp ? (useWorkshopUi_ ? 24.0f : kHandleReach3D)
+                                             : kHandleReach2D);
         float best = reach;
         for (int h = 0; h < nHandles; ++h) {
             const ImVec2 s = project(handleWorld(h));
@@ -10086,10 +10412,59 @@ void Editor::drawSelectionDims(ViewPanel& p, float aspect, ImDrawList* dl) {
         return projectPt(p.kind, vp, p.contentMin, p.contentSize, w, ok);
     };
 
-    // 3D view: 6 face-centre handles + a faint box, no dimension text.
+    // 3D view: Glowing directional Face-Pull Arrows in Workshop mode (NO tiny boxes!)
     if (p.kind == ViewKind::Perspective) {
         if (tool_ != Tool::Select) return;
         const glm::vec3 ctr = 0.5f * (mn + mx);
+        if (useWorkshopUi_) {
+            const glm::vec3 sz = mx - mn;
+            for (int hnd = 0; hnd < 6; ++hnd) {
+                if (hnd == 4) continue;  // Skip underside -Z arrow so view stays crisp
+                const int ax = hnd / 2;
+                const float sign = (hnd & 1) ? 1.0f : -1.0f;
+                glm::vec3 nrm(0.0f);
+                nrm[ax] = sign;
+                glm::vec3 base = ctr;
+                base[ax] = (hnd & 1) ? mx[ax] : mn[ax];
+                // Only draw side arrows on faces aimed broadly toward the camera
+                if (hnd != 5 && glm::dot(nrm, p.camera.pos - base) < -10.0f) continue;
+                const float len = (hnd == 5) ? 56.0f : 38.0f;
+                glm::vec3 tip = base + nrm * len;
+                bool ok0, ok1;
+                const ImVec2 s0 = pr(base, ok0);
+                const ImVec2 s1 = pr(tip, ok1);
+                if (!ok0 || !ok1) continue;
+                const bool hot = (hnd == resizeHot_ || hnd == resizeHandle_);
+                const ImU32 colArr = (hnd == 5)
+                                         ? (hot ? IM_COL32(120, 245, 255, 255) : IM_COL32(0, 229, 255, 245))
+                                         : (hot ? IM_COL32(255, 210, 110, 255) : IM_COL32(236, 154, 68, 235));
+                // Glowing shaft + crisp directional arrowhead + grab ring
+                dl->AddLine(s0, s1, IM_COL32(18, 16, 14, 180), pb::ui::dp(hot ? 7.0f : 5.5f));
+                dl->AddLine(s0, s1, colArr, pb::ui::dp(hot ? 4.2f : 3.2f));
+                const ImVec2 d(s1.x - s0.x, s1.y - s0.y);
+                const float L = std::hypot(d.x, d.y);
+                if (L > 4.0f) {
+                    const ImVec2 u(d.x / L, d.y / L), perp(-u.y, u.x);
+                    const float hs = pb::ui::dp(hot ? 14.0f : 11.5f);
+                    const float hw = pb::ui::dp(hot ? 9.0f : 7.5f);
+                    const ImVec2 back(s1.x - u.x * hs, s1.y - u.y * hs);
+                    dl->AddTriangleFilled(s1, ImVec2(back.x + perp.x * hw, back.y + perp.y * hw),
+                                          ImVec2(back.x - perp.x * hw, back.y - perp.y * hw), colArr);
+                }
+                if (hnd == 5) {
+                    char hl[48];
+                    std::snprintf(hl, sizeof(hl), "H: %.0fu", sz.z);
+                    const ImVec2 ts = ImGui::CalcTextSize(hl);
+                    const ImVec2 b0(s1.x + pb::ui::dp(10.0f), s1.y - ts.y * 0.5f - pb::ui::dp(3.0f));
+                    const ImVec2 b1(b0.x + ts.x + pb::ui::dp(12.0f), b0.y + ts.y + pb::ui::dp(6.0f));
+                    dl->AddRectFilled(b0, b1, IM_COL32(22, 20, 18, 230), pb::ui::dp(5.0f));
+                    dl->AddRect(b0, b1, colArr, pb::ui::dp(5.0f), 0, 1.4f);
+                    dl->AddText(ImVec2(b0.x + pb::ui::dp(6.0f), b0.y + pb::ui::dp(3.0f)),
+                                IM_COL32(225, 250, 255, 255), hl);
+                }
+            }
+            return;
+        }
         for (int hnd = 0; hnd < 6; ++hnd) {
             const int ax = hnd / 2;
             glm::vec3 wp = ctr;
@@ -10257,6 +10632,1034 @@ bool Editor::renderQuadToImage(int w, int h, std::vector<uint8_t>& rgba) {
         std::memcpy(b, tmp.data(), rowBytes);
     }
     return true;
+}
+
+// ===========================================================================
+// Pootis Builder 2.0 — Canvas Studio, Push-Pull CAD, Context HUD & 3D Wiring
+// ===========================================================================
+
+bool Editor::isMapSealed() const {
+    if (!hasDoc() || !leakLine_.empty()) return false;
+    int skyBrushes = 0;
+    for (const auto& s : doc_.worldSolids()) {
+        if (!s.valid) continue;
+        for (const auto& f : s.faces) {
+            if (f.material == "tools/toolsskybox" ||
+                f.material == "tools/toolsskybox2d") {
+                ++skyBrushes;
+                break;
+            }
+        }
+    }
+    return skyBrushes >= 6;
+}
+
+void Editor::quickSealMap() {
+    if (!hasDoc()) {
+        doc_.newBlank("untitled");
+        history_.reset(doc_);
+    }
+    if (doc_.worldExtra().get("skyname").empty())
+        doc_.worldExtra().set("skyname", "sky_tf2_04");
+    placePiece("Skybox seal", glm::vec3(0, 0, 0), /*commit=*/true);
+    leakLine_.clear();
+    status_ = "Map sealed with skybox shell (0 leaks)";
+}
+
+void Editor::swapPipView() {
+    pipViewIdx_ = std::clamp(pipViewIdx_, 1, 3);
+    viewOpen_[pipViewIdx_] = !viewOpen_[pipViewIdx_];
+    if (viewOpen_[pipViewIdx_]) {
+        ImGui::SetWindowFocus(views_[pipViewIdx_].title);
+        status_ = std::string("Focused ") + views_[pipViewIdx_].title +
+                  "  (press Space to return to 3D)";
+    } else {
+        ImGui::SetWindowFocus(views_[0].title);
+        status_ = "Returned to full-bleed 3D View";
+    }
+}
+
+void Editor::drawFloatingToolRail(ViewPanel& p, ImDrawList* dl) {
+    if (!showFloatingRail_ || !hasDoc()) return;
+    using namespace pb::ui;
+    const float btnSz = dp(32.0f);
+    const float pad = dp(5.0f);
+    const float gap = dp(3.0f);
+    struct RailItem {
+        Tool tool;
+        const char* icon;
+        const char* key;
+        const char* tip;
+    };
+    static const RailItem items[] = {
+        {Tool::Select,   ICON_FA_ARROW_POINTER,      "V", "Select & Transform  (V)"},
+        {Tool::PushPull, ICON_FA_UP_DOWN_LEFT_RIGHT, "P", "Push / Pull Face Extrude  (P)"},
+        {Tool::Block,    ICON_FA_CUBE,               "B", "Draw Brush Block  (B)"},
+        {Tool::Vertex,   ICON_FA_BEZIER_CURVE,       "v", "Vertex / Edge / Face Edit"},
+        {Tool::Clip,     ICON_FA_SCISSORS,           "C", "Clip Knife  (C)"},
+        {Tool::Texture,  ICON_FA_IMAGE,              "T", "Surface UV & Displacement  (T)"},
+        {Tool::Entity,   ICON_FA_LIGHTBULB,          "E", "Place Entity"},
+        {Tool::Wire,     ICON_FA_DIAGRAM_PROJECT,    "L", "3D Visual Entity Wiring  (L)"},
+    };
+    const int n = static_cast<int>(sizeof(items) / sizeof(items[0]));
+    const float railW = btnSz + pad * 2.0f;
+    const float railH = n * btnSz + (n - 1) * gap + pad * 2.0f;
+    const ImVec2 rMin(p.contentMin.x + dp(10.0f),
+                      p.contentMin.y + std::max(dp(58.0f), (p.contentSize.y - railH) * 0.42f));
+    const ImVec2 rMax(rMin.x + railW, rMin.y + railH);
+
+    dl->AddRectFilled(rMin, rMax, IM_COL32(20, 22, 27, 230), dp(7.0f));
+    dl->AddRect(rMin, rMax, u32(col::bd2), dp(7.0f), 0, 1.0f);
+
+    for (int i = 0; i < n; ++i) {
+        const ImVec2 bPos(rMin.x + pad, rMin.y + pad + i * (btnSz + gap));
+        ImGui::SetCursorScreenPos(bPos);
+        ImGui::PushID(4000 + i);
+        const bool active = (tool_ == items[i].tool);
+        ImGui::PushStyleColor(ImGuiCol_Button,
+                              active ? col::acc : ImVec4(0.15f, 0.16f, 0.19f, 0.90f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
+                              active ? col::acc : col::bg3);
+        ImGui::PushStyleColor(ImGuiCol_Text, active ? col::bg0 : col::tx);
+        if (ImGui::Button(items[i].icon, ImVec2(btnSz, btnSz))) {
+            tool_ = items[i].tool;
+            handlesDirty_ = true;
+            subDragging_ = false;
+            status_ = items[i].tip;
+        }
+        ImGui::PopStyleColor(3);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("%s\nPress Q for Radial Pie Menu", items[i].tip);
+        dl->AddText(fontMono ? fontMono : nullptr, dp(9.5f),
+                    ImVec2(bPos.x + btnSz - dp(8.5f), bPos.y + btnSz - dp(11.0f)),
+                    active ? IM_COL32(20, 22, 26, 220) : IM_COL32(160, 168, 180, 195),
+                    items[i].key);
+        ImGui::PopID();
+    }
+}
+
+void Editor::drawPipMinimap(ViewPanel& p, ImDrawList* dl) {
+    if (!showPipOrtho_ || !hasMap()) return;
+    if (p.contentSize.x < pb::ui::dp(420.0f) || p.contentSize.y < pb::ui::dp(280.0f))
+        return;
+    using namespace pb::ui;
+    const float pipW = dp(216.0f);
+    const float pipH = dp(142.0f);
+    const float hdrH = dp(22.0f);
+    const ImVec2 boxMin(p.contentMin.x + p.contentSize.x - pipW - dp(12.0f),
+                        p.contentMin.y + dp(10.0f));
+    const ImVec2 boxMax(boxMin.x + pipW, boxMin.y + pipH + hdrH);
+
+    dl->AddRectFilled(boxMin, boxMax, IM_COL32(16, 18, 22, 235), dp(6.0f));
+
+    pipViewIdx_ = std::clamp(pipViewIdx_, 1, 3);
+    ViewPanel& ortho = views_[pipViewIdx_];
+    if (!viewOpen_[pipViewIdx_]) {
+        ortho.camera.orthoCenter =
+            !selection_.empty() ? selectionCenter() : p.camera.pos;
+        const int ow = std::max(64, static_cast<int>(pipW));
+        const int oh = std::max(64, static_cast<int>(pipH));
+        ortho.fb.resize(ow, oh);
+        ortho.fb.bind();
+        renderer_.renderView(ortho.camera, ow, oh, settings_);
+        Framebuffer::unbind();
+    }
+
+    const char* const vNames[] = {"Top", "Front", "Side"};
+    ImGui::SetCursorScreenPos(ImVec2(boxMin.x + dp(5.0f), boxMin.y + dp(2.0f)));
+    for (int k = 0; k < 3; ++k) {
+        if (k) ImGui::SameLine(0, dp(2.0f));
+        ImGui::PushID(4100 + k);
+        const bool on = (pipViewIdx_ == k + 1);
+        ImGui::PushStyleColor(ImGuiCol_Button, on ? col::acc : col::bg2);
+        ImGui::PushStyleColor(ImGuiCol_Text, on ? col::bg0 : col::dim);
+        if (ImGui::SmallButton(vNames[k])) pipViewIdx_ = k + 1;
+        ImGui::PopStyleColor(2);
+        ImGui::PopID();
+    }
+    ImGui::SameLine(0, dp(6.0f));
+    ImGui::PushStyleColor(ImGuiCol_Button, col::bg2);
+    ImGui::PushStyleColor(ImGuiCol_Text, col::tx);
+    if (ImGui::SmallButton(ICON_FA_EXPAND " Space")) swapPipView();
+    ImGui::PopStyleColor(2);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Open / focus full 2D Blueprint view  (Space)");
+
+    const ImVec2 imgMin(boxMin.x + 2.0f, boxMin.y + hdrH);
+    const ImVec2 imgMax(boxMax.x - 2.0f, boxMax.y - 2.0f);
+    if (ortho.fb.colorTexture()) {
+        dl->AddImage(static_cast<ImTextureID>(static_cast<intptr_t>(ortho.fb.colorTexture())),
+                     imgMin, imgMax, ImVec2(0, 1), ImVec2(1, 0));
+    }
+
+    if (pipViewIdx_ == 1) {
+        const float aspect = (imgMax.x - imgMin.x) / std::max(1.0f, imgMax.y - imgMin.y);
+        const glm::mat4 vp = ortho.camera.proj(aspect) * ortho.camera.view();
+        bool ok0, okL, okR;
+        const glm::vec3 fwd = glm::normalize(glm::vec3(
+            std::cos(p.camera.yawDeg * kDeg2Rad),
+            std::sin(p.camera.yawDeg * kDeg2Rad), 0.0f));
+        const glm::vec3 rgt(-fwd.y, fwd.x, 0.0f);
+        const ImVec2 c0 = projectPt(ortho.kind, vp, {imgMin.x, imgMin.y},
+                                    {imgMax.x - imgMin.x, imgMax.y - imgMin.y},
+                                    p.camera.pos, ok0);
+        const ImVec2 cL = projectPt(ortho.kind, vp, {imgMin.x, imgMin.y},
+                                    {imgMax.x - imgMin.x, imgMax.y - imgMin.y},
+                                    p.camera.pos + (fwd - rgt * 0.65f) * 320.0f, okL);
+        const ImVec2 cR = projectPt(ortho.kind, vp, {imgMin.x, imgMin.y},
+                                    {imgMax.x - imgMin.x, imgMax.y - imgMin.y},
+                                    p.camera.pos + (fwd + rgt * 0.65f) * 320.0f, okR);
+        if (ok0 && c0.x >= imgMin.x && c0.x <= imgMax.x &&
+            c0.y >= imgMin.y && c0.y <= imgMax.y) {
+            if (okL && okR) {
+                dl->AddTriangleFilled(c0, cL, cR, IM_COL32(236, 154, 68, 55));
+                dl->AddLine(c0, cL, IM_COL32(236, 154, 68, 210), 1.5f);
+                dl->AddLine(c0, cR, IM_COL32(236, 154, 68, 210), 1.5f);
+            }
+            dl->AddCircleFilled(c0, 3.5f, IM_COL32(255, 180, 90, 255));
+        }
+    }
+
+    dl->AddRect(boxMin, boxMax, u32(col::bd2), dp(6.0f), 0, 1.2f);
+}
+
+void Editor::drawBottomKitDock(ViewPanel& p, ImDrawList* dl) {
+    if (!showBottomDock_ || !hasDoc()) return;
+    using namespace pb::ui;
+    static const KitPiece quickKit[] = {
+        {ICON_FA_TABLE_CELLS_LARGE, "Room",          "Sealed 4-wall room"},
+        {ICON_FA_BORDER_ALL,        "Floor",         "Floor slab"},
+        {ICON_FA_SQUARE,            "Wall",          "Cover wall"},
+        {ICON_FA_DOOR_OPEN,         "Doorway",       "Auto-cutting doorway"},
+        {ICON_FA_WINDOW_MAXIMIZE,   "Window",        "Auto-cutting window"},
+        {ICON_FA_STAIRS,            "Stairs",        "Parametric stairs"},
+        {ICON_FA_DIAGRAM_PROJECT,   "Ramp",          "Smooth ramp"},
+        {ICON_FA_FLAG,              "RED spawn",     "RED spawn room + locker"},
+        {ICON_FA_FLAG,              "BLU spawn",     "BLU spawn room + locker"},
+        {ICON_FA_BULLSEYE,          "Capture point", "Working CP + cap area"},
+    };
+    const int n = static_cast<int>(sizeof(quickKit) / sizeof(quickKit[0]));
+    const float cardW = dp(78.0f);
+    const float cardH = dp(56.0f);
+    const float gap = dp(5.0f);
+    const float dockW = std::min(p.contentSize.x - dp(120.0f),
+                                 n * cardW + (n - 1) * gap + dp(16.0f));
+    const float dockH = cardH + dp(12.0f);
+    const float flowOffset = showFlowBar_ ? dp(34.0f) : dp(8.0f);
+    const ImVec2 dMin(p.contentMin.x + (p.contentSize.x - dockW) * 0.5f,
+                      p.contentMin.y + p.contentSize.y - dockH - flowOffset);
+    const ImVec2 dMax(dMin.x + dockW, dMin.y + dockH);
+
+    dl->AddRectFilled(dMin, dMax, IM_COL32(18, 20, 25, 232), dp(7.0f));
+    dl->AddRect(dMin, dMax, u32(col::bd2), dp(7.0f), 0, 1.0f);
+
+    for (int i = 0; i < n; ++i) {
+        const ImVec2 cMin(dMin.x + dp(8.0f) + i * (cardW + gap), dMin.y + dp(6.0f));
+        if (cMin.x + cardW > dMax.x - dp(4.0f)) break;
+        ImGui::SetCursorScreenPos(cMin);
+        ImGui::PushID(4200 + i);
+        const bool on = (placing_ == quickKit[i].name);
+        ImGui::InvisibleButton("##qdock", ImVec2(cardW, cardH));
+        const bool hov = ImGui::IsItemHovered();
+        if (ImGui::IsItemClicked()) {
+            placing_ = quickKit[i].name;
+            status_ = std::string("Armed ") + quickKit[i].name + " — click in viewport to place";
+        }
+        if (ImGui::IsItemActive() &&
+            ImGui::IsMouseDragPastThreshold(ImGuiMouseButton_Left, 5.0f)) {
+            dragPlace_ = std::string("@kit:") + quickKit[i].name;
+        }
+        if (hov) ImGui::SetTooltip("%s\n%s", quickKit[i].name, quickKit[i].hint);
+        dl->AddRectFilled(cMin, ImVec2(cMin.x + cardW, cMin.y + cardH),
+                          on ? u32(col::bg3) : (hov ? u32(col::bg3) : u32(col::bg2)), 4.0f);
+        dl->AddRect(cMin, ImVec2(cMin.x + cardW, cMin.y + cardH),
+                    on ? u32(col::acc) : u32(col::bd), 4.0f, 0, on ? 2.0f : 1.0f);
+        drawKitIsoGlyph(dl, ImVec2(cMin.x + cardW * 0.5f, cMin.y + cardH * 0.42f),
+                        dp(11.5f), quickKit[i].name, on || hov);
+        const ImVec2 ts = ImGui::CalcTextSize(quickKit[i].name);
+        dl->AddText(ImVec2(cMin.x + std::max(3.0f, (cardW - ts.x) * 0.5f),
+                           cMin.y + cardH - dp(15.0f)),
+                    u32(col::tx), quickKit[i].name);
+        ImGui::PopID();
+    }
+}
+
+bool Editor::pushPullFace(map::SolidRef sr, int faceIdx, float delta) {
+    map::Solid* s = doc_.resolve(sr);
+    if (!s || faceIdx < 0 || faceIdx >= static_cast<int>(s->faces.size())) return false;
+    map::Solid trial = *s;
+    map::BrushFace& f = trial.faces[faceIdx];
+    f.planeD += delta;
+    f.p0 += f.planeN * delta;
+    f.p1 += f.planeN * delta;
+    f.p2 += f.planeN * delta;
+    f.planeFromPoints = false;
+    trial.polygonise();
+    if (!trial.valid || trial.faces.size() < 4) return false;
+    const glm::vec3 sz = trial.boundsMax - trial.boundsMin;
+    if (sz.x < 1.0f || sz.y < 1.0f || sz.z < 1.0f) return false;
+    *s = std::move(trial);
+    return true;
+}
+
+void Editor::handlePushPullTool(ViewPanel& p) {
+    if (tool_ != Tool::PushPull || !hasDoc()) return;
+    const ImVec2 m = ImGui::GetMousePos();
+
+    if (!ppDragging_) {
+        if (!p.hovered) return;
+        glm::vec3 ro, rd;
+        p.camera.pixelRay({m.x - p.contentMin.x, m.y - p.contentMin.y}, p.contentSize, ro, rd);
+        ppHoverSolid_ = {};
+        ppHoverFace_ = -1;
+        float bestT = 1e30f;
+        auto test = [&](const map::Solid& s, int ent, int idx) {
+            if (s.hidden || !s.valid) return;
+            float t;
+            int fi;
+            if (map::raySolidFace(ro, rd, s, t, fi) && t < bestT) {
+                bestT = t;
+                ppHoverSolid_ = {ent, idx};
+                ppHoverFace_ = fi;
+            }
+        };
+        for (int i = 0; i < (int)doc_.worldSolids().size(); ++i)
+            test(doc_.worldSolids()[i], -1, i);
+        for (int e = 0; e < (int)doc_.entities().size(); ++e) {
+            if (doc_.entities()[e].hidden) continue;
+            for (int i = 0; i < (int)doc_.entities()[e].solids.size(); ++i)
+                test(doc_.entities()[e].solids[i], e, i);
+        }
+
+        if (ppHoverFace_ >= 0 && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+            if (const map::Solid* s = doc_.resolve(ppHoverSolid_)) {
+                ppDragging_ = true;
+                ppView_ = &p;
+                ppActiveSolid_ = ppHoverSolid_;
+                ppActiveFace_ = ppHoverFace_;
+                ppStartSolid_ = *s;
+                ppFaceNormal_ = s->faces[ppHoverFace_].planeN;
+                glm::vec3 c(0.0f);
+                for (const auto& v : s->faces[ppHoverFace_].verts) c += v;
+                if (!s->faces[ppHoverFace_].verts.empty())
+                    c /= static_cast<float>(s->faces[ppHoverFace_].verts.size());
+                ppStartOrigin_ = c;
+                ppCurrentDelta_ = 0.0f;
+                selection_ = {ppActiveSolid_};
+                rebuildSelectionWire();
+            }
+        }
+        return;
+    }
+
+    if (ppView_ != &p) return;
+
+    glm::vec3 ro, rd;
+    p.camera.pixelRay({m.x - p.contentMin.x, m.y - p.contentMin.y}, p.contentSize, ro, rd);
+    const glm::vec3 n = ppFaceNormal_;
+    const glm::vec3 w0 = ro - ppStartOrigin_;
+    const float b = glm::dot(n, rd);
+    const float d = glm::dot(n, w0);
+    const float e = glm::dot(rd, w0);
+    const float denom = 1.0f - b * b;
+    float rawDelta = 0.0f;
+    if (std::fabs(denom) > 1e-4f)
+        rawDelta = (b * e - d) / denom;
+    const float snapped = snapF(rawDelta);
+
+    if (ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+        if (std::fabs(snapped - ppCurrentDelta_) > 0.01f) {
+            if (map::Solid* s = doc_.resolve(ppActiveSolid_)) {
+                *s = ppStartSolid_;
+                if (pushPullFace(ppActiveSolid_, ppActiveFace_, snapped)) {
+                    ppCurrentDelta_ = snapped;
+                    docMeshDirty_ = true;
+                }
+            }
+        }
+    } else {
+        ppDragging_ = false;
+        ppView_ = nullptr;
+        if (std::fabs(ppCurrentDelta_) > 0.1f) {
+            afterEdit("Push/Pull face");
+            char buf[96];
+            std::snprintf(buf, sizeof(buf), "Push/Pull face %+.0fu", ppCurrentDelta_);
+            status_ = buf;
+        }
+    }
+}
+
+void Editor::drawPushPullOverlay(ViewPanel& p, float aspect, ImDrawList* dl) {
+    if (tool_ != Tool::PushPull || !hasDoc()) return;
+    const map::SolidRef ref = ppDragging_ ? ppActiveSolid_ : ppHoverSolid_;
+    const int fi = ppDragging_ ? ppActiveFace_ : ppHoverFace_;
+    const map::Solid* s = doc_.resolve(ref);
+    if (!s || fi < 0 || fi >= static_cast<int>(s->faces.size())) return;
+    const map::BrushFace& f = s->faces[fi];
+    if (f.verts.size() < 3) return;
+
+    const glm::mat4 vp = p.camera.proj(aspect) * p.camera.view();
+    auto pr = [&](const glm::vec3& w, bool& ok) {
+        return projectPt(p.kind, vp, p.contentMin, p.contentSize, w, ok);
+    };
+
+    std::vector<ImVec2> poly;
+    glm::vec3 centroid(0.0f);
+    bool allOk = true;
+    for (const auto& v : f.verts) {
+        bool ok;
+        poly.push_back(pr(v, ok));
+        allOk = allOk && ok;
+        centroid += v;
+    }
+    centroid /= static_cast<float>(f.verts.size());
+    if (!allOk) return;
+
+    const ImU32 fillCol = ppDragging_ ? IM_COL32(236, 154, 68, 95)
+                                      : IM_COL32(236, 154, 68, 65);
+    const ImU32 edgeCol = IM_COL32(255, 185, 95, 255);
+    dl->AddConvexPolyFilled(poly.data(), static_cast<int>(poly.size()), fillCol);
+    for (size_t k = 0; k < poly.size(); ++k)
+        dl->AddLine(poly[k], poly[(k + 1) % poly.size()], edgeCol, 2.5f);
+
+    bool ok0, ok1;
+    const ImVec2 c0 = pr(centroid, ok0);
+    const ImVec2 c1 = pr(centroid + f.planeN * 48.0f, ok1);
+    if (ok0 && ok1) {
+        dl->AddLine(c0, c1, IM_COL32(0, 229, 255, 255), 3.0f);
+        dl->AddCircleFilled(c0, 5.0f, edgeCol);
+        const ImVec2 d(c1.x - c0.x, c1.y - c0.y);
+        const float L = std::sqrt(d.x * d.x + d.y * d.y);
+        if (L > 4.0f) {
+            const ImVec2 u(d.x / L, d.y / L), n(-u.y, u.x);
+            const ImVec2 tip(c1.x - u.x * 12.0f, c1.y - u.y * 12.0f);
+            dl->AddTriangleFilled(c1, ImVec2(tip.x + n.x * 6.0f, tip.y + n.y * 6.0f),
+                                  ImVec2(tip.x - n.x * 6.0f, tip.y - n.y * 6.0f),
+                                  IM_COL32(0, 229, 255, 255));
+        }
+    }
+
+    if (ok0) {
+        const glm::vec3 sz = s->boundsMax - s->boundsMin;
+        char lbl[128];
+        if (ppDragging_) {
+            std::snprintf(lbl, sizeof(lbl),
+                          "Push/Pull %+.0fu   (%.0f x %.0f x %.0fu  ·  Grid %du)",
+                          ppCurrentDelta_, sz.x, sz.y, sz.z, gridSize_);
+        } else {
+            std::snprintf(lbl, sizeof(lbl),
+                          "Drag to Push/Pull   (%.0f x %.0f x %.0fu)",
+                          sz.x, sz.y, sz.z);
+        }
+        const ImVec2 ts = ImGui::CalcTextSize(lbl);
+        const ImVec2 bMin(c0.x + 14.0f, c0.y - ts.y * 0.5f - 4.0f);
+        const ImVec2 bMax(bMin.x + ts.x + 12.0f, bMin.y + ts.y + 8.0f);
+        dl->AddRectFilled(bMin, bMax, IM_COL32(16, 18, 23, 235), 4.0f);
+        dl->AddRect(bMin, bMax, IM_COL32(0, 229, 255, 220), 4.0f);
+        dl->AddText(ImVec2(bMin.x + 6.0f, bMin.y + 4.0f),
+                    IM_COL32(220, 248, 255, 255), lbl);
+    }
+}
+
+int Editor::autoCarveOpening(const glm::vec3& mn, const glm::vec3& mx) {
+    if (!hasDoc()) return 0;
+    const map::Solid cutter = map::Solid::makeBox(mn, mx, "dev/dev_measurewall01a");
+    if (!cutter.valid) return 0;
+
+    int carvedCount = 0;
+    std::vector<map::Solid> nextWorld;
+    nextWorld.reserve(doc_.worldSolids().size() + 4);
+    for (auto& ws : doc_.worldSolids()) {
+        if (!ws.valid || ws.hidden) {
+            nextWorld.push_back(std::move(ws));
+            continue;
+        }
+        const bool overlaps =
+            ws.boundsMax.x > mn.x + 1.0f && ws.boundsMin.x < mx.x - 1.0f &&
+            ws.boundsMax.y > mn.y + 1.0f && ws.boundsMin.y < mx.y - 1.0f &&
+            ws.boundsMax.z > mn.z + 1.0f && ws.boundsMin.z < mx.z - 1.0f;
+        const float wallH = ws.boundsMax.z - ws.boundsMin.z;
+        if (!overlaps || wallH < 64.0f) {
+            nextWorld.push_back(std::move(ws));
+            continue;
+        }
+        std::vector<map::Solid> pieces = map::carve(ws, cutter);
+        if (pieces.size() == 1 && pieces[0].faces.size() == ws.faces.size()) {
+            nextWorld.push_back(std::move(ws));
+        } else {
+            ++carvedCount;
+            for (auto& pc : pieces) {
+                if (!pc.valid) continue;
+                pc.id = doc_.nextId();
+                nextWorld.push_back(std::move(pc));
+            }
+        }
+    }
+    if (carvedCount > 0) doc_.worldSolids() = std::move(nextWorld);
+    return carvedCount;
+}
+
+void Editor::drawScaleGhostOverlay(ViewPanel& p, float aspect, ImDrawList* dl) {
+    if (!showScaleGhost_ || !hasDoc() || p.kind != ViewKind::Perspective) return;
+    glm::vec3 base(0.0f, 0.0f, 0.0f);
+    if (!selection_.empty()) {
+        glm::vec3 mn(1e30f), mx(-1e30f);
+        for (const auto& r : selection_)
+            if (const map::Solid* s = doc_.resolve(r)) {
+                mn = glm::min(mn, s->boundsMin);
+                mx = glm::max(mx, s->boundsMax);
+            }
+        if (mn.x <= mx.x) base = glm::vec3(mx.x + 36.0f, 0.5f * (mn.y + mx.y), mn.z);
+    }
+
+    const glm::mat4 vp = p.camera.proj(aspect) * p.camera.view();
+    auto pr = [&](const glm::vec3& w, bool& ok) {
+        return projectPt(p.kind, vp, p.contentMin, p.contentSize, w, ok);
+    };
+
+    const float H = 83.0f;
+    bool okBot, okTop, okJump1, okJump2;
+    const ImVec2 pBot = pr(base, okBot);
+    const ImVec2 pTop = pr(base + glm::vec3(0, 0, H), okTop);
+    const ImVec2 pJump1 = pr(base + glm::vec3(0, 0, 48.0f), okJump1);
+    const ImVec2 pJump2 = pr(base + glm::vec3(0, 0, 72.0f), okJump2);
+    if (!okBot || !okTop) return;
+
+    const ImU32 cyan = IM_COL32(0, 229, 255, 195);
+    const ImU32 cyanSoft = IM_COL32(0, 229, 255, 65);
+    const float hPx = std::fabs(pBot.y - pTop.y);
+    if (hPx < 14.0f || hPx > 900.0f) return;
+    const float headR = std::max(3.5f, hPx * 0.11f);
+    const float shW = std::max(5.0f, hPx * 0.24f);
+    dl->AddCircle(ImVec2(pTop.x, pTop.y + headR), headR, cyan, 12, 1.8f);
+    dl->AddRectFilled(ImVec2(pTop.x - shW, pTop.y + headR * 2.2f),
+                      ImVec2(pTop.x + shW, pBot.y - hPx * 0.32f), cyanSoft, 3.0f);
+    dl->AddRect(ImVec2(pTop.x - shW, pTop.y + headR * 2.2f),
+                ImVec2(pTop.x + shW, pBot.y - hPx * 0.32f), cyan, 3.0f, 0, 1.5f);
+    dl->AddLine(ImVec2(pTop.x - shW * 0.5f, pBot.y - hPx * 0.32f),
+                ImVec2(pBot.x - shW * 0.5f, pBot.y), cyan, 1.8f);
+    dl->AddLine(ImVec2(pTop.x + shW * 0.5f, pBot.y - hPx * 0.32f),
+                ImVec2(pBot.x + shW * 0.5f, pBot.y), cyan, 1.8f);
+
+    if (okJump1) {
+        dl->AddLine(ImVec2(pJump1.x + shW + 4, pJump1.y),
+                    ImVec2(pJump1.x + shW + 18, pJump1.y), cyan, 1.5f);
+        dl->AddText(ImVec2(pJump1.x + shW + 21, pJump1.y - 6), cyan, "48u crouch-jump");
+    }
+    if (okJump2 && hPx > 42.0f) {
+        dl->AddLine(ImVec2(pJump2.x + shW + 4, pJump2.y),
+                    ImVec2(pJump2.x + shW + 18, pJump2.y),
+                    IM_COL32(255, 195, 90, 210), 1.5f);
+        dl->AddText(ImVec2(pJump2.x + shW + 21, pJump2.y - 6),
+                    IM_COL32(255, 195, 90, 210), "72u double-jump");
+    }
+    dl->AddText(ImVec2(pTop.x - shW, pTop.y - 15), cyan, "TF2 83u");
+}
+
+void Editor::drawContextualSelectionHud(ViewPanel& p, float aspect, ImDrawList* dl) {
+    if (!showContextHud_ || !hasDoc()) return;
+    if (selection_.empty() && selectedEntity_ < 0) return;
+    (void)aspect;
+    using namespace pb::ui;
+
+    const float cardW = dp(248.0f);
+    const float cardH = dp(112.0f);
+    const float bottomPad = (showBottomDock_ ? dp(74.0f) : dp(8.0f)) +
+                            (showFlowBar_ ? dp(32.0f) : 0.0f);
+    const ImVec2 cMin(p.contentMin.x + p.contentSize.x - cardW - dp(12.0f),
+                      p.contentMin.y + p.contentSize.y - cardH - bottomPad);
+    const ImVec2 cMax(cMin.x + cardW, cMin.y + cardH);
+    if (cMin.y < p.contentMin.y + dp(160.0f)) return;
+
+    dl->AddRectFilled(cMin, cMax, IM_COL32(19, 21, 26, 238), dp(7.0f));
+    dl->AddRect(cMin, cMax, u32(col::acc), dp(7.0f), 0, 1.3f);
+
+    ImGui::SetCursorScreenPos(ImVec2(cMin.x + dp(10.0f), cMin.y + dp(7.0f)));
+    ImGui::BeginGroup();
+
+    if (!selection_.empty()) {
+        glm::vec3 mn(1e30f), mx(-1e30f);
+        std::string mat = blockMaterial_;
+        for (const auto& r : selection_)
+            if (const map::Solid* s = doc_.resolve(r)) {
+                mn = glm::min(mn, s->boundsMin);
+                mx = glm::max(mx, s->boundsMax);
+                if (!s->faces.empty()) mat = s->faces[0].material;
+            }
+        const glm::vec3 sz = mx - mn;
+        ImGui::PushStyleColor(ImGuiCol_Text, col::acc);
+        ImGui::Text(ICON_FA_CUBE "  %zu Brush%s   %.0f × %.0f × %.0fu",
+                    selection_.size(), selection_.size() == 1 ? "" : "es",
+                    sz.x, sz.y, sz.z);
+        ImGui::PopStyleColor();
+
+        const std::string shortMat =
+            mat.rfind('/') != std::string::npos ? mat.substr(mat.rfind('/') + 1) : mat;
+        ImGui::TextDisabled("Mat: %s", shortMat.c_str());
+
+        if (ImGui::SmallButton(ICON_FA_UP_DOWN_LEFT_RIGHT " Push/Pull"))
+            tool_ = Tool::PushPull;
+        ImGui::SameLine(0, dp(4.0f));
+        if (ImGui::SmallButton(ICON_FA_DOOR_OPEN " Hollow")) {
+            debugShapeOp(0);
+        }
+        ImGui::SameLine(0, dp(4.0f));
+        if (ImGui::SmallButton(ICON_FA_MOUND " Terrain")) {
+            for (const auto& r : selection_)
+                if (map::Solid* s = doc_.resolve(r))
+                    for (auto& f : s->faces)
+                        if (f.verts.size() == 4 && f.planeN.z > 0.7f)
+                            map::faceMakeDisplacement(f, 3);
+            afterEdit("Make displacement");
+            status_ = "Converted top quad face(s) to Power-3 displacement";
+        }
+        if (ImGui::SmallButton(ICON_FA_BOLT " Tie func_detail"))
+            tieSelectionToEntity("func_detail");
+        ImGui::SameLine(0, dp(4.0f));
+        if (ImGui::SmallButton(ICON_FA_DOOR_CLOSED " Tie func_door"))
+            tieSelectionToEntity("func_door");
+    } else if (selectedEntity_ >= 0 &&
+               selectedEntity_ < static_cast<int>(doc_.entities().size())) {
+        map::MapEntity& e = doc_.entities()[selectedEntity_];
+        ImGui::PushStyleColor(ImGuiCol_Text, col::acc);
+        ImGui::Text(ICON_FA_LIGHTBULB "  %s", e.classname.c_str());
+        ImGui::PopStyleColor();
+        const std::string tn = e.kv.get("targetname");
+        ImGui::TextDisabled("Name: %s   Connections: %zu",
+                            tn.empty() ? "(none)" : tn.c_str(),
+                            e.connections.size());
+        const std::string tm = e.kv.get("TeamNum");
+        ImGui::TextUnformatted("Team:");
+        ImGui::SameLine(0, dp(4.0f));
+        if (ImGui::SmallButton(tm == "2" ? "[RED]" : "RED")) {
+            e.kv.set("TeamNum", "2");
+            afterEdit("Set Team RED");
+        }
+        ImGui::SameLine(0, dp(3.0f));
+        if (ImGui::SmallButton(tm == "3" ? "[BLU]" : "BLU")) {
+            e.kv.set("TeamNum", "3");
+            afterEdit("Set Team BLU");
+        }
+        ImGui::SameLine(0, dp(3.0f));
+        if (ImGui::SmallButton(tm == "0" || tm.empty() ? "[Any]" : "Any")) {
+            e.kv.set("TeamNum", "0");
+            afterEdit("Set Team Any");
+        }
+        if (ImGui::SmallButton(ICON_FA_DIAGRAM_PROJECT " Wire Entity (L)"))
+            tool_ = Tool::Wire;
+    }
+
+    ImGui::EndGroup();
+}
+
+void Editor::drawRadialPieMenu() {
+    if (!showPieMenu_) return;
+    using namespace pb::ui;
+
+    ImGuiViewport* vp = ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos(vp->Pos);
+    ImGui::SetNextWindowSize(vp->Size);
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0, 0, 0, 0.25f));
+    ImGui::Begin("##piemenu_overlay", nullptr,
+                 ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+                     ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar |
+                     ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoDocking);
+
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const ImVec2 c = pieMenuCenter_;
+    const float radius = dp(112.0f);
+    const float innerR = dp(34.0f);
+
+    struct Slice {
+        const char* icon;
+        const char* label;
+        std::function<void()> action;
+    };
+    std::vector<Slice> slices = {
+        {ICON_FA_UP_DOWN_LEFT_RIGHT, "Push / Pull (P)", [&] { tool_ = Tool::PushPull; }},
+        {ICON_FA_DOOR_OPEN,          "Cut Doorway",     [&] { placing_ = "Doorway"; }},
+        {ICON_FA_MOUND,              "Make Terrain",    [&] {
+             for (const auto& r : selection_)
+                 if (map::Solid* s = doc_.resolve(r))
+                     for (auto& f : s->faces)
+                         if (f.verts.size() == 4 && f.planeN.z > 0.7f)
+                             map::faceMakeDisplacement(f, 3);
+             if (!selection_.empty()) afterEdit("Make displacement");
+         }},
+        {ICON_FA_IMAGE,              "Surface UV (T)",  [&] { tool_ = Tool::Texture; }},
+        {ICON_FA_DIAGRAM_PROJECT,    "3D Wire (L)",     [&] { tool_ = Tool::Wire; }},
+        {ICON_FA_VECTOR_SQUARE,      "Hollow Room",     [&] { debugShapeOp(0); }},
+    };
+
+    dl->AddCircleFilled(c, radius + dp(26.0f), IM_COL32(14, 16, 20, 215), 48);
+    dl->AddCircle(c, radius + dp(26.0f), u32(col::bd2), 48, 1.5f);
+    dl->AddCircleFilled(c, innerR, IM_COL32(28, 31, 38, 245), 32);
+    dl->AddCircle(c, innerR, u32(col::acc), 32, 2.0f);
+    const ImVec2 qSz = ImGui::CalcTextSize("Q");
+    dl->AddText(ImVec2(c.x - qSz.x * 0.5f, c.y - qSz.y * 0.5f), u32(col::acc), "Q");
+
+    const ImVec2 m = ImGui::GetMousePos();
+    const float dx = m.x - c.x, dy = m.y - c.y;
+    const float dist = std::hypot(dx, dy);
+    int hoveredSlice = -1;
+    if (dist > innerR) {
+        float ang = std::atan2(dy, dx);
+        if (ang < 0) ang += 6.2831853f;
+        hoveredSlice = static_cast<int>((ang / 6.2831853f) * slices.size()) %
+                       static_cast<int>(slices.size());
+    }
+
+    const int N = static_cast<int>(slices.size());
+    for (int i = 0; i < N; ++i) {
+        const float a = (i + 0.5f) * (6.2831853f / N);
+        const ImVec2 itemPos(c.x + std::cos(a) * radius, c.y + std::sin(a) * radius);
+        const bool hot = (i == hoveredSlice);
+        const ImVec2 pillSz(dp(116.0f), dp(30.0f));
+        const ImVec2 pMin(itemPos.x - pillSz.x * 0.5f, itemPos.y - pillSz.y * 0.5f);
+        const ImVec2 pMax(itemPos.x + pillSz.x * 0.5f, itemPos.y + pillSz.y * 0.5f);
+        dl->AddLine(c, itemPos, hot ? u32(col::acc) : IM_COL32(70, 76, 88, 140),
+                    hot ? 2.2f : 1.0f);
+        dl->AddRectFilled(pMin, pMax,
+                          hot ? u32(col::acc) : IM_COL32(28, 32, 39, 245), dp(6.0f));
+        dl->AddRect(pMin, pMax, hot ? u32(col::acc) : u32(col::bd2), dp(6.0f), 0, 1.2f);
+        const std::string txt = std::string(slices[i].icon) + "  " + slices[i].label;
+        const ImVec2 ts = ImGui::CalcTextSize(txt.c_str());
+        dl->AddText(ImVec2(itemPos.x - ts.x * 0.5f, itemPos.y - ts.y * 0.5f),
+                    hot ? u32(col::bg0) : u32(col::tx), txt.c_str());
+    }
+
+    if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+        if (hoveredSlice >= 0 && hoveredSlice < N) slices[hoveredSlice].action();
+        showPieMenu_ = false;
+    }
+    if (ImGui::IsMouseClicked(ImGuiMouseButton_Right) ||
+        ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+        showPieMenu_ = false;
+    }
+
+    ImGui::End();
+    ImGui::PopStyleColor();
+}
+
+void Editor::handleWireTool(ViewPanel& p) {
+    if (tool_ != Tool::Wire || !hasDoc() || doc_.entities().empty()) return;
+    if (!p.hovered && !wireDragging_) return;
+
+    const float aspect = p.contentSize.x / std::max(1.0f, p.contentSize.y);
+    const glm::mat4 vp = p.camera.proj(aspect) * p.camera.view();
+    const ImVec2 m = ImGui::GetMousePos();
+    wireDragMouse_ = m;
+
+    auto centreOf = [&](const map::MapEntity& e) {
+        if (e.solids.empty()) return e.origin;
+        glm::vec3 mn(1e30f), mx(-1e30f);
+        for (const auto& s : e.solids) {
+            mn = glm::min(mn, s.boundsMin);
+            mx = glm::max(mx, s.boundsMax);
+        }
+        return 0.5f * (mn + mx);
+    };
+
+    wireHoverEnt_ = -1;
+    float bestD = 26.0f;
+    for (int i = 0; i < static_cast<int>(doc_.entities().size()); ++i) {
+        if (doc_.entities()[i].hidden) continue;
+        bool ok;
+        const ImVec2 sp = projectPt(p.kind, vp, p.contentMin, p.contentSize,
+                                    centreOf(doc_.entities()[i]), ok);
+        if (!ok) continue;
+        const float d = std::hypot(sp.x - m.x, sp.y - m.y);
+        if (d < bestD) {
+            bestD = d;
+            wireHoverEnt_ = i;
+        }
+    }
+
+    if (!wireDragging_ && p.hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+        if (wireHoverEnt_ >= 0) {
+            wireSourceEnt_ = wireHoverEnt_;
+            selectedEntity_ = wireSourceEnt_;
+            wireDragging_ = true;
+            status_ = "Drag wire to a target entity to connect Output -> Input…";
+        }
+    }
+
+    if (wireDragging_ && ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
+        wireDragging_ = false;
+        if (wireSourceEnt_ >= 0 &&
+            wireHoverEnt_ >= 0 &&
+            wireHoverEnt_ != wireSourceEnt_ &&
+            wireSourceEnt_ < static_cast<int>(doc_.entities().size()) &&
+            wireHoverEnt_ < static_cast<int>(doc_.entities().size())) {
+            map::MapEntity& src = doc_.entities()[wireSourceEnt_];
+            map::MapEntity& dst = doc_.entities()[wireHoverEnt_];
+            std::string tn = dst.kv.get("targetname");
+            if (tn.empty()) {
+                tn = dst.classname + "_" + std::to_string(dst.id);
+                dst.kv.set("targetname", tn);
+            }
+            std::string outName = "OnTrigger";
+            if (src.classname == "func_button") outName = "OnPressed";
+            else if (src.classname.rfind("trigger_", 0) == 0) outName = "OnStartTouch";
+            else if (src.classname == "team_control_point") outName = "OnCapTeam2";
+
+            std::string inName = "Trigger";
+            if (dst.classname == "func_door" || dst.classname == "func_movelinear")
+                inName = "Open";
+            else if (dst.classname.rfind("light", 0) == 0)
+                inName = "Toggle";
+            else if (dst.classname == "team_round_timer")
+                inName = "AddTime";
+
+            src.connections.push_back({outName, tn + "," + inName + ",,0,-1"});
+            afterEdit("Wire entity I/O");
+            status_ = "Wired " + src.classname + "." + outName + " -> " + tn + "." + inName;
+        }
+        wireSourceEnt_ = -1;
+    }
+}
+
+void Editor::drawFlowBar(ViewPanel& p, ImDrawList* dl) {
+    if (!showFlowBar_ || !hasDoc()) return;
+    if (p.contentSize.x < pb::ui::dp(520.0f)) return;
+    using namespace pb::ui;
+
+    int redSpawns = 0, bluSpawns = 0, objectives = 0, lights = 0;
+    for (const auto& e : doc_.entities()) {
+        if (e.classname == "info_player_teamspawn" || e.classname == "info_player_start") {
+            const std::string t = e.kv.get("TeamNum");
+            if (t == "2") ++redSpawns;
+            else if (t == "3") ++bluSpawns;
+            else { ++redSpawns; ++bluSpawns; }
+        }
+        if (e.classname == "team_control_point" || e.classname == "item_teamflag" ||
+            e.classname == "trigger_capture_area" || e.classname == "func_capturezone")
+            ++objectives;
+        if (e.classname.rfind("light", 0) == 0) ++lights;
+    }
+    const bool sealed = isMapSealed();
+
+    char txt[256];
+    std::snprintf(txt, sizeof(txt),
+                  "%s RED Spawn (%d)  -->  %s Objective (%d)  -->  %s BLU Spawn (%d)   |   %s Skybox   |   %s Lighting (%d)",
+                  redSpawns > 0 ? "OK" : "!!", redSpawns,
+                  objectives > 0 ? "OK" : "!!", objectives,
+                  bluSpawns > 0 ? "OK" : "!!", bluSpawns,
+                  sealed ? "OK Sealed" : "!! Unsealed",
+                  lights > 0 ? "OK" : "!!", lights);
+
+    const ImVec2 ts = ImGui::CalcTextSize(txt);
+    const float w = ts.x + dp(24.0f);
+    const float h = dp(22.0f);
+    const ImVec2 bMin(p.contentMin.x + (p.contentSize.x - w) * 0.5f,
+                      p.contentMin.y + p.contentSize.y - h - dp(5.0f));
+    const ImVec2 bMax(bMin.x + w, bMin.y + h);
+    dl->AddRectFilled(bMin, bMax, IM_COL32(16, 18, 23, 225), dp(5.0f));
+    dl->AddRect(bMin, bMax, u32(col::bd), dp(5.0f));
+    const bool allReady = redSpawns > 0 && bluSpawns > 0 && objectives > 0 && sealed && lights > 0;
+    dl->AddText(ImVec2(bMin.x + dp(12.0f), bMin.y + (h - ts.y) * 0.5f),
+                allReady ? u32(col::good) : u32(col::dim), txt);
+}
+
+void Editor::applyBuiltinTheme(int idx) {
+    if (!hasDoc()) {
+        doc_.newBlank("themed");
+        history_.reset(doc_);
+    }
+    struct ThemePreset {
+        const char* name;
+        const char* floor;
+        const char* wall;
+        const char* ceiling;
+        const char* sky;
+        int sunR, sunG, sunB;
+        float sunPitch, sunYaw;
+        int fogR, fogG, fogB;
+    };
+    static const ThemePreset kThemes[] = {
+        {"Alpine Sawmill",
+         "wood/wood_floor002", "wood/wood_wall001", "metal/metalroof001",
+         "sky_alpinestorm_01", 235, 240, 250, -48.0f, 210.0f, 150, 165, 180},
+        {"Badlands Desert",
+         "concrete/concretefloor002", "brick/wall28", "metal/Ibeam002",
+         "sky_badlands_01", 255, 232, 195, -52.0f, 145.0f, 195, 172, 150},
+        {"Spytech Secret Base",
+         "tile/tilefloor001a", "concrete/computerwall001", "metal/metalceiling001",
+         "sky_upward", 245, 248, 255, -60.0f, 90.0f, 120, 135, 155},
+        {"Nightfall Industrial",
+         "concrete/concretefloor003", "metal/metalwall001a", "wood/wood_beam01",
+         "sky_night_01", 175, 195, 235, -35.0f, 260.0f, 55, 65, 85},
+    };
+    idx = std::clamp(idx, 0, 3);
+    activeThemeIdx_ = idx;
+    const auto& th = kThemes[idx];
+
+    ai::MaterialPick pick;
+    pick.floor = th.floor;
+    pick.wall = th.wall;
+    pick.ceiling = th.ceiling;
+    pick.skyname = th.sky;
+    pick.sunR = th.sunR; pick.sunG = th.sunG; pick.sunB = th.sunB;
+    pick.sunPitch = th.sunPitch; pick.sunYaw = th.sunYaw;
+    pick.fogR = th.fogR; pick.fogG = th.fogG; pick.fogB = th.fogB;
+    pick.fogStart = 512.0f;
+    pick.fogEnd = 4800.0f;
+    pick.note = std::string(th.name) + " theme applied";
+
+    // If nothing (or only tools/skybox brushes) is selected, paint all non-tool
+    // world brushes so 1-click theme styling immediately transforms the map!
+    bool hasNonToolSel = false;
+    for (const auto& r : selection_) {
+        if (const map::Solid* s = doc_.resolve(r)) {
+            for (const auto& f : s->faces)
+                if (f.material.rfind("tools/", 0) != 0) { hasNonToolSel = true; break; }
+        }
+        if (hasNonToolSel) break;
+    }
+    const bool paintAll = !hasNonToolSel;
+    if (paintAll) {
+        selection_.clear();
+        for (int i = 0; i < static_cast<int>(doc_.worldSolids().size()); ++i)
+            selection_.push_back({-1, i});
+    }
+    applyMaterialPick(pick);
+    if (paintAll) clearSelection();
+}
+
+void Editor::drawThemeStylerCards() {
+    using namespace pb::ui;
+    if (!ImGui::CollapsingHeader(ICON_FA_PALETTE "  1-Click TF2 Theme Styler",
+                                 ImGuiTreeNodeFlags_DefaultOpen))
+        return;
+
+    struct Card {
+        const char* icon;
+        const char* title;
+        const char* sub;
+        ImU32 swatchA;
+        ImU32 swatchB;
+    };
+    static const Card cards[] = {
+        {ICON_FA_TREE,        "Alpine Sawmill",      "Wood + Tin Roof + Storm Sky",
+         IM_COL32(115, 88, 62, 255),  IM_COL32(85, 110, 128, 255)},
+        {ICON_FA_SUN,         "Badlands Desert",     "Sandstone + Red Brick + Warm Sun",
+         IM_COL32(185, 118, 74, 255), IM_COL32(225, 185, 130, 255)},
+        {ICON_FA_USER_SECRET, "Spytech Base",        "Clean Tile + Computer Wall",
+         IM_COL32(72, 95, 125, 255),  IM_COL32(185, 195, 205, 255)},
+        {ICON_FA_MOON,        "Nightfall Industrial","Concrete + Corrugated Metal + Night",
+         IM_COL32(48, 56, 74, 255),   IM_COL32(95, 110, 135, 255)},
+    };
+    const float gap = dp(6.0f);
+    const float avail = ImGui::GetContentRegionAvail().x;
+    const int ncol = (avail - gap) * 0.5f >= dp(210.0f) ? 2 : 1;
+    const float cw = ncol == 2 ? (avail - gap) * 0.5f : avail;
+    const float ch = dp(46.0f);
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+
+    for (int i = 0; i < 4; ++i) {
+        if (ncol == 2 && (i % 2)) ImGui::SameLine(0, gap);
+        ImGui::PushID(4300 + i);
+        const ImVec2 p0 = ImGui::GetCursorScreenPos();
+        const bool on = (activeThemeIdx_ == i);
+        if (ImGui::Selectable("##thm", on, 0, ImVec2(cw, ch)))
+            applyBuiltinTheme(i);
+        const bool hov = ImGui::IsItemHovered();
+        if (hov)
+            ImGui::SetTooltip("1-click apply %s\nSets Floor, Wall, Ceiling, Skybox, Sun & Fog",
+                              cards[i].title);
+        dl->AddRectFilled(p0, ImVec2(p0.x + cw, p0.y + ch),
+                          on ? u32(col::bg3) : (hov ? u32(col::bg3) : u32(col::bg2)), 4.0f);
+        dl->AddRectFilled(p0, ImVec2(p0.x + dp(8.0f), p0.y + ch * 0.5f),
+                          cards[i].swatchA, 4.0f);
+        dl->AddRectFilled(ImVec2(p0.x, p0.y + ch * 0.5f),
+                          ImVec2(p0.x + dp(8.0f), p0.y + ch),
+                          cards[i].swatchB, 4.0f);
+        dl->AddRect(p0, ImVec2(p0.x + cw, p0.y + ch),
+                    on ? u32(col::acc) : u32(col::bd), 4.0f, 0, on ? 2.0f : 1.0f);
+        dl->AddText(ImVec2(p0.x + dp(14.0f), p0.y + dp(5.0f)), u32(col::acc),
+                    cards[i].icon);
+        dl->AddText(fontUiMed ? fontUiMed : nullptr, 0.0f,
+                    ImVec2(p0.x + dp(32.0f), p0.y + dp(4.0f)), u32(col::tx),
+                    cards[i].title);
+        dl->AddText(ImVec2(p0.x + dp(14.0f), p0.y + dp(23.0f)), u32(col::faint),
+                    cards[i].sub);
+        ImGui::PopID();
+    }
+    ImGui::Separator();
+}
+
+void Editor::debugPushPullDemo() {
+    if (!hasDoc() || doc_.worldSolids().empty()) debugBuildSampleMap();
+    tool_ = Tool::PushPull;
+    showBottomDock_ = true;
+    showPipOrtho_ = true;
+    showScaleGhost_ = true;
+    for (int i = 0; i < static_cast<int>(doc_.worldSolids().size()); ++i) {
+        const auto& s = doc_.worldSolids()[i];
+        if (!s.valid) continue;
+        for (int f = 0; f < static_cast<int>(s.faces.size()); ++f) {
+            if (std::fabs(s.faces[f].planeN.z) < 0.2f) {
+                ppHoverSolid_ = {-1, i};
+                ppHoverFace_ = f;
+                selection_ = {{-1, i}};
+                pushPullFace(ppHoverSolid_, ppHoverFace_, 64.0f);
+                afterEdit("Push/Pull demo");
+                return;
+            }
+        }
+    }
+}
+
+void Editor::debugPieMenuDemo() {
+    showPieMenu_ = true;
+    pieMenuCenter_ = ImVec2(640.0f, 380.0f);
+}
+
+void Editor::debugPb2Test() {
+    int pass = 0, fail = 0;
+    auto ck = [&](const char* what, bool ok) {
+        if (ok) ++pass;
+        else { ++fail; PB_ERROR("pb2-test FAIL: %s", what); }
+    };
+
+    // 1. Start a blank map and place a Wall; test Push/Pull face extrusion (+64u)
+    bsp_ = BspFile();
+    doc_.newBlank("pb2test");
+    history_.reset(doc_);
+    clearSelection();
+    placePiece("Wall", glm::vec3(0, 0, 0));
+    ck("placed wall", doc_.worldSolids().size() == 1);
+    int plusXFace = -1;
+    for (int f = 0; f < (int)doc_.worldSolids()[0].faces.size(); ++f)
+        if (doc_.worldSolids()[0].faces[f].planeN.x > 0.9f) plusXFace = f;
+    ck("found +X face", plusXFace >= 0);
+    const float oldMaxX = doc_.worldSolids()[0].boundsMax.x;
+    const bool ppOk = pushPullFace({-1, 0}, plusXFace, 64.0f);
+    afterEdit("Push/Pull +64");
+    ck("pushPullFace succeeded", ppOk);
+    ck("boundsMax.x grew by +64u",
+       std::fabs(doc_.worldSolids()[0].boundsMax.x - (oldMaxX + 64.0f)) < 0.5f);
+
+    // 2. Smart Auto-Cut Doorway through the existing wall
+    placePiece("Doorway", glm::vec3(0, 0, 0));
+    ck("auto-cut doorway split the wall into 3 brushes",
+       doc_.worldSolids().size() == 3);
+
+    // 3. 1-Click Seal Map & Seal status check
+    ck("map starts unsealed", !isMapSealed());
+    quickSealMap();
+    ck("quickSealMap seals the map", isMapSealed());
+
+    // 4. 1-Click Theme Styler preset
+    applyBuiltinTheme(0);  // Alpine Sawmill
+    ck("theme sets skyname", doc_.worldExtra().get("skyname") == "sky_alpinestorm_01");
+    bool hasWood = false;
+    for (const auto& s : doc_.worldSolids())
+        for (const auto& f : s.faces)
+            if (f.material.rfind("wood/", 0) == 0) hasWood = true;
+    ck("theme painted world brushes", hasWood);
+
+    PB_INFO("pb2-test: %d passed, %d failed", pass, fail);
 }
 
 }  // namespace pb

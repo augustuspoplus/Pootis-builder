@@ -1,0 +1,13 @@
+# Blender-style custom TF2 prop
+mtllib custom_pylon.mtl
+usemtl team_red
+v -1.0 0.0 -1.0
+v  1.0 0.0 -1.0
+v  1.0 0.0  1.0
+v -1.0 0.0  1.0
+v  0.0 2.5  0.0
+f 1 2 3 4
+f 1 5 2
+f 2 5 3
+f 3 5 4
+f 4 5 1

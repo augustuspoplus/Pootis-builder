@@ -1,0 +1,9 @@
+build/
+tools/
+assets/mapping_resource_pack/
+.cache/
+compile_commands.json
+design-mockups/
+
+# runtime ImGui layout dump
+imgui.ini

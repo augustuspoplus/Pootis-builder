@@ -1,4 +1,5 @@
 #pragma once
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <functional>
@@ -51,6 +52,13 @@ public:
     void setDial(int stop) {  // 0 Guided · 1 Standard · 2 Full
         mode_ = static_cast<Mode>(std::clamp(stop, 0, 2));
         prefs_.workspaceDial = static_cast<int>(mode_);
+        if (mode_ == Mode::Full) useWorkshopUi_ = false;
+        layoutDirty_ = true;
+    }
+    void setWorkshopStage(int stage) {
+        useWorkshopUi_ = true;
+        workshopStage_ = std::clamp(stage, 0, 3);
+        showWelcome_ = false;
         layoutDirty_ = true;
     }
     void debugSelectWorldSolid(int i);  // test hook for headless screenshots
@@ -158,6 +166,11 @@ public:
     }
     void debugDumpFgd(const std::string& cls);
     void debugImportObj(const std::string& path);  // detail-brush import, headless
+    void debugPb2Test();                          // Pootis Builder 2.0 end-to-end test
+    void debugPushPullDemo();                     // arm Push/Pull highlight for screenshots
+    void debugPieMenuDemo();                      // open Radial Pie Menu for screenshots
+    void debugCreateEnv(int idx) { createPremadeEnvironment(idx); }
+    bool exportGodotKit(const std::string& outDir, const std::string& optionalBspPath = {});
     bool saveVmf(const std::string& path);
 
     // Persisted settings + UI scaling (the font atlas rebuild is done by the
@@ -197,7 +210,7 @@ private:
     // tool strip + outliner / map-check; Full = the dense Pro layout. Guided and
     // Standard share one friendly docking; only Full swaps the layout.
     enum class Mode { Guided, Standard, Full };
-    enum class Tool { Select, Block, Vertex, Clip, Texture, Entity };
+    enum class Tool { Select, PushPull, Block, Vertex, Clip, Texture, Entity, Wire };
     enum class SubMode { Vertex, Edge, Face };
 
     void buildAndUpload(const MeshBuildOptions& opts);
@@ -621,6 +634,100 @@ private:
     char compileMapName_[128] = {0};      // rename the output (blank = map name)
     char compileOutDir_[512] = {0};       // extra copy target (blank = tf/maps only)
     size_t compileLogSeen_ = 0;
+
+    // --- Pootis Builder 2.0: Canvas Studio, Push-Pull CAD, Context HUD & Wiring ---
+    void drawFloatingToolRail(ViewPanel& p, ImDrawList* dl);
+    void drawPipMinimap(ViewPanel& p, ImDrawList* dl);
+    void drawBottomKitDock(ViewPanel& p, ImDrawList* dl);
+    void swapPipView();
+    bool isMapSealed() const;
+    void quickSealMap();
+
+    void handlePushPullTool(ViewPanel& p);
+    void drawPushPullOverlay(ViewPanel& p, float aspect, ImDrawList* dl);
+    void drawScaleGhostOverlay(ViewPanel& p, float aspect, ImDrawList* dl);
+    int autoCarveOpening(const glm::vec3& mn, const glm::vec3& mx);
+    bool pushPullFace(map::SolidRef sr, int faceIdx, float delta);
+
+    void drawContextualSelectionHud(ViewPanel& p, float aspect, ImDrawList* dl);
+    void drawRadialPieMenu();
+
+    void handleWireTool(ViewPanel& p);
+    void drawFlowBar(ViewPanel& p, ImDrawList* dl);
+    void drawThemeStylerCards();
+    void applyBuiltinTheme(int idx);
+
+    bool showFloatingRail_ = true;
+    bool showPipOrtho_ = true;
+    int pipViewIdx_ = 1;                  // 1 = Top (X/Y), 2 = Front (Y/Z), 3 = Side (X/Z)
+    bool showBottomDock_ = false;
+    bool showScaleGhost_ = true;
+    int scaleGhostClass_ = 0;             // 0 = Heavy (83u), 1 = Scout (double-jump 72u)
+    bool showContextHud_ = true;
+    bool showFlowBar_ = true;
+    bool autoCarveDoors_ = true;
+
+    // Push/Pull tool state
+    map::SolidRef ppHoverSolid_{};
+    int ppHoverFace_ = -1;
+    bool ppDragging_ = false;
+    ViewPanel* ppView_ = nullptr;
+    map::SolidRef ppActiveSolid_{};
+    int ppActiveFace_ = -1;
+    map::Solid ppStartSolid_;
+    glm::vec3 ppStartOrigin_{0.0f};
+    glm::vec3 ppFaceNormal_{0.0f, 0.0f, 1.0f};
+    float ppCurrentDelta_ = 0.0f;
+
+    // Radial Pie Menu state (Q key)
+    bool showPieMenu_ = false;
+    ImVec2 pieMenuCenter_{0.0f, 0.0f};
+
+    // 3D Logic Wire tool state (L key)
+    int wireHoverEnt_ = -1;
+    int wireSourceEnt_ = -1;
+    bool wireDragging_ = false;
+    ImVec2 wireDragMouse_{0.0f, 0.0f};
+    // --- Mockup 3: TF2 In-Game HUD Creator UI (src/ui/WorkshopUi.cpp) ---
+    std::string detectTf2GameMode() const;
+    void createPremadeEnvironment(int envIdx);
+    void resizeSelectedBrushHeight(float deltaZ);
+    void resizeSelectedBrushFootprint(float deltaXY);
+    void drawWorkshopDockLayout(unsigned int dockId, const ImVec2& size);
+    void drawWorkshopTopBar();
+    void drawWorkshopSidebar();
+    void drawWorkshopReadinessBar();
+
+    // Intuitive 3D Click-Drag Painting + Instant F5 TF2 Walk Playtest
+    void handlePaintDrag(ViewPanel& p);
+    void drawPaintDragOverlay(ViewPanel& p, float aspect, ImDrawList* dl);
+    void toggleWalkPlaytest();
+    void updateWalkPlaytest(ViewPanel& p, float dt);
+    void drawWalkPlaytestHud(const ViewPanel& p, ImDrawList* dl);
+
+    bool useWorkshopUi_ = true;
+    int workshopStage_ = 0;               // 0 Build · 1 Gameplay · 2 Style · 3 Playtest
+    int workshopDetailTab_ = 0;           // 0 None · 1 Materials · 2 Props · 3 Terrain
+    bool showEnvPicker_ = false;
+    int activeThemeIdx_ = -1;
+    bool symmetryX_ = false;              // RED <-> BLU X=0 symmetry mirror
+    bool symmetryMirroring_ = false;      // re-entrancy guard during mirrored placement
+
+    // Click-drag 3D floor/wall paint state
+    bool paintDragging_ = false;
+    glm::vec3 paintStart_{0.0f};
+    glm::vec3 paintEnd_{0.0f};
+
+    // Instant F5 TF2 First-Person Walk/Jump Playtest state
+    bool walkPlaytest_ = false;
+    glm::vec3 walkPos_{0.0f, 0.0f, 16.0f};   // feet position in TF2 Hammer units
+    glm::vec3 walkVel_{0.0f};
+    bool walkOnGround_ = false;
+    int walkAirJumps_ = 0;
+    int walkClass_ = 0;                      // 0 Scout (400u/s + 2x jump), 1 Soldier, 2 Heavy
+    glm::vec3 walkSavedCamPos_{0.0f};
+    float walkSavedYaw_ = 0.0f;
+    float walkSavedPitch_ = 0.0f;
 };
 
 }  // namespace pb

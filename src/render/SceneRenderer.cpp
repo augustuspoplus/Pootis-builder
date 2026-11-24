@@ -16,10 +16,17 @@ layout(location=2) in vec2 aLmUV;
 layout(location=3) in vec2 aTexUV;
 layout(location=4) in vec3 aTint;
 uniform mat4 uMVP;
+uniform mat4 uLightVP;
+out vec3 vWorldPos;
+out vec3 vNormal;
+out vec4 vLightPos;
 out vec2 vLmUV;
 out vec2 vTexUV;
 out vec3 vTint;
 void main() {
+    vWorldPos = aPos;
+    vNormal = aNormal;
+    vLightPos = uLightVP * vec4(aPos, 1.0);
     vLmUV = aLmUV;
     vTexUV = aTexUV;
     vTint = aTint;
@@ -28,28 +35,89 @@ void main() {
 )";
 
 const char* kWorldFrag = R"(#version 330 core
+in vec3 vWorldPos;
+in vec3 vNormal;
+in vec4 vLightPos;
 in vec2 vLmUV;
 in vec2 vTexUV;
 in vec3 vTint;
 uniform sampler2D uLightmap;   // unit 0
 uniform sampler2D uAlbedo;     // unit 1
+uniform sampler2D uShadowMap;  // unit 2
 uniform float uExposure;
 uniform int uShadeMode;        // 0 tex+lm, 1 lightmap grid, 2 flat, 3 tex fullbright
 uniform int uAlphaTest;
 uniform float uConstAlpha;     // >=0 overrides output alpha (tool/trigger brushes)
+uniform int uDynamicLit;       // 1 = VMF live TF2 Half-Lambert + soft shadows
+uniform vec3 uSunDir;
+uniform vec3 uSunCol;
+uniform vec3 uSkyCol;
+uniform vec3 uGroundCol;
+uniform vec3 uFogCol;
+uniform vec3 uCamPos;
 out vec4 fragColor;
+
+float calcShadow(vec4 lp, vec3 n) {
+    vec3 p = lp.xyz / lp.w * 0.5 + 0.5;
+    if (p.z > 0.999 || p.x < 0.0 || p.x > 1.0 || p.y < 0.0 || p.y > 1.0) return 1.0;
+    float bias = max(0.0022 * (1.0 - dot(n, uSunDir)), 0.0006);
+    vec2 texel = 1.0 / vec2(textureSize(uShadowMap, 0));
+    float vis = 0.0;
+    for (int x = -1; x <= 1; ++x) {
+        for (int y = -1; y <= 1; ++y) {
+            float d = texture(uShadowMap, p.xy + vec2(x, y) * texel).r;
+            vis += (p.z - bias <= d) ? 1.0 : 0.0;
+        }
+    }
+    return vis / 9.0;
+}
+
 void main() {
     vec4 alb = texture(uAlbedo, vTexUV);
     if (uAlphaTest == 1 && alb.a < 0.5) discard;
     vec3 lm = texture(uLightmap, vLmUV).rgb;
+    vec3 n = normalize(vNormal);
     vec3 c;
-    if (uShadeMode == 0)      c = alb.rgb * lm * vTint;
-    else if (uShadeMode == 1) c = lm * vTint;
-    else if (uShadeMode == 2) c = vTint * 0.72 + 0.14;
-    else                      c = alb.rgb;
+    if (uShadeMode == 0) {
+        if (uDynamicLit == 1) {
+            // Authentic Valve TF2 Half-Lambert + warm/cool hemisphere + soft directional shadow
+            float ndl = dot(n, normalize(uSunDir));
+            float halfLambert = pow(ndl * 0.5 + 0.5, 1.85);
+            float sh = mix(0.42, 1.0, calcShadow(vLightPos, n));
+            vec3 hemi = mix(uGroundCol, uSkyCol, n.z * 0.5 + 0.5);
+            vec3 viewDir = normalize(uCamPos - vWorldPos);
+            float rim = pow(1.0 - max(dot(n, viewDir), 0.0), 3.2) * 0.14 * max(n.z * 0.5 + 0.5, 0.2);
+            vec3 lit = hemi * 0.55 + uSunCol * halfLambert * sh * 0.78 + uSkyCol * rim;
+            c = alb.rgb * vTint * lit;
+        } else {
+            // Compiled BSP with baked VRAD lightmap: keep crisp baked lighting + gentle depth cue
+            c = alb.rgb * lm * vTint;
+        }
+        // Subtle atmospheric horizon fog so distant structures read with depth
+        float dist = length(vWorldPos - uCamPos);
+        float fogT = clamp((dist - 1800.0) / 8500.0, 0.0, 0.42);
+        c = mix(c, uFogCol, fogT);
+    } else if (uShadeMode == 1) {
+        c = lm * vTint;
+    } else if (uShadeMode == 2) {
+        float hl = dot(n, normalize(uSunDir)) * 0.35 + 0.65;
+        c = (vTint * 0.72 + 0.14) * hl;
+    } else {
+        c = alb.rgb;
+    }
     float a = uConstAlpha >= 0.0 ? uConstAlpha : 1.0;
     fragColor = vec4(c * uExposure, a);
 }
+)";
+
+const char* kShadowVert = R"(#version 330 core
+layout(location=0) in vec3 aPos;
+uniform mat4 uLightVP;
+void main() { gl_Position = uLightVP * vec4(aPos, 1.0); }
+)";
+
+const char* kShadowFrag = R"(#version 330 core
+void main() {}
 )";
 
 const char* kLineVert = R"(#version 330 core
@@ -89,6 +157,10 @@ in vec3 vNear;
 in vec3 vFar;
 uniform vec3 uCamPos;
 uniform mat4 uVP;
+uniform vec3 uSkyHorizon;
+uniform vec3 uSkyZenith;
+uniform vec3 uSunDir;
+uniform vec3 uSunCol;
 out vec4 fragColor;
 
 float gridMask(vec2 c, float step) {
@@ -96,36 +168,86 @@ float gridMask(vec2 c, float step) {
     return 1.0 - min(min(g.x, g.y), 1.0);
 }
 void main() {
-    vec3 dir = vFar - vNear;
-    float t = -vNear.z / dir.z;
-    if (t <= 0.0) discard;                 // plane behind the eye
-    vec3 w = vNear + dir * t;              // world hit on z=0
+    vec3 dir = normalize(vFar - vNear);
+    float up = clamp(dir.z, 0.0, 1.0);
+    float down = clamp(-dir.z, 0.0, 1.0);
+    vec3 sky = mix(uSkyHorizon, uSkyZenith, pow(up, 0.55));
+    // Soft sun halo + disc in the 3D TF2 sky dome
+    float sunAmt = max(dot(dir, normalize(uSunDir)), 0.0);
+    sky += uSunCol * (pow(sunAmt, 14.0) * 0.35 + smoothstep(0.9982, 0.9994, sunAmt) * 1.15);
+    // Warm ground haze below horizon so there is never an ugly black void
+    vec3 lowerHaze = mix(uSkyHorizon * 0.72, uSkyHorizon * 0.36, pow(down, 0.65));
+    vec3 bgCol = (dir.z >= 0.0) ? sky : lowerHaze;
+
+    float t = -vNear.z / (vFar.z - vNear.z);
+    if (t <= 0.0) {
+        gl_FragDepth = 0.99999;
+        fragColor = vec4(bgCol, 1.0);
+        return;
+    }
+    vec3 w = vNear + (vFar - vNear) * t;   // world hit on z=0
 
     float dist = length(w.xy - uCamPos.xy);
-    float fade = clamp(1.0 - dist / 8192.0, 0.0, 1.0);
+    float fade = clamp(1.0 - dist / 6144.0, 0.0, 1.0);
     fade *= fade;
-    if (fade < 0.003) discard;
+    if (fade < 0.004) {
+        gl_FragDepth = 0.99999;
+        fragColor = vec4(bgCol, 1.0);
+        return;
+    }
 
-    float fine   = gridMask(w.xy, 64.0);   // 1 Hammer grid unit block
+    float fine   = gridMask(w.xy, 64.0);   // 1 TF2 grid block
     float coarse = gridMask(w.xy, 512.0);
-    vec3  col = mix(vec3(0.32), vec3(0.46), coarse);
-    float a = max(fine * 0.5, coarse * 0.9);
+    vec3  gcol = mix(vec3(0.45, 0.42, 0.38), vec3(0.70, 0.63, 0.54), coarse);
+    float ga = max(fine * 0.38, coarse * 0.75);
 
-    float axisW = fwidth(w.x) * 1.5;
-    if (abs(w.y) < axisW) { col = vec3(0.85, 0.24, 0.24); a = 1.0; }  // +X red
-    if (abs(w.x) < axisW) { col = vec3(0.36, 0.72, 0.30); a = 1.0; }  // +Y green
+    float axisW = fwidth(w.x) * 1.6;
+    if (abs(w.y) < axisW) { gcol = vec3(0.88, 0.28, 0.26); ga = 0.95; }  // +X RED
+    if (abs(w.x) < axisW) { gcol = vec3(0.32, 0.62, 0.88); ga = 0.95; }  // +Y BLU
 
-    // Depth so the grid is occluded by geometry in front of it.
+    // Blend subtle ground grid over atmospheric lower sky haze
     vec4 clip = uVP * vec4(w, 1.0);
     gl_FragDepth = (clip.z / clip.w) * 0.5 + 0.5;
-    fragColor = vec4(col, a * fade);
+    fragColor = vec4(mix(bgCol, gcol, ga * fade), 1.0);
 }
 )";
+
+struct BiomePalette {
+    glm::vec3 horizon;
+    glm::vec3 zenith;
+    glm::vec3 sunDir;
+    glm::vec3 sunCol;
+    glm::vec3 skyAmbient;
+    glm::vec3 groundAmbient;
+};
+
+BiomePalette biomePalette(int idx) {
+    static const BiomePalette kPal[] = {
+        // 0: Badlands Desert — warm TF2 golden canyon sky
+        {{0.74f, 0.56f, 0.40f}, {0.32f, 0.45f, 0.62f}, {0.55f, -0.52f, 0.65f},
+         {1.15f, 0.96f, 0.78f}, {0.72f, 0.78f, 0.92f}, {0.42f, 0.30f, 0.22f}},
+        // 1: Alpine Winter — crisp snow blue-white sky
+        {{0.72f, 0.80f, 0.88f}, {0.34f, 0.50f, 0.72f}, {0.42f, -0.60f, 0.68f},
+         {1.05f, 1.06f, 1.12f}, {0.78f, 0.86f, 0.98f}, {0.46f, 0.52f, 0.58f}},
+        // 2: Sawmill Forest — moody Pacific NW storm sky
+        {{0.44f, 0.48f, 0.49f}, {0.20f, 0.26f, 0.32f}, {0.38f, -0.58f, 0.72f},
+         {0.92f, 0.95f, 0.98f}, {0.62f, 0.70f, 0.76f}, {0.28f, 0.31f, 0.26f}},
+        // 3: Spytech Facility — dramatic twilight slate sky
+        {{0.30f, 0.36f, 0.46f}, {0.10f, 0.14f, 0.22f}, {0.50f, -0.45f, 0.74f},
+         {0.98f, 0.92f, 0.88f}, {0.52f, 0.64f, 0.82f}, {0.24f, 0.26f, 0.30f}},
+        // 4: Orange Dev Studio — warm neutral Mann Co. workshop sky
+        {{0.42f, 0.37f, 0.33f}, {0.18f, 0.22f, 0.28f}, {0.48f, -0.56f, 0.67f},
+         {1.08f, 0.98f, 0.86f}, {0.66f, 0.72f, 0.82f}, {0.34f, 0.29f, 0.25f}},
+    };
+    const int i = (idx >= 0 && idx < 5) ? idx : 4;
+    return kPal[i];
+}
 
 }  // namespace
 
 bool SceneRenderer::init() {
     if (!worldShader_.compile(kWorldVert, kWorldFrag, "world")) return false;
+    if (!shadowShader_.compile(kShadowVert, kShadowFrag, "shadow")) return false;
     if (!lineShader_.compile(kLineVert, kLineFrag, "line")) return false;
     if (!grid3dShader_.compile(kGrid3dVert, kGrid3dFrag, "grid3d")) return false;
     glGenVertexArrays(1, &grid3dVao_);
@@ -136,6 +258,24 @@ bool SceneRenderer::init() {
     glGenBuffers(1, &selVbo_);
     glGenVertexArrays(1, &hovVao_);
     glGenBuffers(1, &hovVbo_);
+
+    // 2048x2048 directional shadow depth texture
+    glGenFramebuffers(1, &shadowFbo_);
+    glGenTextures(1, &shadowTex_);
+    glBindTexture(GL_TEXTURE_2D, shadowTex_);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, 2048, 2048, 0,
+                 GL_DEPTH_COMPONENT, GL_FLOAT, nullptr);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
+    const float border[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+    glTexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_BORDER_COLOR, border);
+    glBindFramebuffer(GL_FRAMEBUFFER, shadowFbo_);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, shadowTex_, 0);
+    glDrawBuffer(GL_NONE);
+    glReadBuffer(GL_NONE);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
     return true;
 }
 
@@ -241,6 +381,10 @@ void SceneRenderer::upload(const WorldMesh& mesh, MaterialLibrary* materials) {
         wireCount_ = static_cast<GLsizei>(mesh.wireLines.size());
     }
 
+    hasBakedLightmap_ = (mesh.lightmapWidth > 8 && mesh.lightmapHeight > 8 &&
+                         !mesh.lightmapAtlas.empty());
+    shadowDirty_ = true;
+
     if (mesh.lightmapWidth > 0 && mesh.lightmapHeight > 0 &&
         !mesh.lightmapAtlas.empty()) {
         glGenTextures(1, &lightmapTex_);
@@ -255,28 +399,90 @@ void SceneRenderer::upload(const WorldMesh& mesh, MaterialLibrary* materials) {
     }
 }
 
-void SceneRenderer::drawSolid(const glm::mat4& vp, const RenderSettings& s) {
+void SceneRenderer::renderShadowMap() {
+    shadowDirty_ = false;
+    if (!shadowFbo_ || !worldVao_ || indexCount_ == 0) return;
+
+    const glm::vec3 center = 0.5f * (boundsMin_ + boundsMax_);
+    const glm::vec3 ext = glm::max(boundsMax_ - boundsMin_, glm::vec3(512.0f));
+    const float rad = glm::min(glm::max(glm::length(ext) * 0.55f, 640.0f), 4096.0f);
+    const glm::vec3 ldir = glm::normalize(sunDir_);
+    const glm::mat4 lview = glm::lookAt(center + ldir * (rad * 1.6f), center, glm::vec3(0, 0, 1));
+    const glm::mat4 lproj = glm::ortho(-rad, rad, -rad, rad, 16.0f, rad * 4.0f);
+    lightVp_ = lproj * lview;
+
+    GLint prevFbo = 0, prevVp[4];
+    glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prevFbo);
+    glGetIntegerv(GL_VIEWPORT, prevVp);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, shadowFbo_);
+    glViewport(0, 0, 2048, 2048);
+    glClear(GL_DEPTH_BUFFER_BIT);
+    glEnable(GL_DEPTH_TEST);
+    glDisable(GL_CULL_FACE);
+
+    shadowShader_.use();
+    shadowShader_.set("uLightVP", lightVp_);
+    glBindVertexArray(worldVao_);
+    for (size_t i = 0; i < batches_.size(); ++i) {
+        const auto& b = batches_[i];
+        // Skip skybox/trigger/tool brushes so the skybox shell doesn't shadow the whole map!
+        if (b.material.rfind("tools/", 0) == 0 ||
+            b.material.find("skybox") != std::string::npos ||
+            b.material.find("trigger") != std::string::npos)
+            continue;
+        const uint8_t alpha = i < batchAlpha_.size() ? batchAlpha_[i] : 0;
+        if (alpha == 2) continue;
+        glDrawElements(GL_TRIANGLES, b.indexCount, GL_UNSIGNED_INT,
+                       (void*)(b.firstIndex * sizeof(uint32_t)));
+    }
+    glBindVertexArray(0);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, static_cast<GLuint>(prevFbo));
+    glViewport(prevVp[0], prevVp[1], prevVp[2], prevVp[3]);
+}
+
+void SceneRenderer::drawSolid(const glm::mat4& vp, const glm::vec3& camPos,
+                              const RenderSettings& s) {
     if (!worldVao_ || indexCount_ == 0) return;
+    const BiomePalette pal = biomePalette(s.skyBiome);
+    sunDir_ = pal.sunDir;
+    const bool dynLit = s.dynamicLighting && !hasBakedLightmap_;
+    if (dynLit && shadowDirty_) renderShadowMap();
+
     worldShader_.use();
     worldShader_.set("uMVP", vp);
+    worldShader_.set("uLightVP", lightVp_);
     worldShader_.set("uExposure", s.exposure);
     worldShader_.set("uShadeMode", static_cast<int>(s.shadeMode));
+    worldShader_.set("uDynamicLit", dynLit ? 1 : 0);
+    worldShader_.set("uSunDir", glm::normalize(pal.sunDir));
+    worldShader_.set("uSunCol", pal.sunCol);
+    worldShader_.set("uSkyCol", pal.skyAmbient);
+    worldShader_.set("uGroundCol", pal.groundAmbient);
+    worldShader_.set("uFogCol", pal.horizon);
+    worldShader_.set("uCamPos", camPos);
     worldShader_.set("uLightmap", 0);
     worldShader_.set("uAlbedo", 1);
+    worldShader_.set("uShadowMap", 2);
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, lightmapTex_);
+    glActiveTexture(GL_TEXTURE2);
+    glBindTexture(GL_TEXTURE_2D, shadowTex_);
 
     glEnable(GL_DEPTH_TEST);
     glBindVertexArray(worldVao_);
     for (size_t i = 0; i < batches_.size(); ++i) {
         const auto& b = batches_[i];
+        // Hide tools/toolsskybox shell inside 3D editor so you see the real 3D sky dome!
+        if (b.material.find("toolsskybox") != std::string::npos) continue;
         const uint8_t alpha = i < batchAlpha_.size() ? batchAlpha_[i] : 0;
         glActiveTexture(GL_TEXTURE1);
         glBindTexture(GL_TEXTURE_2D, i < batchTex_.size() ? batchTex_[i] : 0);
         worldShader_.set("uAlphaTest", alpha == 1 ? 1 : 0);
         const bool tool = b.material.rfind("tools/", 0) == 0 ||
                           b.material.find("trigger") != std::string::npos;
-        worldShader_.set("uConstAlpha", alpha == 2 ? (tool ? 0.30f : 0.55f) : -1.0f);
+        worldShader_.set("uConstAlpha", alpha == 2 ? (tool ? 0.25f : 0.55f) : -1.0f);
         if (alpha == 2) {
             glEnable(GL_BLEND);
             glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
@@ -302,12 +508,18 @@ void SceneRenderer::drawWire(const glm::mat4& vp, const glm::vec3& color, float 
     glBindVertexArray(0);
 }
 
-void SceneRenderer::drawGroundGrid3D(const Camera& cam, float aspect) {
+void SceneRenderer::drawGroundGrid3D(const Camera& cam, float aspect,
+                                     const RenderSettings& s) {
     const glm::mat4 vp = cam.proj(aspect) * cam.view();
+    const BiomePalette pal = biomePalette(s.skyBiome);
     grid3dShader_.use();
     grid3dShader_.set("uInvVP", glm::inverse(vp));
     grid3dShader_.set("uVP", vp);
     grid3dShader_.set("uCamPos", cam.pos);
+    grid3dShader_.set("uSkyHorizon", pal.horizon);
+    grid3dShader_.set("uSkyZenith", pal.zenith);
+    grid3dShader_.set("uSunDir", glm::normalize(pal.sunDir));
+    grid3dShader_.set("uSunCol", pal.sunCol);
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     glEnable(GL_DEPTH_TEST);
@@ -546,14 +758,14 @@ void SceneRenderer::renderView(const Camera& cam, int pxW, int pxH,
     const glm::mat4 vp = cam.proj(aspect) * cam.view();
 
     if (s.showGrid && ortho) drawGrid(cam, vp, aspect);
-    if (s.showGrid && !ortho) drawGroundGrid3D(cam, aspect);
+    if (!ortho) drawGroundGrid3D(cam, aspect, s);
 
     if (ortho) {
         drawWire(vp, glm::vec3(0.82f, 0.85f, 0.90f), 0.95f);
         drawMarkers(vp, s, true);
     } else {
         if (!hasWorld()) drawOriginMarker(vp);   // empty map: show where 0,0,0 is
-        drawSolid(vp, s);
+        drawSolid(vp, cam.pos, s);
         if (s.wireOverlay) {
             glEnable(GL_BLEND);
             glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);

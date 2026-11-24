@@ -33,11 +33,14 @@ uniform int uHasTex;
 uniform vec3 uLight;
 out vec4 frag;
 void main() {
-    vec3 base = uHasTex == 1 ? texture(uTex, vUv).rgb : vec3(0.62);
-    float l = 0.32 + 0.68 * max(dot(normalize(vN), normalize(uLight)), 0.0);
-    // gentle rim so dark props still read against the dark cell
-    float rim = pow(1.0 - abs(normalize(vN).y), 3.0) * 0.15;
-    frag = vec4(base * l + rim, 1.0);
+    vec3 base = uHasTex == 1 ? texture(uTex, vUv).rgb : vec3(0.68);
+    vec3 n = normalize(vN);
+    float key = max(dot(n, normalize(uLight)), 0.0);
+    float fill = max(dot(n, normalize(vec3(-0.65, 0.45, 0.35))), 0.0);
+    float l = 0.44 + 0.68 * key + 0.24 * fill;
+    // crisp Valve backpack-style rim so dark props pop cleanly against HUD slots
+    float rim = pow(1.0 - abs(n.z), 2.5) * 0.16;
+    frag = vec4(clamp(base * l + vec3(rim), 0.0, 1.0), 1.0);
 }
 )";
 }  // namespace
@@ -118,19 +121,24 @@ GLuint ModelThumbnailer::render(const model::StudioModel& model,
     glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER,
                               depth_);
     glViewport(0, 0, size_, size_);
-    glClearColor(0.10f, 0.105f, 0.12f, 1.0f);
+    glDisable(GL_SCISSOR_TEST);
+    glDisable(GL_BLEND);
+    glDepthMask(GL_TRUE);
+    glDepthFunc(GL_LESS);
+    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    glClearColor(0.165f, 0.145f, 0.125f, 0.0f);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
     glEnable(GL_DEPTH_TEST);
     glDisable(GL_CULL_FACE);
 
-    // Frame the model's bounding sphere from a fixed 3/4 angle.
+    // Frame the model's bounding sphere from an elevated Valve TF2 backpack 3/4 hero angle.
     const glm::vec3 c = 0.5f * (model.boundsMin + model.boundsMax);
     const float radius =
         glm::max(0.5f * glm::length(model.boundsMax - model.boundsMin), 4.0f);
-    const glm::vec3 dir = glm::normalize(glm::vec3(0.75f, -1.0f, 0.55f));
-    const float fovy = glm::radians(38.0f);
-    const float dist = radius / std::tan(fovy * 0.5f) * 1.15f;
-    const glm::vec3 eye = c - dir * dist;
+    const glm::vec3 camDir = glm::normalize(glm::vec3(0.82f, -0.92f, 0.56f));
+    const float fovy = glm::radians(36.0f);
+    const float dist = radius / std::tan(fovy * 0.5f) * 1.12f;
+    const glm::vec3 eye = c + camDir * dist;
     const glm::mat4 view =
         glm::lookAt(eye, c, glm::vec3(0, 0, 1));
     const glm::mat4 proj =
@@ -140,7 +148,7 @@ GLuint ModelThumbnailer::render(const model::StudioModel& model,
 
     prog_.use();
     prog_.set("uMVP", mvp);
-    prog_.set("uLight", glm::vec3(0.4f, -0.7f, 0.9f));
+    prog_.set("uLight", glm::vec3(0.65f, -0.80f, 0.95f));
     prog_.set("uTex", 0);
     glActiveTexture(GL_TEXTURE0);
 

@@ -119,6 +119,12 @@ struct Options {
     bool netTest = false;
     bool aiPoolTest = false;
     bool greyboxTest = false;
+    bool pb2Test = false;
+    bool pushPullDemo = false;
+    bool pieMenuDemo = false;
+    int stage = -1;
+    int envIdx = -1;
+    std::string exportGodotDir;
     std::string saveVmfPath;
     int width = 1600;
     int height = 950;
@@ -186,6 +192,12 @@ Options parseArgs(int argc, char** argv) {
         else if (a == "--net-test") o.netTest = true;
         else if (a == "--ai-pool-test") o.aiPoolTest = true;
         else if (a == "--greybox-test") o.greyboxTest = true;
+        else if (a == "--pb2-test") o.pb2Test = true;
+        else if (a == "--pushpull-demo") o.pushPullDemo = true;
+        else if (a == "--piemenu-demo") o.pieMenuDemo = true;
+        else if (a == "--stage") o.stage = std::atoi(next("0").c_str());
+        else if (a == "--env") o.envIdx = std::atoi(next("0").c_str());
+        else if (a == "--export-godot-kit") o.exportGodotDir = next("");
         else if (a == "--save-vmf") o.saveVmfPath = next("");
         else if (a == "--view") {
             const std::string v = next("persp");
@@ -208,6 +220,7 @@ int runHeadlessScreenshot(const Options& opt, GLFWwindow* window, float uiScale)
     if (opt.noDecompile) editor.debugNoDecompile();
     if (!opt.mapPath.empty() && !editor.openMap(opt.mapPath))
         PB_WARN("map did not load; screenshot will show an empty scene");
+    if (opt.envIdx >= 0) editor.debugCreateEnv(opt.envIdx);
     if (opt.sampleMap) editor.debugBuildSampleMap();
     if (opt.undoTest) editor.debugUndoTest();
     if (!opt.importObjPath.empty()) editor.debugImportObj(opt.importObjPath);
@@ -224,6 +237,10 @@ int runHeadlessScreenshot(const Options& opt, GLFWwindow* window, float uiScale)
     if (opt.netTest) editor.debugNetTest();
     if (opt.aiPoolTest) editor.debugAiPoolTest();
     if (opt.greyboxTest) editor.debugGreyboxTest();
+    if (opt.pb2Test) editor.debugPb2Test();
+    if (opt.pushPullDemo) editor.debugPushPullDemo();
+    if (opt.pieMenuDemo) editor.debugPieMenuDemo();
+    if (opt.stage >= 0) editor.setWorkshopStage(opt.stage);
     if (!opt.placePrefabPath.empty()) editor.debugPlacePrefab(opt.placePrefabPath);
     if (opt.selectSolid >= 0) editor.debugSelectWorldSolid(opt.selectSolid);
     if (opt.selectEnt >= 0) editor.debugSelectEntity(opt.selectEnt);
@@ -326,7 +343,8 @@ int main(int argc, char** argv) {
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
-    if (headless || opt.dumpFgd) glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);
+    if (headless || opt.dumpFgd || !opt.exportGodotDir.empty())
+        glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);
 
     GLFWwindow* window = glfwCreateWindow(opt.width, opt.height, "Pootis Builder",
                                           nullptr, nullptr);
@@ -371,6 +389,22 @@ int main(int argc, char** argv) {
     pb::ui::applyStyle(uiScale);
     ImGui_ImplGlfw_InitForOpenGL(window, true);
     ImGui_ImplOpenGL3_Init("#version 330 core");
+
+    if (!opt.exportGodotDir.empty()) {
+        pb::Editor editor;
+        int rc = 2;
+        if (editor.init(window)) {
+            editor.exportGodotKit(opt.exportGodotDir, opt.mapPath);
+            editor.shutdown();
+            rc = 0;
+        }
+        ImGui_ImplOpenGL3_Shutdown();
+        ImGui_ImplGlfw_Shutdown();
+        ImGui::DestroyContext();
+        glfwDestroyWindow(window);
+        glfwTerminate();
+        return rc;
+    }
 
     if (opt.dumpFgd) {
         pb::Editor editor;

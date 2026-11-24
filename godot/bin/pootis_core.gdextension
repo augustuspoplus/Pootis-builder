@@ -1,0 +1,10 @@
+[configuration]
+
+entry_symbol = "pootis_core_library_init"
+compatibility_minimum = "4.5"
+reloadable = true
+
+[libraries]
+
+windows.debug.x86_64 = "res://bin/libpootis_core.dll"
+windows.release.x86_64 = "res://bin/libpootis_core.dll"

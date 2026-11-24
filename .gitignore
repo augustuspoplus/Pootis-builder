@@ -7,3 +7,19 @@ design-mockups/
 
 # runtime ImGui layout dump
 imgui.ini
+
+# Godot 4 + GDExtension build outputs
+core/build/
+core/third_party/godot-cpp/
+godot/.godot/
+godot/bin/*.dll
+godot/bin/*.so
+godot/bin/*.dylib
+
+# Runtime autosaves & generated test/benchmark outputs
+godot/maps/autosave/
+godot/maps/*_autosave_*.vmf
+godot/maps/pb_*_test.*
+docs/self_review_latest/
+godot/ai_benchmarks/
+

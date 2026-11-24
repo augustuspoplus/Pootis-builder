@@ -25,6 +25,8 @@ struct RenderSettings {
     bool showProps = true;
     bool showPointEntities = false;  // 3D view clutter; on for the 2D views
     bool wireOverlay = false;        // wire on top of solid (perspective)
+    bool dynamicLighting = true;     // Half-Lambert TF2 sun + soft shadows for VMF editing
+    int skyBiome = 0;                // 0 Badlands, 1 Winter, 2 Sawmill, 3 Spytech, 4 Orange Studio
     ShadeMode shadeMode = ShadeMode::TexturedLit;
     float exposure = 1.15f;
     glm::vec3 clearColor{0.055f, 0.06f, 0.07f};       // Hammer 3D: near-black
@@ -52,17 +54,27 @@ public:
 
 private:
     void buildGrid();
-    void drawSolid(const glm::mat4& vp, const RenderSettings& s);
+    void renderShadowMap();
+    void drawSolid(const glm::mat4& vp, const glm::vec3& camPos, const RenderSettings& s);
     void drawWire(const glm::mat4& vp, const glm::vec3& color, float alpha);
     void drawGrid(const Camera& cam, const glm::mat4& vp, float aspect);
-    void drawGroundGrid3D(const Camera& cam, float aspect);
+    void drawGroundGrid3D(const Camera& cam, float aspect, const RenderSettings& s);
     void drawOriginMarker(const glm::mat4& vp);
     void drawMarkers(const glm::mat4& vp, const RenderSettings& s, bool ortho);
 
     Shader worldShader_;
+    Shader shadowShader_;
     Shader lineShader_;
     Shader grid3dShader_;
     GLuint grid3dVao_ = 0;
+
+    // 2048x2048 PCF directional shadow map for grounded 3D TF2 sunlight.
+    GLuint shadowFbo_ = 0;
+    GLuint shadowTex_ = 0;
+    glm::mat4 lightVp_{1.0f};
+    glm::vec3 sunDir_{0.48f, -0.56f, 0.67f};
+    bool hasBakedLightmap_ = false;
+    bool shadowDirty_ = false;
 
     // World solid mesh.
     GLuint worldVao_ = 0, worldVbo_ = 0, worldEbo_ = 0;
