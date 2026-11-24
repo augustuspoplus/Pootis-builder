@@ -68,7 +68,12 @@ static func load_fonts(tf2_dir: String = "") -> Dictionary:
 
 	return {"heading": heading_font, "body": body_font, "mono": mono_font}
 
+static var _style_cache: Dictionary = {}
+
 static func make_button_style(bg: Color, border: Color, radius: int = 7, pad_x: int = 12, pad_y: int = 6) -> StyleBoxFlat:
+	var key := "%x|%x|%d|%d|%d" % [bg.to_rgba32(), border.to_rgba32(), radius, pad_x, pad_y]
+	if _style_cache.has(key):
+		return _style_cache[key]
 	var sb := StyleBoxFlat.new()
 	sb.bg_color = bg
 	sb.border_color = border
@@ -78,45 +83,58 @@ static func make_button_style(bg: Color, border: Color, radius: int = 7, pad_x: 
 	sb.content_margin_right = pad_x
 	sb.content_margin_top = pad_y
 	sb.content_margin_bottom = pad_y
+	_style_cache[key] = sb
 	return sb
 
 static func style_tf2_button(btn: Button, font: Font, font_size: int = 13, accent: bool = false, team: int = 0) -> void:
 	btn.focus_mode = Control.FOCUS_NONE
+	btn.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
 	var bg := COL_ACC if accent else (COL_RED if team == 2 else (COL_BLU if team == 3 else COL_SLOT_BG))
 	var bg_h := bg.lightened(0.14) if (accent or team > 0) else COL_SLOT_HOV
 	var bd := Color(1, 0.88, 0.65, 0.65) if accent else COL_SLOT_BD
 	btn.add_theme_stylebox_override("normal", make_button_style(bg, bd))
 	btn.add_theme_stylebox_override("hover", make_button_style(bg_h, COL_ACC))
-	btn.add_theme_stylebox_override("pressed", make_button_style(bg.darkened(0.1), COL_ACC))
+	btn.add_theme_stylebox_override("pressed", make_button_style(bg.darkened(0.12), COL_ACC))
 	if font != null:
 		btn.add_theme_font_override("font", font)
 	btn.add_theme_font_size_override("font_size", font_size)
 	btn.add_theme_color_override("font_color", Color(0.11, 0.08, 0.05) if accent else COL_TX)
 	btn.add_theme_color_override("font_hover_color", Color(0.08, 0.05, 0.02) if accent else Color.WHITE)
 
-## Smooth tactile spring hover/click micro-animation for dock cards and tool rail icons!
-static func attach_spring_anim(ctrl: Control, hover_scale: float = 1.07) -> void:
+## Snappy single-tween tactile hover animation (kills stale tweens so sweeping feels instant!)
+static func attach_spring_anim(ctrl: Control, hover_scale: float = 1.05) -> void:
 	if ctrl.has_meta("_spring_bound"):
 		return
 	ctrl.set_meta("_spring_bound", true)
+	ctrl.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
 	var update_piv := func() -> void:
 		ctrl.pivot_offset = ctrl.size * 0.5
 	ctrl.resized.connect(update_piv)
 	ctrl.call_deferred("set_pivot_offset", ctrl.custom_minimum_size * 0.5)
 	ctrl.mouse_entered.connect(func():
 		if not ctrl.is_inside_tree(): return
+		if ctrl.has_meta("_spring_tw"):
+			var old_tw: Variant = ctrl.get_meta("_spring_tw")
+			if old_tw is Tween and (old_tw as Tween).is_valid():
+				(old_tw as Tween).kill()
 		ctrl.pivot_offset = ctrl.size * 0.5
 		ctrl.z_index = 4
 		var tw := ctrl.create_tween()
-		tw.set_ease(Tween.EASE_OUT).set_trans(Tween.TRANS_BACK)
-		tw.tween_property(ctrl, "scale", Vector2(hover_scale, hover_scale), 0.14)
+		ctrl.set_meta("_spring_tw", tw)
+		tw.set_ease(Tween.EASE_OUT).set_trans(Tween.TRANS_CUBIC)
+		tw.tween_property(ctrl, "scale", Vector2(hover_scale, hover_scale), 0.075)
 	)
 	ctrl.mouse_exited.connect(func():
 		if not ctrl.is_inside_tree(): return
+		if ctrl.has_meta("_spring_tw"):
+			var old_tw: Variant = ctrl.get_meta("_spring_tw")
+			if old_tw is Tween and (old_tw as Tween).is_valid():
+				(old_tw as Tween).kill()
 		ctrl.z_index = 0
 		var tw := ctrl.create_tween()
+		ctrl.set_meta("_spring_tw", tw)
 		tw.set_ease(Tween.EASE_OUT).set_trans(Tween.TRANS_CUBIC)
-		tw.tween_property(ctrl, "scale", Vector2.ONE, 0.12)
+		tw.tween_property(ctrl, "scale", Vector2.ONE, 0.065)
 	)
 	if ctrl is BaseButton:
 		var bb := ctrl as BaseButton

@@ -27,6 +27,8 @@ var hover_box: MeshInstance3D
 
 var _ent_bounds: Dictionary = {} # ent_idx -> [bmin: Vector3, bmax: Vector3]
 var _ent_nodes: Dictionary = {}  # ent_idx -> Node3D (for O(1) incremental sync without rebuilding entire scene!)
+var _ent_sigs: Dictionary = {}   # ent_idx -> String signature for O(dirty) sync_all()!
+var _last_vis_sig: String = ""
 var _badge_tex_cache: Dictionary = {} # kind -> ImageTexture
 var _editor_only_nodes: Array[Node3D] = []
 var _light_nodes: Array[Light3D] = []
@@ -87,9 +89,8 @@ func clear_all() -> void:
 		track_mesh.mesh = null
 	_ent_bounds.clear()
 	_ent_nodes.clear()
+	_ent_sigs.clear()
 	_editor_only_nodes.clear()
-	_light_nodes.clear()
-	cart_visual_node = null
 	_light_nodes.clear()
 	cart_visual_node = null
 	selected_entity = -1
@@ -136,22 +137,63 @@ func set_playtest_mode(on: bool) -> void:
 	if hover_box != null:
 		hover_box.visible = not on
 
-func sync_all() -> void:
+func _entity_signature(e: Dictionary) -> String:
+	var pos: Vector3 = e["pos"]
+	var kv: Dictionary = e.get("kv", {})
+	var is_b: bool = bool(e.get("is_brush", false))
+	var bsig := ""
+	if is_b:
+		var b0: Vector3 = e.get("bounds_min", Vector3.ZERO)
+		var b1: Vector3 = e.get("bounds_max", Vector3.ZERO)
+		bsig = "%.2f,%.2f,%.2f|%.2f,%.2f,%.2f" % [b0.x, b0.y, b0.z, b1.x, b1.y, b1.z]
+	return "%s|%.2f,%.2f,%.2f|%s|%s|%s|%s|%s|%s|%s|%d" % [
+		str(e.get("classname", "")), pos.x, pos.y, pos.z, bsig,
+		str(kv.get("model", "")), str(kv.get("angles", "")), str(kv.get("skin", "")),
+		str(kv.get("TeamNum", "")), str(kv.get("_light", "")), str(kv.get("_cone", "")),
+		lighting_preview_mode
+	]
+
+## Smart O(dirty) EntityVisuals sync_all: skips untouched props/lights/triggers unless force=true!
+func sync_all(force: bool = false) -> void:
 	if doc == null:
 		return
-	if door_ctrl != null:
-		door_ctrl.clear()
-	for ch in ents_root.get_children():
-		ch.queue_free()
-	wires_mesh.mesh = null
-	track_mesh.mesh = null
-	_ent_bounds.clear()
-	_ent_nodes.clear()
-	_editor_only_nodes.clear()
-	_light_nodes.clear()
-	cart_visual_node = null
+	var vis_sig := "%d|%d|%d|%d|%d|%d" % [
+		1 if show_logic_markers else 0, 1 if show_volumes else 0,
+		1 if show_triggers else 0, 1 if show_props else 0,
+		1 if show_lights else 0, lighting_preview_mode
+	]
+	if vis_sig != _last_vis_sig:
+		force = true
+		_last_vis_sig = vis_sig
 
 	var ents: Array = doc.get_entities()
+	if force or _ent_nodes.is_empty():
+		if door_ctrl != null:
+			door_ctrl.clear()
+		for ch in ents_root.get_children():
+			ch.queue_free()
+		_ent_bounds.clear()
+		_ent_nodes.clear()
+		_ent_sigs.clear()
+		_editor_only_nodes.clear()
+		_light_nodes.clear()
+		cart_visual_node = null
+	else:
+		# Remove any deleted tail indices
+		var stale: Array = []
+		for k in _ent_nodes.keys():
+			if int(k) >= ents.size():
+				stale.append(k)
+		for k in stale:
+			var n: Node = _ent_nodes[k]
+			if is_instance_valid(n):
+				n.queue_free()
+			_ent_nodes.erase(k)
+			_ent_sigs.erase(k)
+			_ent_bounds.erase(k)
+
+	wires_mesh.mesh = null
+	track_mesh.mesh = null
 	var target_pos := {} # targetname -> Vector3
 	for i in range(ents.size()):
 		var e: Dictionary = ents[i]
@@ -162,9 +204,19 @@ func sync_all() -> void:
 		var tname: String = str(kv.get("targetname", ""))
 		if not tname.is_empty():
 			target_pos[tname] = pos
+		var sig := _entity_signature(e)
+		if not force and _ent_sigs.get(i, "") == sig and _ent_nodes.has(i) and is_instance_valid(_ent_nodes[i]):
+			continue
+		if _ent_nodes.has(i):
+			var old_n: Node = _ent_nodes[i]
+			if is_instance_valid(old_n):
+				old_n.queue_free()
+			_ent_nodes.erase(i)
+		_ent_bounds.erase(i)
 		var spawned := _spawn_entity_node(i, e, pos)
 		if spawned != null:
 			_ent_nodes[i] = spawned
+		_ent_sigs[i] = sig
 
 	_rebuild_wires_and_tracks(ents, target_pos)
 	if selected_entity >= ents.size():
@@ -194,6 +246,7 @@ func sync_entity(idx: int, animate_pop: bool = false) -> void:
 	var spawned := _spawn_entity_node(idx, e, pos)
 	if spawned != null:
 		_ent_nodes[idx] = spawned
+		_ent_sigs[idx] = _entity_signature(e)
 		if animate_pop and is_inside_tree():
 			spawned.scale = Vector3(0.05, 0.05, 0.05)
 			var tw := create_tween()

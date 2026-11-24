@@ -15,13 +15,20 @@ var icon_resolution: int = 160     # 128 / 160 / 192
 var show_2d_split: bool = false
 
 # Tab 2: Viewport & 3D Views (Hammer Dialog 199)
-var msaa_level: int = 2            # 0=Off, 1=2x, 2=4x
-var shadow_quality: int = 2        # 0=Low, 1=Med, 2=High
-var ssao_enabled: bool = true
+var msaa_level: int = 1            # 0=Off, 1=2x (snappy default), 2=4x
+var shadow_quality: int = 1        # 0=Low, 1=Med (snappy default), 2=High
+var ssao_enabled: bool = false     # Off by default for crisp 120+ FPS responsiveness!
 var camera_fov: float = 75.0
 var back_clip_m: float = 650.0
 var prop_ambient_boost: float = 0.28
 var show_skybox_bg: bool = true
+
+# AI Map Co-Pilot (Hybrid: Gemini API + Local Ollama + Instant Offline Planner!)
+var ai_provider: String = "auto"   # auto | gemini | ollama | offline
+var gemini_api_key: String = ""
+var gemini_model: String = "gemini-2.5-flash"
+var ollama_url: String = "http://127.0.0.1:11434"
+var ollama_model: String = "llama3.2"
 
 # Tab 3: 2D Views & Grid (Hammer Dialog 179)
 var default_grid_u: int = 32
@@ -103,6 +110,12 @@ func load_from_disk() -> void:
 	autosave_minutes = clampi(int(cf.get_value("autosave", "autosave_minutes", autosave_minutes)), 1, 30)
 	backup_count = clampi(int(cf.get_value("autosave", "backup_count", backup_count)), 1, 30)
 
+	ai_provider = str(cf.get_value("ai", "ai_provider", ai_provider))
+	gemini_api_key = str(cf.get_value("ai", "gemini_api_key", gemini_api_key))
+	gemini_model = str(cf.get_value("ai", "gemini_model", gemini_model))
+	ollama_url = str(cf.get_value("ai", "ollama_url", ollama_url))
+	ollama_model = str(cf.get_value("ai", "ollama_model", ollama_model))
+
 func save_to_disk() -> void:
 	var cf := ConfigFile.new()
 	cf.set_value("display", "auto_dpi", auto_dpi)
@@ -147,6 +160,12 @@ func save_to_disk() -> void:
 	cf.set_value("autosave", "autosave_enabled", autosave_enabled)
 	cf.set_value("autosave", "autosave_minutes", autosave_minutes)
 	cf.set_value("autosave", "backup_count", backup_count)
+
+	cf.set_value("ai", "ai_provider", ai_provider)
+	cf.set_value("ai", "gemini_api_key", gemini_api_key)
+	cf.set_value("ai", "gemini_model", gemini_model)
+	cf.set_value("ai", "ollama_url", ollama_url)
+	cf.set_value("ai", "ollama_model", ollama_model)
 	cf.save(CFG_PATH)
 
 func reset_defaults() -> void:

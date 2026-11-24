@@ -259,10 +259,16 @@ static func get_prop_box(cat_id: String) -> Dictionary:
 			return box
 	return {}
 
+static var _prop_box_cache: Dictionary = {}
+static var _ent_box_cache: Dictionary = {}
+
 static func get_props_for_box(core: Object, cat_id: String, search_filter: String = "", limit: int = 48) -> Array[Dictionary]:
+	var fl := search_filter.to_lower().strip_edges()
+	var cache_key := "%s|%s|%d" % [cat_id, fl, limit]
+	if fl.is_empty() and _prop_box_cache.has(cache_key):
+		return _prop_box_cache[cache_key]
 	var results: Array[Dictionary] = []
 	var seen: Dictionary = {}
-	var fl := search_filter.to_lower().strip_edges()
 	var box := get_prop_box(cat_id)
 	if box.is_empty():
 		return results
@@ -311,6 +317,8 @@ static func get_props_for_box(core: Object, cat_id: String, search_filter: Strin
 				seen[mp] = true
 				var pretty := mp.get_file().get_basename().replace("_", " ").capitalize()
 				results.append({"name": pretty, "mdl": mp})
+	if fl.is_empty() and core != null:
+		_prop_box_cache[cache_key] = results
 	return results
 
 # ==============================================================================
@@ -587,6 +595,9 @@ static func get_entity_icon_spec(cls: String) -> Dictionary:
 	return {"type": "vec", "key": "relay"}
 
 static func get_entities_for_box(core: Object, cat_id: String, limit: int = 36) -> Array[Dictionary]:
+	var cache_key := "%s|%d" % [cat_id, limit]
+	if _ent_box_cache.has(cache_key):
+		return _ent_box_cache[cache_key]
 	var results: Array[Dictionary] = []
 	var seen: Dictionary = {}
 	var box := get_entity_box(cat_id)
@@ -620,6 +631,8 @@ static func get_entities_for_box(core: Object, cat_id: String, limit: int = 36) 
 				"icon": ic["key"],
 				"preset": "",
 			})
+	if core != null:
+		_ent_box_cache[cache_key] = results
 	return results
 
 ## Computes human-friendly TF2 Map Coach health & gameplay balance diagnostics!

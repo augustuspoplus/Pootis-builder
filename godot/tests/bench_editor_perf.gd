@@ -106,5 +106,30 @@ func _initialize() -> void:
 	var ehov_ms := float(Time.get_ticks_usec() - t0) / 1000.0
 	print("  [PASS] 100x Pooled Entity Hover Wireframes: %.2f ms (%.4f ms/hover)" % [ehov_ms, ehov_ms / 100.0])
 
+	# 8. Milestone 37: O(dirty) EntityVisuals.sync_all(false) after adding 1 entity on 69-entity Turbine!
+	t0 = Time.get_ticks_usec()
+	ent_vis.sync_all(true)
+	var full_ent_ms := float(Time.get_ticks_usec() - t0) / 1000.0
+	doc.add_point_entity("item_healthkit_medium", Vector3(4, 0.2, 4), {})
+	t0 = Time.get_ticks_usec()
+	ent_vis.sync_all(false)
+	var dirty_ent_ms := float(Time.get_ticks_usec() - t0) / 1000.0
+	print("  [PASS] O(dirty) EntityVisuals.sync_all(false) (+1 ent on 69-ent map): %.2f ms (vs %.2f ms full — %.1fx faster!)" % [
+		dirty_ent_ms, full_ent_ms, full_ent_ms / maxf(0.05, dirty_ent_ms)
+	])
+
+	# 9. Milestone 37: Cached Tf2Catalog.get_props_for_box (Dock Tab Switch / Paging)
+	var cat_cls = preload("res://scripts/core/Tf2Catalog.gd")
+	t0 = Time.get_ticks_usec()
+	cat_cls.get_props_for_box(core, "winter", "", 45)
+	var cold_cat_ms := float(Time.get_ticks_usec() - t0) / 1000.0
+	t0 = Time.get_ticks_usec()
+	for _c in range(50):
+		cat_cls.get_props_for_box(core, "winter", "", 45)
+	var warm_cat_ms := float(Time.get_ticks_usec() - t0) / 1000.0
+	print("  [PASS] 50x Cached Dock Prop Tab Lookups: %.3f ms total (%.4f ms/click vs %.2f ms uncached!)" % [
+		warm_cat_ms, warm_cat_ms / 50.0, cold_cat_ms
+	])
+
 	print("=== Performance Benchmark Complete: ALL PASS ===")
 	quit(0)

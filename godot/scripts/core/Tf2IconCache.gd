@@ -45,6 +45,7 @@ const ICON_SPECS := {
 var assets: RefCounted
 var icon_size: int = 160
 var paused: bool = false         # Paused during camera orbit/drag so editor FPS stays rock-solid!
+var _ui_yield_frames: int = 0    # Yield icon baking briefly right after UI clicks so clicks feel instant!
 var _cache: Dictionary = {}      # key -> Texture2D
 var _failed: Dictionary = {}     # key -> true (negative cache so missing models are never re-queued!)
 var _queue: Array = []           # [{key, mdl, rot, pitch}]
@@ -120,8 +121,14 @@ func queue_model_icon(key: String, mdl_path: String, rot_deg: Vector3 = Vector3(
 	_queued_keys[key] = true
 	_queue.append({"key": key, "mdl": mdl_path, "rot": rot_deg, "pitch": pitch_deg})
 
+func yield_for_ui(frames: int = 4) -> void:
+	_ui_yield_frames = maxi(_ui_yield_frames, frames)
+
 func _process(_delta: float) -> void:
 	if assets == null or _studio.is_empty():
+		return
+	if _ui_yield_frames > 0:
+		_ui_yield_frames -= 1
 		return
 	if paused and _active_job.is_empty():
 		return

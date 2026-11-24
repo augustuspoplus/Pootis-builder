@@ -176,7 +176,7 @@ var _prop_active_cat: String = ""
 var _prop_favorites_only: bool = false
 var _prop_favorites: Array[String] = []
 var _dock_build_cat: String = "shapes"
-var _dock_prop_cat: String = "winter"
+var _dock_prop_cat: String = "_tools"
 var _dock_prop_page: int = 0
 var _dock_ent_cat: String = "_mode"
 var _dock_ent_page: int = 0
@@ -218,6 +218,9 @@ var _pending_hover_pos: Vector2 = Vector2.ZERO
 var _last_status_top: String = ""
 var _last_status_bot: String = ""
 var _last_status_sealed: int = -1
+var _cached_sealed: bool = true
+var _sealed_check_accum: float = 0.0
+var _last_solid_count_chk: int = -1
 var top_bar: Control
 var context_bar_wrap: CenterContainer
 var context_bar: PanelContainer
@@ -3662,9 +3665,11 @@ func _is_typing_in_ui() -> bool:
 	return f is LineEdit or f is TextEdit
 
 func _input(event: InputEvent) -> void:
-	# Always catch mouse button RELEASES & ESC focus release even over HUD panels so drags/mouselook NEVER get stuck!
+	# Yield background 3D thumbnail baking briefly on UI clicks so menus/buttons respond instantaneously!
 	if event is InputEventMouseButton:
 		var mb := event as InputEventMouseButton
+		if mb.pressed and icon_cache != null:
+			icon_cache.yield_for_ui(4)
 		if not mb.pressed:
 			if mb.button_index == MOUSE_BUTTON_RIGHT:
 				_rmb_looking = false
@@ -4340,35 +4345,60 @@ func _do_terrain_sculpt_stroke() -> void:
 func _update_hover(screen_pos: Vector2) -> void:
 	if viewing_bsp:
 		hover_valid = false; ghost_mesh.visible = false; brush_ring.visible = false
-		map_sync.set_hover(-1); ent_vis.set_hover(-1); overlay_2d.queue_redraw(); return
+		map_sync.set_hover(-1); ent_vis.set_hover(-1); return
 
 	var ro := editor_cam.project_ray_origin(screen_pos); var rd := editor_cam.project_ray_normal(screen_pos)
 
-	# Always compute live 3D cursor XYZ coordinate (fixes frozen XYZ: 0u, 0u, 0u in Select/Paint/Vertex!)
+	# Single C++ raycast per hover frame (previously raycasted TWICE on every mouse motion!)
+	var rc_face: Dictionary = doc.raycast_face(ro, rd)
+	var hit_f: bool = rc_face.get("hit", false)
+
 	if active_tool == "terrain":
-		# Smooth UNSNAPPED direct raycast onto displaced cliffs & terrain surfaces!
-		var rc_t: Dictionary = doc.raycast_face(ro, rd)
-		if rc_t.get("hit", false):
-			hover_valid = true; hover_pos = rc_t["hit_pos"]
+		if hit_f:
+			hover_valid = true; hover_pos = rc_face["hit_pos"]
 		else:
-			var pt := _project_screen_to_surface(screen_pos)
-			hover_valid = pt["valid"]; hover_pos = pt["pos"]
+			hover_valid = absf(rd.y) > 0.001 and (-ro.y / rd.y) > 0.1 and (-ro.y / rd.y) < 350.0
+			if hover_valid:
+				var hp0 := ro + rd * (-ro.y / rd.y)
+				hover_pos = Vector3(snappedf(hp0.x, grid_m), 0.0, snappedf(hp0.z, grid_m))
 	elif _drawing_box:
-		# Lock drag-box cursor strictly to the starting horizontal Y plane (no jumpy wall/roof spikes!)
 		hover_valid = true; hover_pos = _ray_plane_point(screen_pos, _box_start.y)
 	else:
-		var proj := _project_screen_to_surface(screen_pos)
-		hover_valid = proj["valid"]; hover_pos = proj["pos"]
+		if hit_f:
+			var hp: Vector3 = rc_face["hit_pos"]
+			hover_valid = true
+			hover_pos = Vector3(snappedf(hp.x, grid_m), snappedf(hp.y, 0.25), snappedf(hp.z, grid_m))
+		elif absf(rd.y) > 0.001:
+			var t := -ro.y / rd.y
+			if t > 0.1 and t < 350.0:
+				var hp := ro + rd * t
+				hover_valid = true
+				hover_pos = Vector3(snappedf(hp.x, grid_m), 0.0, snappedf(hp.z, grid_m))
+			else:
+				hover_valid = false
+		else:
+			hover_valid = false
+
+	var need_2d_redraw: bool = _marquee_active or active_tool == "wire_io" or (selected_solid >= 0 and settings.show_jump_callouts)
 
 	if active_tool == "select" or active_tool == "paint" or active_tool == "materials" or active_tool == "vertex":
-		var pick := _pick_scene_object(ro, rd)
-		if pick["kind"] == "entity" and active_tool == "select":
-			ent_vis.set_hover(pick["idx"]); map_sync.set_hover(-1)
-		elif pick["kind"] == "solid":
-			map_sync.set_hover(pick["idx"]); ent_vis.set_hover(-1)
+		if active_tool == "select":
+			var rc_ent: Dictionary = doc.raycast_entity(ro, rd)
+			var hit_e: bool = rc_ent.get("hit", false)
+			if hit_e and (not hit_f or float(rc_ent["t"]) <= float(rc_face["t"]) + 0.65):
+				ent_vis.set_hover(int(rc_ent["entity_idx"])); map_sync.set_hover(-1)
+			elif hit_f:
+				map_sync.set_hover(int(rc_face["solid_idx"])); ent_vis.set_hover(-1)
+			else:
+				map_sync.set_hover(-1); ent_vis.set_hover(-1)
+		elif hit_f:
+			map_sync.set_hover(int(rc_face["solid_idx"])); ent_vis.set_hover(-1)
 		else:
 			map_sync.set_hover(-1); ent_vis.set_hover(-1)
-		ghost_mesh.visible = false; brush_ring.visible = false; overlay_2d.queue_redraw(); return
+		ghost_mesh.visible = false; brush_ring.visible = false
+		if need_2d_redraw:
+			overlay_2d.queue_redraw()
+		return
 	else:
 		map_sync.set_hover(-1); ent_vis.set_hover(-1)
 
@@ -4440,7 +4470,9 @@ func _process(delta: float) -> void:
 	if _hover_dirty:
 		_hover_dirty = false
 		if not _rmb_looking and not _mmb_panning and stage != Stage.PLAYTEST and not welcome_panel.visible and not settings_modal.visible and (command_palette == null or not command_palette.visible):
-			_update_hover(_pending_hover_pos)
+			var hov_ctrl: Control = get_viewport().gui_get_hovered_control()
+			if hov_ctrl == null or hov_ctrl == overlay_2d:
+				_update_hover(_pending_hover_pos)
 	if _toast_ttl > 0.0:
 		_toast_ttl -= delta
 		if _toast_ttl <= 0.0: toast_panel.visible = false
@@ -4489,7 +4521,13 @@ func _process(delta: float) -> void:
 		if top_t != _last_status_top:
 			_last_status_top = top_t
 			status_lbl_top.text = top_t
-		var is_sealed: bool = doc.is_map_sealed()
+		_sealed_check_accum += delta
+		var sc_now: int = doc.get_solid_count()
+		if sc_now != _last_solid_count_chk or _sealed_check_accum >= 0.75:
+			_last_solid_count_chk = sc_now
+			_sealed_check_accum = 0.0
+			_cached_sealed = doc.is_map_sealed()
+		var is_sealed: bool = _cached_sealed
 		var sealed_s := "SEALED" if is_sealed else "UNSEALED"
 		var eff_pct := int(round(get_window().content_scale_factor * 100.0)) if get_window() != null else int(round(settings.ui_scale * 100.0))
 		var bot_t := "%s | %d FPS | UI %d%%" % [sealed_s, Engine.get_frames_per_second(), eff_pct]
